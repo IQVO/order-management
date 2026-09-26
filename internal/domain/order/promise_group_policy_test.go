@@ -322,3 +322,39 @@ func TestPromiseGroups_PartialShipment_MultipleFallbackLines(t *testing.T) {
 		}
 	}
 }
+
+// TestPromiseGroups_PartialShipment_ScheduleUnknown_FallsBackPerLine
+// covers the per-line search path against a Schedule source that IS
+// wired but cannot answer for the site (NextCutoffs known=false — a
+// cold cache): every line's promiseForLines must fall back to
+// LeadTime, never panic, and still group lines that share an instant.
+func TestPromiseGroups_PartialShipment_ScheduleUnknown_FallsBackPerLine(t *testing.T) {
+	now := testTime()
+	o := newAllocatedOrder(t, pq("pick", 1), pq("singles", 1))
+
+	policy := order.PromisePolicy{
+		// No entry for "site-1": the schedule adapter is wired but has
+		// nothing to say — the cold-cache case at startup.
+		Schedule:   &fakeSchedule{windowsBySite: map[string][]order.CPTWindow{}},
+		Capability: &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 1 * time.Hour}},
+		Fallback:   order.NewLeadTimePolicy(12*time.Hour, nil),
+		SiteId:     "site-1",
+	}
+
+	groups, ok := policy.PromiseGroups(now, o)
+	if !ok {
+		t.Fatal("expected ok=true even with an unknown schedule (fallback)")
+	}
+	if len(groups) != 1 {
+		t.Fatalf("groups = %d, want 1 (both lines share the fallback instant): %+v", len(groups), groups)
+	}
+	if len(groups[0].LineNos) != 2 {
+		t.Fatalf("LineNos = %v, want [1 2]", groups[0].LineNos)
+	}
+	if groups[0].Promise.Basis != order.BasisLeadTime {
+		t.Fatalf("Basis = %q, want LeadTime", groups[0].Promise.Basis)
+	}
+	if !groups[0].Promise.CutoffAt.Equal(now.Add(12 * time.Hour)) {
+		t.Fatalf("cutoff = %v, want now+12h", groups[0].Promise.CutoffAt)
+	}
+}
