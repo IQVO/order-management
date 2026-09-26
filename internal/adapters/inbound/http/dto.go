@@ -3,12 +3,32 @@
 // boundary — every response below is a DTO owned by this package.
 package http
 
-import "time"
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"time"
+)
 
 type receiveOrderLineRequest struct {
 	SKU      string `json:"sku"`
 	Quantity int    `json:"quantity"`
 	GiftWrap bool   `json:"giftWrap,omitempty"`
+}
+
+// UnmarshalJSON rejects an explicit JSON null on any of this DTO's known
+// fields. None of them is nullable in apis/openapi.yaml, and Go's decoder
+// would otherwise silently coerce `null` to the field's zero value (a null
+// giftWrap or quantity quietly becoming false/0) — accepting a
+// schema-violating request as if it were valid. The error surfaces through
+// decodeJSON's existing 400 problem+json path, exactly like any other
+// type-mismatched body.
+func (r *receiveOrderLineRequest) UnmarshalJSON(data []byte) error {
+	if err := rejectNullFields(data, "sku", "quantity", "giftWrap"); err != nil {
+		return err
+	}
+	type alias receiveOrderLineRequest
+	return json.Unmarshal(data, (*alias)(r))
 }
 
 type receiveOrderRequest struct {
@@ -28,6 +48,43 @@ type receiveOrderRequest struct {
 	// which is the answer a caller holding a fill-or-kill commitment
 	// actually needs.
 	RequiredShipBy *time.Time `json:"requiredShipBy,omitempty"`
+}
+
+// UnmarshalJSON rejects an explicit JSON null on any of this DTO's known
+// fields, mirroring receiveOrderLineRequest's rationale: none of them is
+// nullable in apis/openapi.yaml, and the zero-value coercion Go would
+// otherwise perform (a null allowPartialShipment silently becoming false,
+// a null releaseOnAllocation being indistinguishable from an omitted one)
+// accepts schema-violating requests as if they were valid.
+func (r *receiveOrderRequest) UnmarshalJSON(data []byte) error {
+	if err := rejectNullFields(data, "lines", "allowPartialShipment", "releaseOnAllocation", "requiredShipBy"); err != nil {
+		return err
+	}
+	type alias receiveOrderRequest
+	return json.Unmarshal(data, (*alias)(r))
+}
+
+// rejectNullFields reports an error when any of the named fields is
+// explicitly JSON null in the raw object. It is deliberately limited to
+// the DTO's own known fields: apis/openapi.yaml leaves
+// additionalProperties at its default (allowed), so unknown properties —
+// even null-valued ones — must stay ignored, and a null-valued UNKNOWN
+// field must not fail decoding.
+func rejectNullFields(data []byte, fields ...string) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	for _, f := range fields {
+		v, ok := raw[f]
+		if !ok {
+			continue
+		}
+		if bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+			return fmt.Errorf("json: field %q must not be null", f)
+		}
+	}
+	return nil
 }
 
 type orderLineResponse struct {

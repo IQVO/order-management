@@ -429,7 +429,12 @@ components:
 
   responses:
     BadRequest:
-      description: The request body or path parameter is malformed or invalid.
+      description: >
+        The request body or path parameter is malformed or invalid —
+        including a body whose JSON is syntactically valid but
+        shape-invalid: an explicitly null value on a non-nullable field
+        (e.g. `"giftWrap": null`) is rejected here rather than silently
+        coerced to that field's zero value.
       content:
         application/problem+json:
           schema:
@@ -588,9 +593,13 @@ components:
           example: SKU-1
         quantity:
           type: integer
-          format: int32
+          format: int64
           minimum: 1
-          description: Quantity ordered. Must be greater than zero.
+          description: >
+            Quantity ordered. Must be greater than zero. int64, not int32:
+            the service is a 64-bit Go binary whose quantity validation is
+            "greater than zero" only, so it genuinely accepts (and echoes)
+            quantities beyond 2^31-1 — this spec documents that reality.
           example: 2
         giftWrap:
           type: boolean
@@ -646,7 +655,10 @@ components:
           example: SKU-1
         quantity:
           type: integer
-          format: int32
+          format: int64
+          description: >
+            Quantity ordered, as received (and validated) at intake — see
+            the matching int64 note on ReceiveOrderLineRequest.quantity.
           example: 2
         pathId:
           type: string
