@@ -1,0 +1,5 @@
+inventory-storage	check_availability
+inventory-storage	get_bin_occupancy
+inventory-storage	revoke_reservation
+order-management	get_order
+order-management	get_promise_health
