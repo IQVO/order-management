@@ -28,6 +28,7 @@ import (
 	"github.com/claudioed/order-management/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/order-management/internal/application/ports"
 	"github.com/claudioed/order-management/internal/application/usecases"
+	"github.com/claudioed/order-management/internal/bootretry"
 	"github.com/claudioed/order-management/internal/domain/order"
 	"github.com/claudioed/order-management/internal/domain/shared"
 )
@@ -294,7 +295,7 @@ func buildRepoAdapters(ctx context.Context, databaseURL, migrationsPath, eventPu
 		orders = memory.NewOrderRepo()
 		defaultPub = events.NewLogPublisher(logger)
 	} else {
-		if err := retry(ctx, logger, "run migrations", func() error {
+		if err := bootretry.Retry(ctx, logger, "run migrations", func() error {
 			return postgres.RunMigrations(databaseURL, migrationsPath)
 		}); err != nil {
 			return nil, nil, nil, noop, err
@@ -309,7 +310,7 @@ func buildRepoAdapters(ctx context.Context, databaseURL, migrationsPath, eventPu
 		// request rather than at boot — turning a misconfigured
 		// deployment into an intermittent 500 instead of a refusal to
 		// start.
-		if err := retry(ctx, logger, "ping database", func() error {
+		if err := bootretry.Retry(ctx, logger, "ping database", func() error {
 			return pool.Ping(ctx)
 		}); err != nil {
 			pool.Close()

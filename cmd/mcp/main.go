@@ -32,6 +32,7 @@ import (
 	"github.com/claudioed/order-management/internal/analytics/report"
 	"github.com/claudioed/order-management/internal/application/ports"
 	"github.com/claudioed/order-management/internal/application/usecases"
+	"github.com/claudioed/order-management/internal/bootretry"
 )
 
 func main() {
@@ -120,6 +121,17 @@ func run() error {
 // database -- exactly as cmd/order/main.go's buildRepoAdapters does
 // (minus the event publisher, which only the write-side OLTP binary
 // needs).
+//
+// Both the migration run and the post-open ping are RETRIED with
+// exponential backoff (mirroring cmd/order/main.go and
+// network-fulfillment PR #7): in this cluster every injected pod's first
+// outbound TCP dial is reset ~10s after the app starts (Istio native
+// sidecars run as an init container with restartPolicy=Always, so
+// holdApplicationUntilProxyStarts is a no-op). A single attempt turns
+// that known, transient condition into CrashLoopBackOff. The retry does
+// NOT weaken the fail-closed rule: after the ~31s budget is exhausted
+// this still returns the real underlying error and the caller still
+// refuses to boot.
 func buildAdapters(ctx context.Context, databaseURL, migrationsPath string, logger *slog.Logger) (ports.OrderRepo, func(), error) {
 	noop := func() {}
 
@@ -128,12 +140,23 @@ func buildAdapters(ctx context.Context, databaseURL, migrationsPath string, logg
 		return memory.NewOrderRepo(), noop, nil
 	}
 
-	if err := postgres.RunMigrations(databaseURL, migrationsPath); err != nil {
+	if err := bootretry.Retry(ctx, logger, "run migrations", func() error {
+		return postgres.RunMigrations(databaseURL, migrationsPath)
+	}); err != nil {
 		return nil, noop, err
 	}
 
 	pool, err := postgres.NewPool(ctx, databaseURL)
 	if err != nil {
+		return nil, noop, err
+	}
+	// NewPool/ParseConfig do not themselves establish a connection, so
+	// without this the first real failure would surface inside a
+	// request rather than at boot.
+	if err := bootretry.Retry(ctx, logger, "ping database", func() error {
+		return pool.Ping(ctx)
+	}); err != nil {
+		pool.Close()
 		return nil, noop, err
 	}
 
@@ -151,6 +174,15 @@ func buildAdapters(ctx context.Context, databaseURL, migrationsPath string, logg
 // PromiseHealthStore/PromiseHealthRow shapes at this wiring boundary — see
 // inboundmcp.PromiseHealthStore's doc comment for why that indirection
 // exists (ADR-0008's MCP adapter dependency fitness rule).
+//
+// Deliberately NOT wrapped in bootretry.Retry, unlike buildAdapters
+// above: this path already degrades to an in-memory store on ANY error
+// rather than failing boot, and NewReadOnlyPool/ParseConfig never
+// dials the network itself (no boot-time ping is performed here) — the
+// first real dial happens lazily on the first get_promise_health call,
+// outside the ~10s post-start window the retry budget exists to survive.
+// There is therefore no boot-time first-dial-reset bug on this path to
+// fix; adding a retry here would only delay the graceful fallback.
 func buildPromiseHealthStore(ctx context.Context, logger *slog.Logger) (inboundmcp.PromiseHealthStore, func()) {
 	noop := func() {}
 
