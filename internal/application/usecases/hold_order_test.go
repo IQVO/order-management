@@ -295,3 +295,32 @@ func contains(xs []string, want string) bool {
 	}
 	return false
 }
+
+// TestReleaseHeldOrder_FindError_ReturnsError proves an infrastructure
+// failure reading the order back propagates to the caller rather than
+// being mistaken for not-found or a successful no-op.
+func TestReleaseHeldOrder_FindError_ReturnsError(t *testing.T) {
+	f, o := heldOrderFixture(t)
+	uc := &usecases.ReleaseHeldOrder{
+		Orders: &findFails{inner: f.orders, findErr: errBoom}, Events: f.events, Clock: f.clock,
+		Inventory: f.inventory, Promise: f.promise,
+	}
+	if _, err := uc.Execute(context.Background(), o.ID()); !errors.Is(err, errBoom) {
+		t.Fatalf("Execute err = %v, want errBoom", err)
+	}
+}
+
+// TestReleaseHeldOrder_ReleaseFlowFailure_ReturnsError proves a failure
+// inside the shared release flow (the save of the released state) is
+// surfaced as the use case's own error — releasing is an explicit
+// commitment, not a best-effort side effect.
+func TestReleaseHeldOrder_ReleaseFlowFailure_ReturnsError(t *testing.T) {
+	f, o := heldOrderFixture(t)
+	uc := &usecases.ReleaseHeldOrder{
+		Orders: &failingRepo{inner: f.orders, saveErr: errBoom}, Events: f.events, Clock: f.clock,
+		Inventory: f.inventory, Promise: f.promise,
+	}
+	if _, err := uc.Execute(context.Background(), o.ID()); !errors.Is(err, errBoom) {
+		t.Fatalf("Execute err = %v, want errBoom", err)
+	}
+}

@@ -534,3 +534,118 @@ func TestGetOrder(t *testing.T) {
 		}
 	})
 }
+
+// TestReceiveOrder_Metrics_AcceptedOnSuccess proves the accepted
+// outcome is recorded exactly once when intake genuinely succeeds —
+// even though the implicit best-effort allocation attempt runs inside
+// the same call afterwards.
+func TestReceiveOrder_Metrics_AcceptedOnSuccess(t *testing.T) {
+	f := newFixture()
+	metrics := &countingMetrics{}
+	uc := f.receiveOrder()
+	uc.Metrics = metrics
+
+	o, err := uc.Execute(context.Background(), []usecases.NewLine{line("SKU-1", 1, "pick")}, false)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if o == nil {
+		t.Fatal("Execute returned no order")
+	}
+	if metrics.accepted != 1 || metrics.rejected != 0 {
+		t.Fatalf("accepted=%d rejected=%d, want accepted=1 rejected=0", metrics.accepted, metrics.rejected)
+	}
+}
+
+// TestReceiveOrder_Metrics_RejectedOnEveryRejectionPath proves every
+// caller-facing input rejection records the rejected outcome exactly
+// once, and — per ADR 0020 §4 — that a rejected intake leaves no trace.
+func TestReceiveOrder_Metrics_RejectedOnEveryRejectionPath(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(t *testing.T, uc *usecases.ReceiveOrder)
+	}{
+		{
+			name: "contradictory hold intent (held + partial shipment)",
+			run: func(t *testing.T, uc *usecases.ReceiveOrder) {
+				_, err := uc.ExecuteHeld(context.Background(), []usecases.NewLine{line("SKU-1", 1, "pick")}, true, false)
+				if !errors.Is(err, order.ErrHeldOrderMustBeShipComplete) {
+					t.Fatalf("ExecuteHeld err = %v, want ErrHeldOrderMustBeShipComplete", err)
+				}
+			},
+		},
+		{
+			name: "invalid line (zero quantity)",
+			run: func(t *testing.T, uc *usecases.ReceiveOrder) {
+				_, err := uc.Execute(context.Background(), []usecases.NewLine{line("SKU-1", 0, "pick")}, false)
+				if err == nil {
+					t.Fatal("Execute err = nil, want a line-validation error")
+				}
+			},
+		},
+		{
+			name: "no active path admits the line",
+			run: func(t *testing.T, uc *usecases.ReceiveOrder) {
+				// Empty PathID forces PathSelectionPolicy.Select over
+				// the catalogue's active candidates. Script a singles
+				// path capped at one unit and ask for two: the only
+				// candidate exists but its Eligibility rejects the
+				// line, which is the true ok=false case (an empty
+				// catalogue fails OPEN to DefaultPathId instead).
+				maxOne := 1
+				uc.Catalogue = &fakeCatalogue{
+					inactive:    map[shared.PathId]bool{},
+					eligibility: map[shared.PathId]shared.Eligibility{"singles": shared.NewEligibility(&maxOne, nil, nil, false)},
+				}
+				_, err := uc.Execute(context.Background(), []usecases.NewLine{line("SKU-1", 2, "")}, false)
+				if !errors.Is(err, shared.ErrLineIneligibleForResolvedPath) {
+					t.Fatalf("Execute err = %v, want ErrLineIneligibleForResolvedPath", err)
+				}
+			},
+		},
+		{
+			name: "explicit path is not active in the catalogue",
+			run: func(t *testing.T, uc *usecases.ReceiveOrder) {
+				uc.Catalogue = &fakeCatalogue{inactive: map[shared.PathId]bool{"pick": true}}
+				_, err := uc.Execute(context.Background(), []usecases.NewLine{line("SKU-1", 1, "pick")}, false)
+				if !errors.Is(err, shared.ErrUnknownProcessPath) {
+					t.Fatalf("Execute err = %v, want ErrUnknownProcessPath", err)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFixture()
+			metrics := &countingMetrics{}
+			uc := f.receiveOrder()
+			uc.Metrics = metrics
+
+			tt.run(t, uc)
+
+			if metrics.accepted != 0 || metrics.rejected != 1 {
+				t.Fatalf("accepted=%d rejected=%d, want accepted=0 rejected=1", metrics.accepted, metrics.rejected)
+			}
+			// A rejected intake must leave no trace: no order persisted,
+			// no event published.
+			if n := len(f.events.names()); n != 0 {
+				t.Fatalf("events = %v, want none for a rejected intake", f.events.names())
+			}
+		})
+	}
+}
+
+// TestReceiveOrder_Metrics_NilIsNotInstrumented_NeverPanics pins the
+// optional-port convention: a nil Metrics means "not instrumented", and
+// both the accepted and rejected recording guards must tolerate it.
+func TestReceiveOrder_Metrics_NilIsNotInstrumented_NeverPanics(t *testing.T) {
+	f := newFixture()
+	uc := f.receiveOrder() // Metrics deliberately left nil
+
+	if _, err := uc.Execute(context.Background(), []usecases.NewLine{line("SKU-1", 1, "pick")}, false); err != nil {
+		t.Fatalf("Execute (accepted path, nil Metrics): %v", err)
+	}
+	if _, err := uc.Execute(context.Background(), []usecases.NewLine{line("SKU-1", 0, "pick")}, false); err == nil {
+		t.Fatal("Execute (rejected path): err = nil, want a validation error")
+	}
+}

@@ -1,9 +1,14 @@
 package usecases_test
 
 import (
+	"context"
+	"errors"
+	"strings"
 	"testing"
 
+	"github.com/claudioed/order-management/internal/application/ports"
 	"github.com/claudioed/order-management/internal/application/usecases"
+	"github.com/claudioed/order-management/internal/domain/order"
 	"github.com/claudioed/order-management/internal/domain/shared"
 )
 
@@ -104,4 +109,88 @@ func TestParseWorkUnitID_MalformedInputNeverPanicsAndReportsNotOK(t *testing.T) 
 			}
 		})
 	}
+}
+
+// findOrderAllocationPartiallyFailed returns the first
+// shared.OrderAllocationPartiallyFailed event published to p, failing
+// the test if none was published.
+func findOrderAllocationPartiallyFailed(t *testing.T, p *recordingPublisher) shared.OrderAllocationPartiallyFailed {
+	t.Helper()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, e := range p.events {
+		if f, ok := e.(shared.OrderAllocationPartiallyFailed); ok {
+			return f
+		}
+	}
+	t.Fatalf("no OrderAllocationPartiallyFailed event was published; events = %v", p.names())
+	return shared.OrderAllocationPartiallyFailed{}
+}
+
+// TestReceiveOrder_BackorderEventPublishFailure_IntakeStillSucceeds
+// covers allocateLines' OrderLineBackordered publish-error branch: when
+// the 409 business fact cannot be published, allocation fails closed
+// and ReceiveOrder's implicit attempt is best-effort — intake itself
+// already succeeded, so the caller still gets an order with no error.
+// (The in-memory repo stores the aggregate pointer, so the post-failure
+// re-read observes the unpersisted in-memory Backordered mutation; the
+// durable contract — nil error, OrderReceived as the only fact ever
+// published, no panic — is what this pins.)
+func TestReceiveOrder_BackorderEventPublishFailure_IntakeStillSucceeds(t *testing.T) {
+	f := newFixture()
+	f.inventory.reserveErrBySKU["SKU-1"] = ports.ErrInsufficientStock
+	// OrderReceived (publish #1) must still fire; the backorder fact
+	// (publish #2) fails.
+	f.events.failAfter(1, errBoom)
+
+	o, err := f.receiveOrder().Execute(context.Background(), []usecases.NewLine{line("SKU-1", 1, "pick")}, false)
+	if err != nil {
+		t.Fatalf("Execute: %v, want nil — ReceiveOrder must not fail because its implicit allocation attempt did", err)
+	}
+	if o == nil || o.ID() == "" {
+		t.Fatal("Execute must still return the received order")
+	}
+	assertEventNames(t, f.events, "OrderReceived")
+}
+
+// TestReceiveOrder_HardFailureCauseIsTruncatedToMaxCauseRunes proves
+// truncateCause's bound end to end: a verbose upstream error surfacing
+// through OrderAllocationPartiallyFailed.Cause is capped at
+// maxCauseLen runes plus the ellipsis marker, so the visibility event
+// can never carry an unbounded payload.
+func TestReceiveOrder_HardFailureCauseIsTruncatedToMaxCauseRunes(t *testing.T) {
+	f := newFixture()
+	longCause := strings.Repeat("x", 600)
+	f.inventory.reserveErrBySKU["SKU-2"] = errors.New(longCause)
+
+	o, err := f.receiveOrder().Execute(context.Background(), []usecases.NewLine{
+		line("SKU-1", 1, "pick"),
+		line("SKU-2", 1, "pick"),
+	}, false)
+	if err != nil {
+		t.Fatalf("Execute: %v, want nil (best-effort allocation)", err)
+	}
+
+	failed := findOrderAllocationPartiallyFailed(t, f.events)
+	if failed.AllocatedLines != 1 || failed.RemainingLines != 1 {
+		t.Fatalf("AllocatedLines/RemainingLines = %d/%d, want 1/1", failed.AllocatedLines, failed.RemainingLines)
+	}
+	cause := []rune(failed.Cause)
+	if len(cause) != 501 {
+		t.Fatalf("Cause length = %d runes, want 501 (500 + ellipsis)", len(cause))
+	}
+	if string(cause[:500]) != longCause[:500] {
+		t.Fatal("Cause prefix does not match the original error's first 500 runes")
+	}
+	if string(cause[500]) != "…" {
+		t.Fatalf("Cause suffix = %q, want the truncation ellipsis", string(cause[500]))
+	}
+
+	// The genuinely reserved line is persisted, not stranded: the
+	// re-read order the caller got shows the partial progress.
+	stored, err := f.orders.FindByID(context.Background(), o.ID())
+	if err != nil || stored == nil {
+		t.Fatalf("FindByID: %v, %v", stored, err)
+	}
+	assertLineStatuses(t, stored, order.LineAllocated, order.LinePending)
 }

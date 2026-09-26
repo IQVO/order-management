@@ -3,6 +3,7 @@ package usecases_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -282,3 +283,184 @@ func findOrderRepromised(t *testing.T, p *recordingPublisher) shared.OrderReprom
 }
 
 var _ ports.RepromiseProcessedEvents = (*fakeProcessedEvents)(nil)
+
+// recordingSlogHandler captures every record a use case emits so a test
+// can assert the fail-soft paths log a Warn with their event_id —
+// "logged and treated as a no-op" is RepromiseOrder's stated contract.
+type recordingSlogHandler struct {
+	records []slog.Record
+}
+
+func (h *recordingSlogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *recordingSlogHandler) Handle(_ context.Context, r slog.Record) error {
+	h.records = append(h.records, r)
+	return nil
+}
+
+func (h *recordingSlogHandler) WithAttrs(attrs []slog.Attr) slog.Handler { return h }
+
+func (h *recordingSlogHandler) WithGroup(name string) slog.Handler { return h }
+
+// warnMessages returns the message of every WARN-level record captured.
+func (h *recordingSlogHandler) warnMessages() []string {
+	out := make([]string, 0, len(h.records))
+	for _, r := range h.records {
+		if r.Level == slog.LevelWarn {
+			out = append(out, r.Message)
+		}
+	}
+	return out
+}
+
+// TestRepromiseOrder_FailSoftPaths_LogWarn pins the fail-soft contract:
+// every "signal doesn't map to a live, promotable line" condition is
+// logged at WARN (with the event_id) and returned as nil, never as an
+// error. A nil Logger stays silent — that case is exercised by every
+// other test in this file.
+func TestRepromiseOrder_FailSoftPaths_LogWarn(t *testing.T) {
+	tests := []struct {
+		name    string
+		setUp   func(t *testing.T, rf *repromiseFixture) usecases.RepromiseOrderRequest
+		wantMsg string
+	}{
+		{
+			name: "event already processed",
+			setUp: func(t *testing.T, rf *repromiseFixture) usecases.RepromiseOrderRequest {
+				o := rf.f.mustReceive(t, false, line("SKU-1", 1, "pick"))
+				rf.processed.alreadyProcessed["evt-1"] = true
+				return usecases.RepromiseOrderRequest{SourceEventId: "evt-1", OrderId: o.ID(), LineNo: 1}
+			},
+			wantMsg: "repromise: event already processed, skipping",
+		},
+		{
+			name: "order not found",
+			setUp: func(t *testing.T, rf *repromiseFixture) usecases.RepromiseOrderRequest {
+				return usecases.RepromiseOrderRequest{SourceEventId: "evt-1", OrderId: "ord-nope", LineNo: 1}
+			},
+			wantMsg: "repromise: order not found, skipping",
+		},
+		{
+			name: "line not in any current group",
+			setUp: func(t *testing.T, rf *repromiseFixture) usecases.RepromiseOrderRequest {
+				o := rf.f.mustReceive(t, false, line("SKU-1", 1, "pick"))
+				return usecases.RepromiseOrderRequest{SourceEventId: "evt-1", OrderId: o.ID(), LineNo: 99}
+			},
+			wantMsg: "repromise: line not found in any current promise group, skipping",
+		},
+		{
+			name: "no fresh promise available",
+			setUp: func(t *testing.T, rf *repromiseFixture) usecases.RepromiseOrderRequest {
+				// An order with no allocated line anymore but a stale
+				// persisted breakdown covering it — the only shape under
+				// which PromiseGroups' own ok=false is reachable.
+				l, err := order.NewOrderLine(1, "SKU-1", 1, "pick", false)
+				if err != nil {
+					t.Fatalf("NewOrderLine: %v", err)
+				}
+				o, err := order.New("ord-no-fresh", []*order.OrderLine{l}, false)
+				if err != nil {
+					t.Fatalf("order.New: %v", err)
+				}
+				o.SetPromiseGroups([]order.PromiseGroup{{
+					LineNos: []int{1},
+					Promise: order.Promise{CutoffAt: rf.f.clock.Now().Add(24 * time.Hour), Basis: order.BasisLeadTime},
+				}})
+				if err := rf.f.orders.Save(context.Background(), o); err != nil {
+					t.Fatalf("Save: %v", err)
+				}
+				return usecases.RepromiseOrderRequest{SourceEventId: "evt-1", OrderId: o.ID(), LineNo: 1}
+			},
+			wantMsg: "repromise: no fresh promise available for this order, skipping",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rf := newRepromiseFixture()
+			handler := &recordingSlogHandler{}
+			req := tt.setUp(t, rf)
+			uc := rf.repromiseOrder(order.PromisePolicy{Fallback: order.NewLeadTimePolicy(1*time.Hour, nil)})
+			uc.Logger = slog.New(handler)
+
+			if err := uc.Execute(context.Background(), req); err != nil {
+				t.Fatalf("Execute: %v, want nil (fail-soft)", err)
+			}
+			msgs := handler.warnMessages()
+			if len(msgs) != 1 || msgs[0] != tt.wantMsg {
+				t.Fatalf("warn messages = %v, want exactly [%q]", msgs, tt.wantMsg)
+			}
+			assertEventNames(t, rf.f.events) // fail-soft never publishes
+		})
+	}
+}
+
+// TestRepromiseOrder_LineMissingFromFreshGroups_NoOp covers the branch
+// where the line IS in a persisted group but a recompute no longer
+// produces a group for it (here: the line was cancelled after the
+// breakdown was persisted, so PromiseGroups covers only the surviving
+// allocated line). That is a stale-signal fact: logged, no-op, no event.
+func TestRepromiseOrder_LineMissingFromFreshGroups_NoOp(t *testing.T) {
+	rf := newRepromiseFixture()
+	handler := &recordingSlogHandler{}
+
+	// Partial-shipment order: line 1 allocated, line 2 cancelled, with a
+	// stale persisted breakdown that still covers BOTH lines (built
+	// directly, mirroring the only way this state arises: the breakdown
+	// predates the cancellation).
+	allocated := order.RehydrateOrderLine(1, "SKU-1", 1, "pick", false, order.LineAllocated, nil)
+	cancelled := order.RehydrateOrderLine(2, "SKU-2", 1, "pick", false, order.LineCancelled, nil)
+	o, err := order.New("ord-stale-groups", []*order.OrderLine{allocated, cancelled}, true)
+	if err != nil {
+		t.Fatalf("order.New: %v", err)
+	}
+	o.SetPromiseGroups([]order.PromiseGroup{{
+		LineNos: []int{1, 2},
+		Promise: order.Promise{CutoffAt: rf.f.clock.Now().Add(24 * time.Hour), Basis: order.BasisLeadTime},
+	}})
+	if err := rf.f.orders.Save(context.Background(), o); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	uc := rf.repromiseOrder(order.PromisePolicy{Fallback: order.NewLeadTimePolicy(1*time.Hour, nil)})
+	uc.Logger = slog.New(handler)
+	err = uc.Execute(context.Background(), usecases.RepromiseOrderRequest{
+		SourceEventId: "evt-1", OrderId: o.ID(), LineNo: 2, Reason: "TaskCPTMissed",
+	})
+	if err != nil {
+		t.Fatalf("Execute: %v, want nil (fail-soft)", err)
+	}
+
+	msgs := handler.warnMessages()
+	if len(msgs) != 1 || msgs[0] != "repromise: line not found in the freshly recomputed promise groups, skipping" {
+		t.Fatalf("warn messages = %v, want the fresh-groups skip message", msgs)
+	}
+	assertEventNames(t, rf.f.events)
+
+	// The stale breakdown is untouched.
+	stored, err := rf.f.orders.FindByID(context.Background(), o.ID())
+	if err != nil || stored == nil {
+		t.Fatalf("FindByID: %v, %v", stored, err)
+	}
+	groups := stored.PromiseGroups()
+	if len(groups) != 1 || len(groups[0].LineNos) != 2 {
+		t.Fatalf("stored groups = %+v, want the original single 2-line group untouched", groups)
+	}
+}
+
+// TestRepromiseOrder_FindError_ReturnsError proves an infrastructure
+// failure reading the order back is a genuine error (commit-and-skip
+// applies), never a fail-soft no-op.
+func TestRepromiseOrder_FindError_ReturnsError(t *testing.T) {
+	rf := newRepromiseFixture()
+	uc := &usecases.RepromiseOrder{
+		Orders:  &findFails{inner: rf.f.orders, findErr: errBoom},
+		Promise: order.PromisePolicy{Fallback: order.NewLeadTimePolicy(1*time.Hour, nil)},
+		Events:  rf.f.events, Clock: rf.f.clock, Processed: rf.processed,
+	}
+	err := uc.Execute(context.Background(), usecases.RepromiseOrderRequest{
+		SourceEventId: "evt-1", OrderId: "ord-1", LineNo: 1, Reason: "TaskCPTMissed",
+	})
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("Execute err = %v, want errBoom", err)
+	}
+}
