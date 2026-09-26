@@ -299,6 +299,49 @@ func TestPostOrders(t *testing.T) {
 			t.Fatalf("problem.type = %q", p.Type)
 		}
 	})
+
+	t.Run("error: null on an order-level typed field is rejected, not coerced to its zero value", func(t *testing.T) {
+		// apis/openapi.yaml declares allowPartialShipment as a boolean,
+		// not a nullable one: a null must not be silently decoded into
+		// `false` and accepted (the property-based contract suite found
+		// exactly that drift).
+		e := newTestEnv(t)
+		rec := e.do(t, http.MethodPost, "/orders", `{"lines":[{"sku":"SKU-1","quantity":1}],"allowPartialShipment":null}`)
+		p := assertProblem(t, rec, http.StatusBadRequest)
+		if !strings.HasSuffix(p.Type, "malformed-request-body") {
+			t.Fatalf("problem.type = %q", p.Type)
+		}
+	})
+
+	t.Run("error: null on a line-level typed field is rejected, not coerced to its zero value", func(t *testing.T) {
+		e := newTestEnv(t)
+		rec := e.do(t, http.MethodPost, "/orders", `{"lines":[{"sku":"SKU-1","quantity":1,"giftWrap":null}]}`)
+		p := assertProblem(t, rec, http.StatusBadRequest)
+		if !strings.HasSuffix(p.Type, "malformed-request-body") {
+			t.Fatalf("problem.type = %q", p.Type)
+		}
+	})
+
+	t.Run("error: null releaseOnAllocation is rejected rather than read as the default true", func(t *testing.T) {
+		e := newTestEnv(t)
+		rec := e.do(t, http.MethodPost, "/orders", `{"lines":[{"sku":"SKU-1","quantity":1}],"releaseOnAllocation":null}`)
+		p := assertProblem(t, rec, http.StatusBadRequest)
+		if !strings.HasSuffix(p.Type, "malformed-request-body") {
+			t.Fatalf("problem.type = %q", p.Type)
+		}
+	})
+
+	t.Run("success: a null-valued UNKNOWN field is ignored, not rejected", func(t *testing.T) {
+		// additionalProperties is at its default (allowed), so a caller
+		// sending junk extra properties — even null-valued ones — must
+		// not fail decoding. This pins the boundary the null rejection
+		// deliberately stops at.
+		e := newTestEnv(t)
+		rec := e.do(t, http.MethodPost, "/orders", `{"totally-unknown":null,"lines":[{"sku":"SKU-1","quantity":1}]}`)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want 201 (body: %s)", rec.Code, rec.Body.String())
+		}
+	})
 }
 
 func TestGetOrder(t *testing.T) {
