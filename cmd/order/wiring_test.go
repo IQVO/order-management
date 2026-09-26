@@ -2,11 +2,17 @@ package main
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+func quietLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 // TestBuildRepoAdapters_RetriesTheDatabaseNotJustOnce is the test that
 // would have caught the original defect this repo's boot path had: a

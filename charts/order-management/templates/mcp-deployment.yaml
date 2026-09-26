@@ -70,6 +70,21 @@ spec:
           # Probing the raw socket is a safe interim signal that the process
           # is up and listening; switch to httpGet /healthz once cmd/mcp
           # grows that route in a follow-up.
+          #
+          # startupProbe mirrors the shared boot-time-dial-retry fix
+          # (order-management's Postgres migrations+ping now retry through
+          # internal/bootretry with a ~31s budget instead of crash-looping
+          # on the first-dial reset Istio's native sidecars cause): give
+          # kubelet a longer, separate probe budget during boot so it
+          # doesn't SIGTERM the pod mid-backoff, matching the primary
+          # deployment's startupProbe (periodSeconds: 2, failureThreshold:
+          # 30 -> a 60s budget, comfortably past the retry helper's own
+          # ~31s worst case).
+          startupProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
           livenessProbe:
             tcpSocket:
               port: http

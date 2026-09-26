@@ -1,4 +1,4 @@
-package main
+package bootretry
 
 import (
 	"context"
@@ -15,13 +15,13 @@ func quietLogger() *slog.Logger {
 
 var errDial = errors.New("read: connection reset by peer")
 
-// The case this exists for: this fleet's Istio native sidecars reset every
-// pod's FIRST outbound dial ~10s after the app starts. One attempt turns
-// that transient into CrashLoopBackOff (confirmed live on order-management,
-// 129 restarts).
+// The case this package exists for: this fleet's Istio native sidecars
+// reset every pod's FIRST outbound dial ~10s after the app starts. One
+// attempt turns that transient into CrashLoopBackOff (confirmed live on
+// order-management, 129 restarts).
 func TestRetry_SurvivesAFirstAttemptFailure(t *testing.T) {
 	attempts := 0
-	err := retryWithDelay(context.Background(), quietLogger(), "run migrations", time.Millisecond, func() error {
+	err := RetryWithDelay(context.Background(), quietLogger(), "run migrations", time.Millisecond, func() error {
 		attempts++
 		if attempts == 1 {
 			return errDial
@@ -29,7 +29,7 @@ func TestRetry_SurvivesAFirstAttemptFailure(t *testing.T) {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("retry returned %v, want nil after a recoverable first failure", err)
+		t.Fatalf("Retry returned %v, want nil after a recoverable first failure", err)
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts = %d, want 2", attempts)
@@ -39,11 +39,11 @@ func TestRetry_SurvivesAFirstAttemptFailure(t *testing.T) {
 func TestRetry_SucceedsFirstTimeWithoutWaiting(t *testing.T) {
 	attempts := 0
 	start := time.Now()
-	if err := retry(context.Background(), quietLogger(), "ping", func() error {
+	if err := Retry(context.Background(), quietLogger(), "ping", func() error {
 		attempts++
 		return nil
 	}); err != nil {
-		t.Fatalf("retry: %v", err)
+		t.Fatalf("Retry: %v", err)
 	}
 	if attempts != 1 {
 		t.Fatalf("attempts = %d, want 1", attempts)
@@ -56,23 +56,23 @@ func TestRetry_SucceedsFirstTimeWithoutWaiting(t *testing.T) {
 }
 
 // The retry must NOT weaken the fail-closed rule: a genuinely unreachable
-// database still refuses to boot, and still reports its real cause rather
-// than a generic timeout.
+// dependency still refuses to boot, and still reports its real cause
+// rather than a generic timeout.
 func TestRetry_GivesUpAndReportsTheLastError(t *testing.T) {
 	attempts := 0
 	permanent := errors.New("password authentication failed")
-	err := retryWithDelay(context.Background(), quietLogger(), "run migrations", time.Millisecond, func() error {
+	err := RetryWithDelay(context.Background(), quietLogger(), "run migrations", time.Millisecond, func() error {
 		attempts++
 		return permanent
 	})
 	if err == nil {
-		t.Fatal("retry must fail when every attempt fails; a silent success would be a fallback to no database")
+		t.Fatal("Retry must fail when every attempt fails; a silent success would be a fallback to no database")
 	}
 	if !errors.Is(err, permanent) {
 		t.Fatalf("err = %v, want it to wrap the real cause", err)
 	}
-	if attempts != bootRetries {
-		t.Fatalf("attempts = %d, want the full budget of %d", attempts, bootRetries)
+	if attempts != BootRetries {
+		t.Fatalf("attempts = %d, want the full budget of %d", attempts, BootRetries)
 	}
 }
 
@@ -84,7 +84,7 @@ func TestRetry_StopsOnContextCancellation(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- retryWithDelay(ctx, quietLogger(), "run migrations", time.Millisecond, func() error {
+		done <- RetryWithDelay(ctx, quietLogger(), "run migrations", time.Millisecond, func() error {
 			attempts++
 			if attempts == 1 {
 				cancel()
@@ -105,7 +105,7 @@ func TestRetry_StopsOnContextCancellation(t *testing.T) {
 			t.Fatalf("attempts = %d, want the retry abandoned after the cancel", attempts)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("retry ignored its cancelled context and kept sleeping")
+		t.Fatal("Retry ignored its cancelled context and kept sleeping")
 	}
 }
 
@@ -114,8 +114,8 @@ func TestRetry_StopsOnContextCancellation(t *testing.T) {
 // silently drop below the thing they exist to survive.
 func TestRetryBudget_OutlastsTheFirstDialReset(t *testing.T) {
 	total := time.Duration(0)
-	delay := bootRetryDelay
-	for i := 1; i < bootRetries; i++ {
+	delay := BootRetryDelay
+	for i := 1; i < BootRetries; i++ {
 		total += delay
 		delay *= 2
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/claudioed/order-management/internal/adapters/outbound/kafkapathcapacity"
 	"github.com/claudioed/order-management/internal/adapters/outbound/pathcapacity"
 	"github.com/claudioed/order-management/internal/application/ports"
+	"github.com/claudioed/order-management/internal/bootretry"
 )
 
 // wireProcessPathCatalogue selects the process-path catalogue source
@@ -61,7 +62,7 @@ func wireProcessPathCatalogue(ctx context.Context, catalogueSource, kafkaBrokers
 	cleanup := func() { cancel() }
 
 	var kafkaCatalogue *kafkacatalog.Consumer
-	if err := retry(ctx, logger, "start process-path catalogue consumer", func() error {
+	if err := bootretry.Retry(ctx, logger, "start process-path catalogue consumer", func() error {
 		var err error
 		kafkaCatalogue, err = kafkacatalog.NewConsumer(context.Background(), brokerList, logger)
 		return err
@@ -78,7 +79,7 @@ func wireProcessPathCatalogue(ctx context.Context, catalogueSource, kafkaBrokers
 	}()
 
 	var cptScheduleConsumer *kafkacptschedule.Consumer
-	if err := retry(ctx, logger, "start CPT schedule cache consumer", func() error {
+	if err := bootretry.Retry(ctx, logger, "start CPT schedule cache consumer", func() error {
 		var err error
 		cptScheduleConsumer, err = kafkacptschedule.NewConsumer(context.Background(), brokerList, logger)
 		return err
@@ -95,7 +96,7 @@ func wireProcessPathCatalogue(ctx context.Context, catalogueSource, kafkaBrokers
 	}()
 
 	var pathCapacityConsumer *kafkapathcapacity.Consumer
-	if err := retry(ctx, logger, "start path capacity cache consumer", func() error {
+	if err := bootretry.Retry(ctx, logger, "start path capacity cache consumer", func() error {
 		var err error
 		pathCapacityConsumer, err = kafkapathcapacity.NewConsumer(context.Background(), brokerList, logger)
 		return err

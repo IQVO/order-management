@@ -19,6 +19,7 @@ import (
 
 	inboundhttp "github.com/claudioed/order-management/internal/adapters/inbound/http"
 	"github.com/claudioed/order-management/internal/adapters/outbound/analyticsstore"
+	"github.com/claudioed/order-management/internal/bootretry"
 )
 
 // errMissingAnalyticsURL is returned when ANALYTICS_DATABASE_URL is unset.
@@ -50,6 +51,21 @@ func run() error {
 		return err
 	}
 	defer pool.Close()
+
+	// NewReadOnlyPool/ParseConfig do not themselves establish a
+	// connection, so without this the first real failure would surface
+	// inside the first HTTP request rather than at boot. Retried with
+	// exponential backoff: this cluster resets every injected pod's
+	// first outbound Postgres dial ~10s after start (Istio native
+	// sidecars; holdApplicationUntilProxyStarts is a no-op for them), and
+	// a single attempt turns that transient condition into
+	// CrashLoopBackOff. Does not weaken fail-closed — after the ~31s
+	// budget is exhausted this still returns the real underlying error.
+	if err := bootretry.Retry(rootCtx, logger, "ping analytics database", func() error {
+		return pool.Ping(rootCtx)
+	}); err != nil {
+		return err
+	}
 
 	handlers := &inboundhttp.ReportsHandlers{Store: analyticsstore.NewPostgresReport(pool)}
 	router := inboundhttp.NewReportsRouter(handlers, logger)
