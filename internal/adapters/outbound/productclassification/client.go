@@ -99,18 +99,38 @@ type classificationResponse struct {
 //     a classification-lookup problem here must never block or reject
 //     order intake, it only omits the derived routing hint (see the
 //     package doc comment).
+//
+// This is a thin fail-open wrapper around fetch -- see BreakerClient
+// (breaker.go) for the retrying, circuit-broken caller that needs to
+// observe fetch's real errors instead of having them swallowed here.
 func (c *Client) GetClassification(ctx context.Context, sku string) (ports.ProductClassification, error) {
+	result, err := c.fetch(ctx, sku)
+	if err != nil {
+		return ports.ProductClassification{SKU: sku, Known: false}, nil
+	}
+	return result, nil
+}
+
+// fetch is Client's raw call to inventory-storage's product-
+// classification endpoint, with NO fail-open conversion: a transport
+// error, a malformed 200 body, or any status other than 200/404 is
+// returned as a real error. A 404 is a legitimate business fact (this
+// SKU has no registered classification yet), not a failure -- it returns
+// Known=false with a nil error, exactly like a 200 does for Known=true,
+// so a caller (BreakerClient's retry/breaker logic) never retries or
+// trips its breaker on an ordinary unclassified SKU.
+func (c *Client) fetch(ctx context.Context, sku string) (ports.ProductClassification, error) {
 	endpoint := fmt.Sprintf("%s/products/%s/classification", c.baseURL, url.PathEscape(sku))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return ports.ProductClassification{SKU: sku, Known: false}, nil
+		return ports.ProductClassification{}, err
 	}
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.doer.Do(req)
 	if err != nil {
-		return ports.ProductClassification{SKU: sku, Known: false}, nil
+		return ports.ProductClassification{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -118,14 +138,12 @@ func (c *Client) GetClassification(ctx context.Context, sku string) (ports.Produ
 	case http.StatusOK:
 		var body classificationResponse
 		if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-			return ports.ProductClassification{SKU: sku, Known: false}, nil
+			return ports.ProductClassification{}, err
 		}
 		return ports.ProductClassification{SKU: sku, HandlingTags: body.HandlingTags, Known: true}, nil
-	default:
-		// Includes 404 (unclassified SKU) and anything else
-		// (transport-adjacent 4xx/5xx a lower layer already converted
-		// into a response) -- all fail open per the package doc
-		// comment.
+	case http.StatusNotFound:
 		return ports.ProductClassification{SKU: sku, Known: false}, nil
+	default:
+		return ports.ProductClassification{}, fmt.Errorf("%w: %d", ErrUnexpectedStatus, resp.StatusCode)
 	}
 }
