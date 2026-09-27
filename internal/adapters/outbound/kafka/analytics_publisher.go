@@ -84,9 +84,37 @@ func NewAnalyticsPublisher(brokers []string, orders ports.OrderRepo, newID func(
 // (an unrecognised type) is skipped rather than erroring, so the caller can
 // hand it the full event stream indiscriminately.
 func (p *AnalyticsPublisher) Publish(ctx context.Context, event shared.DomainEvent) error {
+	eventType, key, payload, ok, err := p.buildEnvelope(ctx, event)
+	if err != nil || !ok {
+		return err
+	}
+	return p.write(ctx, eventType, key, payload)
+}
+
+// Encode implements kafka.Encoder for the analytics stream: it builds the
+// wire-ready analytics message for event without touching the broker, so
+// postgres.OutboxPublisher can enqueue it in the same transaction as the
+// aggregate write. Like Publisher.Encode, it opens no span of its own —
+// the injected trace headers carry whatever span is already active on
+// ctx.
+func (p *AnalyticsPublisher) Encode(ctx context.Context, event shared.DomainEvent) (Encoded, bool, error) {
+	eventType, key, payload, ok, err := p.buildEnvelope(ctx, event)
+	if err != nil || !ok {
+		return Encoded{}, ok, err
+	}
+	headers := []kafkago.Header{}
+	otel.GetTextMapPropagator().Inject(ctx, headerCarrier{headers: &headers})
+	return Encoded{Topic: AnalyticsTopic, EventType: eventType, Key: []byte(key), Value: payload, Headers: headers}, true, nil
+}
+
+// buildEnvelope maps event onto its analytics envelope and marshals it,
+// without touching tracing or the broker. ok is false for an event type
+// outside the analytics contract (see marshalData), matching this
+// publisher's existing "skip, don't error" convention.
+func (p *AnalyticsPublisher) buildEnvelope(ctx context.Context, event shared.DomainEvent) (eventType, key string, payload []byte, ok bool, err error) {
 	eventType, key, data, ok := p.marshalData(ctx, event)
 	if !ok {
-		return nil
+		return "", "", nil, false, nil
 	}
 	env := AnalyticsEnvelope{
 		EventID:       p.newID(),
@@ -96,11 +124,11 @@ func (p *AnalyticsPublisher) Publish(ctx context.Context, event shared.DomainEve
 		SchemaVersion: analyticsSchemaVersion,
 		Data:          data,
 	}
-	payload, err := json.Marshal(env)
+	payload, err = json.Marshal(env)
 	if err != nil {
-		return fmt.Errorf("kafka: marshal analytics envelope: %w", err)
+		return "", "", nil, false, fmt.Errorf("kafka: marshal analytics envelope: %w", err)
 	}
-	return p.write(ctx, eventType, key, payload)
+	return eventType, key, payload, true, nil
 }
 
 // newID mints an envelope event id, defaulting to a fixed sentinel only when

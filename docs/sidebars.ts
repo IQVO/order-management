@@ -84,6 +84,7 @@ const sidebars: SidebarsConfig = {
         'adr/0019-promise-kpis-on-order-funnel',
         'adr/0020-network-originated-demand-hold-and-deadline-feasibility',
         'adr/0021-multi-path-attribute-driven-routing',
+        'adr/0022-transactional-outbox',
       ],
     },
   ],

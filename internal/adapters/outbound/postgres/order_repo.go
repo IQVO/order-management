@@ -14,9 +14,9 @@ import (
 )
 
 // OrderRepo is a pgxpool-backed implementation of ports.OrderRepo. The
-// Order aggregate is stored across two tables (orders + order_lines) and
-// always written in a single transaction, because a line's status and its
-// order are one unit of consistency.
+// Order aggregate is stored across three tables (orders, order_lines,
+// order_promise_groups) and always written in a single transaction,
+// because a line's status and its order are one unit of consistency.
 type OrderRepo struct {
 	pool *pgxpool.Pool
 }
@@ -26,12 +26,18 @@ func NewOrderRepo(pool *pgxpool.Pool) *OrderRepo {
 	return &OrderRepo{pool: pool}
 }
 
+// Save opens its own transaction for the three-table write, UNLESS ctx
+// already carries one (i.e. this call runs inside a
+// ports.UnitOfWork.Execute scope) — in that case it joins the outer
+// transaction via beginOrJoin, so the aggregate write and the outbox
+// insert(s) made by the same use case commit together or not at all
+// (the transactional outbox).
 func (r *OrderRepo) Save(ctx context.Context, o *order.Order) error {
-	tx, err := r.pool.Begin(ctx)
+	tx, commit, rollback, err := beginOrJoin(ctx, r.pool)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() { _ = rollback(ctx) }()
 
 	var promiseDate *time.Time
 	if d := o.PromiseDate(); d != nil {
@@ -89,12 +95,21 @@ func (r *OrderRepo) Save(ctx context.Context, o *order.Order) error {
 		}
 	}
 
-	return tx.Commit(ctx)
+	return commit(ctx)
 }
 
 // FindByID returns (nil, nil) when no order has this id — "not found" is
 // the application's concern, not the repository's.
+//
+// It reads through querierFrom rather than r.pool directly so that a
+// call made from INSIDE a UnitOfWork scope (e.g. the analytics
+// publisher's path-enrichment lookup, called from Encode while the same
+// use case's Save is still uncommitted) sees the just-saved row rather
+// than racing its own not-yet-committed transaction under READ COMMITTED
+// isolation.
 func (r *OrderRepo) FindByID(ctx context.Context, id shared.OrderId) (*order.Order, error) {
+	q := querierFrom(ctx, r.pool)
+
 	var allowPartialShipment bool
 	var promiseDate *time.Time
 	var promiseCptId *string
@@ -102,7 +117,7 @@ func (r *OrderRepo) FindByID(ctx context.Context, id shared.OrderId) (*order.Ord
 	var releaseOnAllocation bool
 	var requiredShipBy *time.Time
 
-	err := r.pool.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		SELECT allow_partial_shipment, promise_date, promise_cpt_id, promise_basis, release_on_allocation, required_ship_by FROM orders WHERE id = $1
 	`, id.String()).Scan(&allowPartialShipment, &promiseDate, &promiseCptId, &promiseBasisRaw, &releaseOnAllocation, &requiredShipBy)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -112,7 +127,7 @@ func (r *OrderRepo) FindByID(ctx context.Context, id shared.OrderId) (*order.Ord
 		return nil, err
 	}
 
-	rows, err := r.pool.Query(ctx, `
+	rows, err := q.Query(ctx, `
 		SELECT line_no, sku, quantity, path_id, gift_wrap, line_status, reservation_id
 		FROM order_lines WHERE order_id = $1 ORDER BY line_no
 	`, id.String())
@@ -150,7 +165,7 @@ func (r *OrderRepo) FindByID(ctx context.Context, id shared.OrderId) (*order.Ord
 		promiseBasis = &b
 	}
 
-	groupRows, err := r.pool.Query(ctx, `
+	groupRows, err := q.Query(ctx, `
 		SELECT line_nos, cpt_id, cutoff_at, basis
 		FROM order_promise_groups WHERE order_id = $1 ORDER BY group_no
 	`, id.String())
