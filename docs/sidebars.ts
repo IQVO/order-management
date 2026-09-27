@@ -85,6 +85,7 @@ const sidebars: SidebarsConfig = {
         'adr/0020-network-originated-demand-hold-and-deadline-feasibility',
         'adr/0021-multi-path-attribute-driven-routing',
         'adr/0022-transactional-outbox',
+        'adr/0023-idempotency-key-middleware',
       ],
     },
   ],

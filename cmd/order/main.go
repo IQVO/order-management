@@ -170,6 +170,11 @@ func run() error {
 		RetryAllocation: &usecases.RetryAllocation{Orders: orders, Inventory: inventory, Events: publisher, Clock: clock, Promise: promise, UnitOfWork: uow},
 		CancelOrder:     &usecases.CancelOrder{Orders: orders, Inventory: inventory, Events: publisher, Clock: clock, UnitOfWork: uow},
 		GetOrder:        &usecases.GetOrder{Orders: orders},
+		// IdempotencyPool reuses the SAME pool buildRepoAdapters opened
+		// against DATABASE_URL (nil in the in-memory dev/test
+		// configuration) — see Server.IdempotencyPool's doc comment and
+		// the idempotency-key-middleware ADR.
+		IdempotencyPool: dbPool,
 	}
 
 	// RepromiseOrder consumer (ADR 0014 §5 / ADR 0018) — the final
