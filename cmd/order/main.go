@@ -32,6 +32,7 @@ import (
 	"github.com/claudioed/order-management/internal/bootretry"
 	"github.com/claudioed/order-management/internal/domain/order"
 	"github.com/claudioed/order-management/internal/domain/shared"
+	"github.com/claudioed/order-management/internal/resilience"
 )
 
 // DefaultSiteId is used when DEFAULT_SITE_ID is unset. ADR 0014 step A
@@ -96,7 +97,27 @@ func run() error {
 
 	repromiseProcessed := buildRepromiseProcessedEvents(dbPool, logger)
 
-	inventory := buildInventoryClient(getenv("INVENTORY_STORAGE_MODE", "permissive"), os.Getenv("INVENTORY_STORAGE_BASE_URL"), logger)
+	// readiness gates GET /readyz (ADR-0025 §graceful shutdown). The
+	// zero value is ready; SetNotReady is called as the FIRST step of
+	// the shutdown sequence below, before the HTTP server itself stops
+	// accepting connections, so a Kubernetes readinessProbe has a
+	// chance to observe the flip and stop routing new traffic during
+	// the drain window that follows.
+	readiness := &inboundhttp.Readiness{}
+
+	// circuitBreakerMetrics wires both outbound breakers' OnStateChange
+	// into the circuit_breaker.state gauge (ADR-0025), reusing the SAME
+	// OTel MeterProvider telemetry.Setup already installed above rather
+	// than standing up a second Prometheus registry. Errors here mirror
+	// NewOrderMetrics' contract (invalid instrument name only, a
+	// programming error) -- non-fatal: a nil recorder just means this
+	// process runs without the gauge, never without the breaker itself.
+	circuitBreakerMetrics, err := telemetry.NewCircuitBreakerMetrics()
+	if err != nil {
+		logger.Warn("circuit breaker metrics unavailable; breakers will run without the circuit_breaker.state gauge", "error", err)
+	}
+
+	inventory := buildInventoryClient(getenv("INVENTORY_STORAGE_MODE", "permissive"), os.Getenv("INVENTORY_STORAGE_BASE_URL"), circuitBreakerMetrics, logger)
 
 	// The product-classification lookup (ADR-0016 / ADR-0014 step B)
 	// shares INVENTORY_STORAGE_BASE_URL with the inventory reservation
@@ -104,7 +125,7 @@ func run() error {
 	// deliberately no second base-URL knob for it, only its own
 	// independent PRODUCT_CLASSIFICATION_MODE switch, mirroring
 	// wes-work-planning's exact convention.
-	classification := buildClassificationLookup(getenv("PRODUCT_CLASSIFICATION_MODE", "permissive"), os.Getenv("INVENTORY_STORAGE_BASE_URL"), logger)
+	classification := buildClassificationLookup(getenv("PRODUCT_CLASSIFICATION_MODE", "permissive"), os.Getenv("INVENTORY_STORAGE_BASE_URL"), circuitBreakerMetrics, logger)
 
 	// The process-path catalogue's SOURCE is selectable, defaulting to
 	// "none" (validation skipped -- a nil ports.ProcessPathCatalogue is
@@ -175,6 +196,10 @@ func run() error {
 		// configuration) — see Server.IdempotencyPool's doc comment and
 		// the idempotency-key-middleware ADR.
 		IdempotencyPool: dbPool,
+		// readiness backs GET /readyz (ADR-0025 §graceful shutdown):
+		// flipped to not-ready as the FIRST step of shutdown, below,
+		// before anything else stops.
+		Readiness: readiness,
 	}
 
 	// RepromiseOrder consumer (ADR 0014 §5 / ADR 0018) — the final
@@ -193,6 +218,13 @@ func run() error {
 	}
 	repromiseConsumerCtx, cancelRepromiseConsumer := context.WithCancel(context.Background())
 	defer cancelRepromiseConsumer()
+	// repromiseConsumerDone closes once the repromise consumer's Run
+	// goroutine has returned — including having committed the offset
+	// for whatever message it was mid-handling when
+	// cancelRepromiseConsumer was called (see handleMessage's own
+	// commit-before-return shape) — so graceful shutdown can wait for
+	// a REAL stop, not just fire-and-forget the cancel.
+	repromiseConsumerDone := make(chan struct{})
 	var repromiseConsumer *inboundkafka.RepromiseConsumer
 	if kafkaBrokers := os.Getenv("KAFKA_BROKERS"); kafkaBrokers != "" {
 		repromiseConsumer = inboundkafka.NewRepromiseConsumer(strings.Split(kafkaBrokers, ","), repromiseOrder, logger)
@@ -223,11 +255,14 @@ func run() error {
 			}
 		}()
 		go func() {
+			defer close(repromiseConsumerDone)
 			logger.Info("repromise consumer running", "topic", inboundkafka.FulfillmentEventsTopic)
 			if err := repromiseConsumer.Run(repromiseConsumerCtx); err != nil {
 				errCh <- err
 			}
 		}()
+	} else {
+		close(repromiseConsumerDone)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -257,10 +292,37 @@ func run() error {
 	case <-ctx.Done():
 	}
 
-	cancelRepromiseConsumer()
+	// Graceful shutdown (ADR-0025 §graceful shutdown), in order:
+	//
+	//  1. Flip readiness to not-ready FIRST, before anything else
+	//     stops — a Kubernetes readinessProbe polling /readyz needs a
+	//     window to observe this and stop routing NEW traffic to this
+	//     pod before step 2 below ever closes the listener, so a
+	//     request racing the SIGTERM is far less likely to be routed
+	//     here only to hit a closing connection.
+	//  2. Stop accepting new HTTP connections and drain in-flight
+	//     requests, bounded by shutdownCtx.
+	//  3. Stop the outbox relay and the repromise Kafka consumer's
+	//     loop cleanly: cancel their contexts (no new message is
+	//     fetched/handled after this) and wait, bounded by the SAME
+	//     shutdownCtx, for their goroutines to actually finish
+	//     in-flight work (a message already being handled commits its
+	//     offset before Run returns — see RepromiseConsumer.Run/
+	//     handleMessage) rather than merely asking them to stop and
+	//     moving on. This is the "final offset commit" guarantee: no
+	//     message is left processed-but-uncommitted by an abrupt stop.
+	//  4. Only THEN do the deferred closeAdapters/closeCatalogue calls
+	//     (registered earlier in this function, so by defer's LIFO
+	//     order they run AFTER repromiseConsumer.Close() below, and
+	//     closeAdapters — which closes the pgx pool — runs LAST of
+	//     all, after every consumer/relay goroutine has already
+	//     stopped touching it).
+	readiness.SetNotReady()
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	err = httpServer.Shutdown(shutdownCtx)
+
 	// Let the relay finish its in-flight pass so an event committed by a
 	// request that completed just before shutdown is not stranded until
 	// the next pod boots.
@@ -270,6 +332,21 @@ func run() error {
 	case <-shutdownCtx.Done():
 		logger.Warn("outbox relay did not stop before the shutdown deadline")
 	}
+
+	// Stop the repromise consumer's loop cleanly: cancel so no NEW
+	// message is fetched, then wait (bounded) for any message already
+	// being handled to finish — including its offset commit — before
+	// this function returns and the deferred repromiseConsumer.Close()/
+	// closeAdapters() calls run.
+	cancelRepromiseConsumer()
+	if repromiseConsumer != nil {
+		select {
+		case <-repromiseConsumerDone:
+		case <-shutdownCtx.Done():
+			logger.Warn("repromise consumer did not stop before the shutdown deadline")
+		}
+	}
+
 	return err
 }
 
@@ -448,14 +525,21 @@ func buildRepromiseProcessedEvents(pool *pgxpool.Pool, logger *slog.Logger) port
 // INVENTORY_STORAGE_MODE (http|permissive), defaulting to "permissive" so
 // unit tests and CI never reach the network. Permissive does NOT mean
 // fail-open: it refuses to allocate rather than fabricating a reservation.
-func buildInventoryClient(mode, baseURL string, logger *slog.Logger) ports.InventoryReservationClient {
+//
+// In http mode the real Client is wrapped in a per-dependency circuit
+// breaker (ADR-0025): on a trip, calls fall back to the SAME permissive
+// (fail-loud) behaviour this client already had, rather than a new
+// fallback path. recorder feeds the breaker's state transitions into the
+// circuit_breaker.state gauge; nil is fine (see
+// resilience.RecordStateChange's doc comment).
+func buildInventoryClient(mode, baseURL string, recorder resilience.StateRecorder, logger *slog.Logger) ports.InventoryReservationClient {
 	if !strings.EqualFold(mode, "http") {
 		logger.Warn("inventory-storage client in permissive (no-op) mode; allocation will refuse to run",
 			"hint", "set INVENTORY_STORAGE_MODE=http and INVENTORY_STORAGE_BASE_URL for a real deployment")
 		return inventorystorage.NewPermissiveClient()
 	}
-	logger.Info("inventory-storage client configured", "mode", "http", "base_url", baseURL)
-	return inventorystorage.NewClient(baseURL, nil)
+	logger.Info("inventory-storage client configured", "mode", "http", "base_url", baseURL, "circuit_breaker", "enabled")
+	return inventorystorage.NewBreakerClient(inventorystorage.NewClient(baseURL, nil), recorder)
 }
 
 // buildClassificationLookup selects the outbound
@@ -468,14 +552,21 @@ func buildInventoryClient(mode, baseURL string, logger *slog.Logger) ports.Inven
 // never appear to succeed against a no-op), this permissive mode fails
 // OPEN: a classification lookup is a soft routing/enrichment input, not a
 // mutation of real state.
-func buildClassificationLookup(mode, inventoryStorageBaseURL string, logger *slog.Logger) ports.ProductClassificationLookup {
+//
+// In http mode the real Client is wrapped in retry (jittered, max 3
+// attempts -- GET is safe to retry, unlike inventory-storage's mutating
+// calls) plus a per-dependency circuit breaker (ADR-0025): on a trip,
+// calls fall back to the SAME fail-open behaviour this client already
+// had. recorder feeds the breaker's state transitions into the
+// circuit_breaker.state gauge; nil is fine.
+func buildClassificationLookup(mode, inventoryStorageBaseURL string, recorder resilience.StateRecorder, logger *slog.Logger) ports.ProductClassificationLookup {
 	if !strings.EqualFold(mode, "http") {
 		logger.Warn("product classification lookup in permissive (fail-open) mode; path eligibility routing will see no derived product attributes",
 			"hint", "set PRODUCT_CLASSIFICATION_MODE=http and INVENTORY_STORAGE_BASE_URL for a real deployment")
 		return productclassification.NewPermissiveLookup()
 	}
-	logger.Info("product classification lookup configured", "mode", "http", "inventory_storage_base_url", inventoryStorageBaseURL)
-	return productclassification.NewClient(inventoryStorageBaseURL, nil)
+	logger.Info("product classification lookup configured", "mode", "http", "inventory_storage_base_url", inventoryStorageBaseURL, "circuit_breaker", "enabled", "retry", "enabled")
+	return productclassification.NewBreakerClient(productclassification.NewClient(inventoryStorageBaseURL, nil), recorder)
 }
 
 // durationEnv reads a Go duration (e.g. "48h", "90m") from key, falling

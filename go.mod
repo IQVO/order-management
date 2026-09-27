@@ -15,6 +15,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/riandyrn/otelchi v0.12.3
 	github.com/segmentio/kafka-go v0.4.51
+	github.com/sony/gobreaker/v2 v2.4.0
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/kafka v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0

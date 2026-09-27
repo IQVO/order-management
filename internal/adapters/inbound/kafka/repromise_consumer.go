@@ -37,6 +37,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	kafkago "github.com/segmentio/kafka-go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -57,6 +58,24 @@ const FulfillmentEventsTopic = "warehouse.fulfillment.events"
 // consumer group id — see the package doc comment for why this MUST be
 // a fixed shared name, not a per-process-unique one.
 const RepromiseConsumerGroup = "order-management-repromise"
+
+// dlqTopicSuffix names the dead-letter topic this consumer publishes a
+// poison message to, relative to its OWN source topic (never a fixed
+// constant): NewRepromiseConsumerForTopic's isolated test topics each
+// get their own matching "<topic>.dlq", exactly mirroring how
+// NewRepromiseConsumerForTopic already lets tests isolate the source
+// topic/group without touching production names.
+const dlqTopicSuffix = ".dlq"
+
+// maxHandlerAttempts bounds RepromiseOrder.Execute's in-process retry
+// (ADR-0025 §DLQ) before a message is dead-lettered: 1 initial attempt
+// plus up to 2 retries, matching the plan's "up to 3" bound.
+const maxHandlerAttempts = 3
+
+const (
+	retryInitialInterval = 100 * time.Millisecond
+	retryMaxInterval     = 2 * time.Second
+)
 
 // repromiseTracerName scopes the consume spans this adapter emits.
 const repromiseTracerName = "github.com/claudioed/order-management/internal/adapters/inbound/kafka"
@@ -199,6 +218,14 @@ type RepromiseConsumer struct {
 	reader         *kafkago.Reader
 	repromiseOrder *usecases.RepromiseOrder
 	logger         *slog.Logger
+	// dlqWriter publishes a poison message (ADR-0025 §DLQ) to
+	// topic+dlqTopicSuffix after maxHandlerAttempts in-process retries
+	// of handleFulfillmentEvent all fail with a genuine infrastructure
+	// error. nil in the zero-value struct some existing unit tests
+	// build directly (they never reach handleMessage's DLQ path, only
+	// handleFulfillmentEvent) — dlqPublish itself guards against a nil
+	// writer so those tests keep compiling unchanged.
+	dlqWriter *kafkago.Writer
 }
 
 // NewRepromiseConsumer constructs a RepromiseConsumer reading
@@ -210,7 +237,9 @@ func NewRepromiseConsumer(brokers []string, repromiseOrder *usecases.RepromiseOr
 // NewRepromiseConsumerForTopic constructs a RepromiseConsumer reading
 // topic on brokers under groupID. It supports isolated integration
 // topics/groups while NewRepromiseConsumer retains the production
-// topic/group.
+// topic/group. The dead-letter topic is always derived as
+// topic+dlqTopicSuffix, so an isolated test topic gets its own isolated
+// DLQ topic for free.
 func NewRepromiseConsumerForTopic(brokers []string, groupID, topic string, repromiseOrder *usecases.RepromiseOrder, logger *slog.Logger) *RepromiseConsumer {
 	if logger == nil {
 		logger = slog.Default()
@@ -223,12 +252,21 @@ func NewRepromiseConsumerForTopic(brokers []string, groupID, topic string, repro
 		}),
 		repromiseOrder: repromiseOrder,
 		logger:         logger,
+		dlqWriter: &kafkago.Writer{
+			Addr:  kafkago.TCP(brokers...),
+			Topic: topic + dlqTopicSuffix,
+		},
 	}
 }
 
-// Close releases the underlying Kafka reader.
+// Close releases the underlying Kafka reader and, if configured, the DLQ
+// writer.
 func (c *RepromiseConsumer) Close() error {
-	return c.reader.Close()
+	readerErr := c.reader.Close()
+	if c.dlqWriter == nil {
+		return readerErr
+	}
+	return errors.Join(readerErr, c.dlqWriter.Close())
 }
 
 // Run consumes the topic until ctx is cancelled.
@@ -276,9 +314,19 @@ func (c *RepromiseConsumer) Run(ctx context.Context) error {
 // rebalances, which is an accepted, documented trade-off (see the ADR)
 // rather than an immediate in-process retry loop.
 //
-// Only a genuine commit failure, or a genuine infrastructure error from
-// RepromiseOrder itself OTHER than a version conflict
-// (Processed/Orders/Events erroring), aborts the consume loop.
+// Every OTHER genuine infrastructure error (Processed/Orders/Events
+// erroring, decode/lookup failures returned from
+// handleFulfillmentEvent) is retried in-process, with jittered backoff,
+// up to maxHandlerAttempts total attempts (ADR-0025 §DLQ) — a
+// transient blip (a momentary Postgres hiccup, a lost connection) heals
+// itself without ever reaching the DLQ. Only once ALL attempts are
+// exhausted does the message go to the dead-letter topic
+// (topic+dlqTopicSuffix) with the raw payload and the last error's
+// context, and the offset is committed anyway — one poison message must
+// never block every order behind it on this partition. A commit
+// failure, or a DLQ publish failure, is the only thing that still
+// aborts the consume loop (a genuine infrastructure problem this
+// process cannot route around by itself).
 func (c *RepromiseConsumer) handleMessage(ctx context.Context, msg kafkago.Message) error {
 	topic := c.reader.Config().Topic
 
@@ -298,19 +346,71 @@ func (c *RepromiseConsumer) handleMessage(ctx context.Context, msg kafkago.Messa
 		attribute.String("messaging.message.source", env.Source),
 	)
 
-	if err := c.handleFulfillmentEvent(msgCtx, env); err != nil {
-		recordSpanError(span, err)
-		if errors.Is(err, ports.ErrConcurrentModification) {
-			c.log(msgCtx, "repromise: version conflict, leaving message uncommitted for safe redelivery",
-				"topic", topic, "event_id", env.EventID, "event_type", env.EventType, "error", err)
-			return nil
-		}
-		c.log(msgCtx, "skipping kafka event",
-			"topic", topic, "event_id", env.EventID, "event_type", env.EventType, "error", err)
+	err := c.handleWithRetry(msgCtx, env)
+	if err == nil {
 		return c.commit(ctx, msg)
 	}
 
+	recordSpanError(span, err)
+	if errors.Is(err, ports.ErrConcurrentModification) {
+		c.log(msgCtx, "repromise: version conflict, leaving message uncommitted for safe redelivery",
+			"topic", topic, "event_id", env.EventID, "event_type", env.EventType, "error", err)
+		return nil
+	}
+
+	c.log(msgCtx, "repromise: exhausted retries, sending to dead-letter topic",
+		"topic", topic, "dlq_topic", topic+dlqTopicSuffix,
+		"event_id", env.EventID, "event_type", env.EventType, "attempts", maxHandlerAttempts, "error", err)
+	if dlqErr := c.dlqPublish(ctx, msg, err); dlqErr != nil {
+		return fmt.Errorf("repromise: publish to dead-letter topic: %w", dlqErr)
+	}
 	return c.commit(ctx, msg)
+}
+
+// handleWithRetry retries handleFulfillmentEvent up to maxHandlerAttempts
+// times with jittered exponential backoff (ADR-0025 §DLQ), bounded by
+// ctx's own deadline/cancellation. ports.ErrConcurrentModification is
+// NEVER retried here — handleMessage's own dedicated branch is what
+// handles it (leaving the message uncommitted for redelivery), so
+// retrying it in this loop too would just waste the retry budget on an
+// outcome this loop cannot fix.
+func (c *RepromiseConsumer) handleWithRetry(ctx context.Context, env fulfillmentEnvelope) error {
+	policy := backoff.NewExponentialBackOff(
+		backoff.WithInitialInterval(retryInitialInterval),
+		backoff.WithMaxInterval(retryMaxInterval),
+	)
+	bounded := backoff.WithContext(backoff.WithMaxRetries(policy, maxHandlerAttempts-1), ctx)
+
+	return backoff.Retry(func() error {
+		err := c.handleFulfillmentEvent(ctx, env)
+		if err == nil || errors.Is(err, ports.ErrConcurrentModification) {
+			return backoff.Permanent(err)
+		}
+		return err
+	}, bounded)
+}
+
+// dlqPublish writes the raw, unmodified message payload plus error
+// context (as headers, so the raw body stays byte-identical for a
+// manual replay tool per the plan's ask) to the dead-letter topic. A nil
+// dlqWriter (the zero-value RepromiseConsumer some unit tests construct
+// directly, which never exercises this path) is a documented no-op
+// rather than a nil-pointer panic.
+func (c *RepromiseConsumer) dlqPublish(ctx context.Context, msg kafkago.Message, cause error) error {
+	if c.dlqWriter == nil {
+		return nil
+	}
+	headers := append([]kafkago.Header{}, msg.Headers...)
+	headers = append(headers,
+		kafkago.Header{Key: "x-dlq-source-topic", Value: []byte(c.reader.Config().Topic)},
+		kafkago.Header{Key: "x-dlq-error", Value: []byte(cause.Error())},
+		kafkago.Header{Key: "x-dlq-failed-at", Value: []byte(time.Now().UTC().Format(time.RFC3339))},
+	)
+	return c.dlqWriter.WriteMessages(ctx, kafkago.Message{
+		Key:     msg.Key,
+		Value:   msg.Value,
+		Headers: headers,
+	})
 }
 
 // handleFulfillmentEvent filters for TaskCPTMissed/PackageManifested and
