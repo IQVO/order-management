@@ -31,6 +31,7 @@ package kafka
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -43,6 +44,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/claudioed/order-management/internal/application/ports"
 	"github.com/claudioed/order-management/internal/application/usecases"
 )
 
@@ -252,9 +254,31 @@ func (c *RepromiseConsumer) Run(ctx context.Context) error {
 // not parse as a WorkUnitId, or a RepromiseOrder fail-soft outcome) is
 // logged and committed rather than redelivered forever — mirroring
 // labor-performance's own consumer and this fleet's other Kafka
-// consumers' commit-and-skip-on-error convention. Only a genuine
-// commit failure, or a genuine infrastructure error from RepromiseOrder
-// itself (Processed/Orders/Events erroring), aborts the consume loop.
+// consumers' commit-and-skip-on-error convention.
+//
+// ports.ErrConcurrentModification (the version-column optimistic-
+// concurrency sentinel — see the version-column ADR) gets its OWN
+// branch, deliberately distinct from every other error
+// handleFulfillmentEvent can return: the message is logged but NOT
+// committed, so THIS message is safely redelivered on the next
+// rebalance/restart rather than silently dropped — a version conflict
+// means some OTHER writer (an HTTP retry-allocation/release call, or a
+// second repromise message for the same order) already advanced this
+// order past the version RepromiseOrder read it at, and reprocessing
+// this same message against the order's now-current state is exactly
+// the at-least-once semantics this consumer already relies on for
+// redelivered messages generally. The consume loop itself continues
+// (this is NOT treated as a fatal, abort-the-whole-consumer condition:
+// one order's transient conflict must not stop repromising every other
+// order), so an in-memory reader keeps advancing past it for the
+// remainder of THIS process's run — the message becomes due for
+// redelivery only once the process restarts or the partition
+// rebalances, which is an accepted, documented trade-off (see the ADR)
+// rather than an immediate in-process retry loop.
+//
+// Only a genuine commit failure, or a genuine infrastructure error from
+// RepromiseOrder itself OTHER than a version conflict
+// (Processed/Orders/Events erroring), aborts the consume loop.
 func (c *RepromiseConsumer) handleMessage(ctx context.Context, msg kafkago.Message) error {
 	topic := c.reader.Config().Topic
 
@@ -276,6 +300,11 @@ func (c *RepromiseConsumer) handleMessage(ctx context.Context, msg kafkago.Messa
 
 	if err := c.handleFulfillmentEvent(msgCtx, env); err != nil {
 		recordSpanError(span, err)
+		if errors.Is(err, ports.ErrConcurrentModification) {
+			c.log(msgCtx, "repromise: version conflict, leaving message uncommitted for safe redelivery",
+				"topic", topic, "event_id", env.EventID, "event_type", env.EventType, "error", err)
+			return nil
+		}
 		c.log(msgCtx, "skipping kafka event",
 			"topic", topic, "event_id", env.EventID, "event_type", env.EventType, "error", err)
 		return c.commit(ctx, msg)

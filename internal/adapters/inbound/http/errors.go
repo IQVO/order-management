@@ -38,7 +38,8 @@ func statusFor(err error) int {
 		errors.Is(err, usecases.ErrNoAllocatedLines),
 		errors.Is(err, usecases.ErrNoBackorderedLines),
 		errors.Is(err, usecases.ErrPromiseDateNotSet),
-		errors.Is(err, usecases.ErrOrderNotHeld):
+		errors.Is(err, usecases.ErrOrderNotHeld),
+		errors.Is(err, ports.ErrConcurrentModification):
 		return http.StatusConflict
 
 	// The downstream Suppliers are not wired up (permissive mode), or an
@@ -115,6 +116,8 @@ func problemFor(err error) problemInfo {
 		return problemInfo{"promise-date-not-set", "Order has no promise date; allocate it first"}
 	case errors.Is(err, usecases.ErrOrderNotHeld):
 		return problemInfo{"order-not-held", "Order was not held at intake and has nothing to release on demand"}
+	case errors.Is(err, ports.ErrConcurrentModification):
+		return problemInfo{"concurrent-modification", "Order was modified by another request in the meantime; reload and retry"}
 
 	case errors.Is(err, ports.ErrDownstreamNotConfigured):
 		return problemInfo{"downstream-not-configured", "A downstream service is running in permissive (no-op) mode"}
