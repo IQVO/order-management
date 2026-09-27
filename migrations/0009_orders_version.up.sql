@@ -1,0 +1,18 @@
+-- Optimistic concurrency control for the Order aggregate (see
+-- docs/docs/adr/0024-optimistic-concurrency-version-column.md).
+--
+-- Closes a real lost-update race: OrderRepo.Save previously did a blind
+-- `INSERT ... ON CONFLICT (id) DO UPDATE SET ...` on this table with no
+-- guard, so two concurrent read-modify-write requests on the SAME order
+-- (e.g. POST /orders/{id}/retry-allocation racing POST
+-- /orders/{id}/release, or either racing the Kafka-driven RepromiseOrder
+-- consumer) could silently clobber each other's write. The version
+-- column is bumped by exactly one row on every successful Save and
+-- checked in the UPDATE's WHERE clause going forward.
+--
+-- The version lives on the PARENT orders row only. order_lines is a
+-- child table written inside the SAME transaction as this row's
+-- version-guarded update: the Order aggregate as a whole is the
+-- consistency boundary, so line mutations are never independently
+-- versioned — see the ADR's "why order_lines isn't versioned" section.
+ALTER TABLE orders ADD COLUMN version INTEGER NOT NULL DEFAULT 1;

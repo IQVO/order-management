@@ -248,7 +248,7 @@ func TestOrder_HoldSurvivesRehydration(t *testing.T) {
 	// survive a repository round-trip, a later RetryAllocation would
 	// release work onto the floor for an order nobody committed to.
 	line := order.RehydrateOrderLine(1, "SKU-1", 1, "pick", false, order.LineAllocated, nil)
-	held := order.RehydrateHeld("ord-1", []*order.OrderLine{line}, false, nil, nil, nil, nil, false)
+	held := order.RehydrateHeld("ord-1", []*order.OrderLine{line}, false, nil, nil, nil, nil, false, 1)
 	if held.ReleaseOnAllocation() {
 		t.Fatal("a rehydrated held order must still report ReleaseOnAllocation()=false")
 	}

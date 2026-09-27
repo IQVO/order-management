@@ -40,6 +40,23 @@ var (
 	// clients fail loudly instead of fabricating a result. Only
 	// MODE=http is suitable for a real integration test or deployment.
 	ErrDownstreamNotConfigured = errors.New("downstream client is running in permissive (no-op) mode and cannot perform this operation")
+
+	// ErrConcurrentModification is OrderRepo.Save's optimistic-
+	// concurrency-control sentinel (see the version-column ADR): it is
+	// returned when Save's version-guarded write against the orders
+	// table affects zero rows for an order that DOES exist — i.e. the
+	// in-memory aggregate being saved was loaded at a version some
+	// OTHER writer has already advanced past. The caller lost the
+	// race; its whole read-modify-write attempt must be treated as
+	// failed (never partially applied — the version check runs before
+	// order_lines is touched, so a failed check leaves every row
+	// exactly as some other, concurrent writer left it). The inbound
+	// HTTP adapter maps this to 409; the Kafka-driven RepromiseOrder
+	// consumer's normal commit-and-skip-on-error handling treats it as
+	// any other infrastructure error from Orders.Save — see that
+	// consumer's own handling and the ADR for why a safe redelivery,
+	// not a dropped message, is the result.
+	ErrConcurrentModification = errors.New("order was concurrently modified by another writer; reload and retry")
 )
 
 // OrderRepo persists and retrieves Order aggregates.
