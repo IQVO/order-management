@@ -20,10 +20,11 @@ import (
 // context has no compensating command on that Supplier's published
 // contract to call.
 type CancelOrder struct {
-	Orders    ports.OrderRepo
-	Inventory ports.InventoryReservationClient
-	Events    ports.EventPublisher
-	Clock     ports.Clock
+	Orders     ports.OrderRepo
+	Inventory  ports.InventoryReservationClient
+	Events     ports.EventPublisher
+	Clock      ports.Clock
+	UnitOfWork ports.UnitOfWork
 }
 
 func (uc *CancelOrder) Execute(ctx context.Context, id shared.OrderId) (*order.Order, error) {
@@ -55,10 +56,12 @@ func (uc *CancelOrder) Execute(ctx context.Context, id shared.OrderId) (*order.O
 	if err := o.Cancel(); err != nil {
 		return nil, err
 	}
-	if err := uc.Orders.Save(ctx, o); err != nil {
-		return nil, err
-	}
-	if err := uc.Events.Publish(ctx, shared.NewOrderCancelled(uc.Clock.Now(), o.ID(), len(reservationIDs))); err != nil {
+	if err := atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
+		if err := uc.Orders.Save(ctx, o); err != nil {
+			return err
+		}
+		return uc.Events.Publish(ctx, shared.NewOrderCancelled(uc.Clock.Now(), o.ID(), len(reservationIDs)))
+	}); err != nil {
 		return nil, err
 	}
 	return o, nil

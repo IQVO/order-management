@@ -62,8 +62,54 @@ def matches(selector: dict, labels: dict) -> bool:
     return bool(selector) and all(labels.get(k) == v for k, v in selector.items())
 
 
+def api_container(docs: list[dict]) -> dict:
+    """The OLTP Deployment's container (name == order-management)."""
+    for d in docs:
+        if d.get("kind") == "Deployment" and d["metadata"]["name"] == "order-management":
+            return d["spec"]["template"]["spec"]["containers"][0]
+    raise AssertionError("order-management Deployment was not rendered")
+
+
+def check_startup_probe_gates_boot_work(failures: list[str]) -> None:
+    """Boot work must not race the liveness probe.
+
+    This service runs migrations (and, with PATH_CATALOGUE_SOURCE=kafka,
+    three Kafka consumer dials) BEFORE it starts listening, and in this
+    cluster every injected pod's first outbound dial is reset ~10s after
+    start. Without a startupProbe the kubelet SIGTERMs a pod that is still
+    booting — observed live as CrashLoopBackOff on order-management
+    (order-management-8646d859c7-fkvcz, 129 restarts), which reads like an
+    app crash and is not one. See network-fulfillment PR #7, the pattern
+    this chart change ports.
+    """
+    docs = render([])
+    c = api_container(docs)
+
+    probe = c.get("startupProbe")
+    if not probe:
+        failures.append(
+            "no startupProbe on the order-management container: boot work "
+            "(migrations, plus retried first dials) would race the liveness "
+            "probe and lose"
+        )
+        return
+
+    grace = probe.get("periodSeconds", 10) * probe.get("failureThreshold", 3)
+    if grace < 45:
+        failures.append(
+            f"startupProbe allows only {grace}s; it must outlast the ~31s "
+            f"database/Kafka retry budget in cmd/order/main.go"
+        )
+    if not c.get("livenessProbe"):
+        failures.append("startupProbe replaced livenessProbe instead of deferring it")
+    if not failures:
+        print(f"PASS: startupProbe gates boot for {grace}s, liveness still present")
+
+
 def main() -> int:
     failures: list[str] = []
+
+    check_startup_probe_gates_boot_work(failures)
 
     docs = render(ENABLE_EVERYTHING)
     services = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "Service"}

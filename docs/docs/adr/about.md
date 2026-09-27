@@ -81,6 +81,9 @@ Typos, broken links and formatting are of course fair game.
 | [0019](./0019-promise-kpis-on-order-funnel.md) | Promise KPIs on the Order Funnel data product (ADR 0014 §6, order-management half) | Accepted |
 | [0020](./0020-network-originated-demand-hold-and-deadline-feasibility.md) | Network-originated demand — release-on-allocation, deadline feasibility, and the Network promise basis | Accepted |
 | [0021](./0021-multi-path-attribute-driven-routing.md) | Multi-path attribute-driven routing — closes ADR-0013's original deferral | Accepted |
+| [0022](./0022-transactional-outbox.md) | Transactional outbox for order-management's dual-topic event publishing | Accepted |
+| [0023](./0023-idempotency-key-middleware.md) | Transactional Idempotency-Key middleware for POST /orders | Accepted |
+| [0024](./0024-optimistic-concurrency-version-column.md) | Optimistic concurrency (version column) for the Order aggregate | Accepted |
 
 Each of these reconstructs a decision that is actually visible in this
 repository's `CLAUDE.md` and code — none is a generic placeholder.

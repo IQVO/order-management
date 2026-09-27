@@ -92,6 +92,20 @@ type Order struct {
 	// that happens to be the zero instant", which would otherwise make
 	// every ordinary order look infeasible.
 	requiredShipBy *time.Time
+
+	// version is inert optimistic-concurrency-control metadata (see the
+	// version-column ADR). It is carried by the aggregate purely so a
+	// repository's read-modify-write Save can guard its write against a
+	// lost update, exactly like id: the domain layer never reasons
+	// about it in any business rule. A freshly-constructed order (New)
+	// starts at version 1, by convention; RehydrateHeld — the only
+	// constructor a real persistence adapter calls — takes the
+	// persisted value as a parameter. The convenience Rehydrate/
+	// RehydrateWithGroups constructors (used only by tests and by
+	// PromisePolicy's own in-memory scratch computation, never by a
+	// real repository) always pass 1, since nothing that calls them
+	// persists the result.
+	version int
 }
 
 // New constructs an Order in Received status. lines must be non-empty;
@@ -108,7 +122,7 @@ func New(id shared.OrderId, lines []*OrderLine, allowPartialShipment bool) (*Ord
 		l.lineNo = i + 1
 		numbered = append(numbered, l)
 	}
-	return &Order{id: id, lines: numbered, allowPartialShipment: allowPartialShipment}, nil
+	return &Order{id: id, lines: numbered, allowPartialShipment: allowPartialShipment, version: 1}, nil
 }
 
 // Rehydrate rebuilds an Order from persisted state without re-running
@@ -123,6 +137,11 @@ func New(id shared.OrderId, lines []*OrderLine, allowPartialShipment bool) (*Ord
 // see RehydrateWithGroups for the ADR 0014 §3 / ADR 0017 widened
 // constructor a repository adapter that also persists the per-group
 // breakdown should call instead.
+//
+// This constructor always sets version=1: no real repository calls it
+// (see RehydrateHeld's doc comment) — every call site today is a test
+// or PromisePolicy's own in-memory scratch computation, neither of
+// which ever persists the result, so the version value is inert here.
 func Rehydrate(id shared.OrderId, lines []*OrderLine, allowPartialShipment bool, promiseDate *time.Time, promiseCptId *string, promiseBasis *PromiseBasis) *Order {
 	return RehydrateWithGroups(id, lines, allowPartialShipment, promiseDate, promiseCptId, promiseBasis, nil)
 }
@@ -133,31 +152,58 @@ func Rehydrate(id shared.OrderId, lines []*OrderLine, allowPartialShipment bool,
 // were set via the legacy SetPromise path) — PromiseGroups() then simply
 // returns an empty slice, and the legacy summary fields are exactly what
 // was passed in, untouched.
+//
+// Like Rehydrate, this always sets version=1 (see that constructor's
+// doc comment) — RehydrateHeld is the one a real persistence adapter
+// calls.
 func RehydrateWithGroups(id shared.OrderId, lines []*OrderLine, allowPartialShipment bool, promiseDate *time.Time, promiseCptId *string, promiseBasis *PromiseBasis, promiseGroups []PromiseGroup) *Order {
-	return RehydrateHeld(id, lines, allowPartialShipment, promiseDate, promiseCptId, promiseBasis, promiseGroups, true)
+	return RehydrateHeld(id, lines, allowPartialShipment, promiseDate, promiseCptId, promiseBasis, promiseGroups, true, 1)
 }
 
 // RehydrateHeld is RehydrateWithGroups plus ADR 0020 §1's
-// releaseOnAllocation intent. Only a repository adapter that actually
-// persists the orders.release_on_allocation column should call it; every
-// other construction path goes through Rehydrate/RehydrateWithGroups,
-// which pass releaseOnAllocation=true and therefore keep today's
+// releaseOnAllocation intent, and the persisted optimistic-concurrency
+// version (see Order.version's doc comment). Only a repository adapter
+// that actually persists the orders.release_on_allocation and
+// orders.version columns should call it; every other construction path
+// goes through Rehydrate/RehydrateWithGroups, which pass
+// releaseOnAllocation=true and version=1 and therefore keep today's
 // behaviour exactly.
 //
 // A row written before migration 0005 reads back as TRUE (the column's
 // DEFAULT), so pre-ADR orders rehydrate as ordinary un-held orders —
-// which is what they are.
-func RehydrateHeld(id shared.OrderId, lines []*OrderLine, allowPartialShipment bool, promiseDate *time.Time, promiseCptId *string, promiseBasis *PromiseBasis, promiseGroups []PromiseGroup, releaseOnAllocation bool) *Order {
+// which is what they are. A row written before the version-column
+// migration reads back as 1 (that migration's DEFAULT), so a pre-
+// existing order's first post-migration Save is guarded against version
+// 1, never a mismatch it could never have satisfied.
+func RehydrateHeld(id shared.OrderId, lines []*OrderLine, allowPartialShipment bool, promiseDate *time.Time, promiseCptId *string, promiseBasis *PromiseBasis, promiseGroups []PromiseGroup, releaseOnAllocation bool, version int) *Order {
 	return &Order{
 		id: id, lines: lines, allowPartialShipment: allowPartialShipment,
 		promiseDate: promiseDate, promiseCptId: promiseCptId, promiseBasis: promiseBasis,
 		promiseGroups: promiseGroups,
 		heldAtIntake:  !releaseOnAllocation,
+		version:       version,
 	}
 }
 
 func (o *Order) ID() shared.OrderId         { return o.id }
 func (o *Order) AllowPartialShipment() bool { return o.allowPartialShipment }
+
+// Version returns the optimistic-concurrency-control version this
+// aggregate was loaded at (or 1 for a freshly-constructed order never
+// yet persisted). It is inert infrastructure metadata: no business rule
+// in this package ever reads or branches on it — see the field's own
+// doc comment. Only the repository's Save reads this, to guard its
+// write against a lost update from a concurrent reader of the same row.
+func (o *Order) Version() int { return o.version }
+
+// SetVersion overwrites the in-memory version. It exists solely for a
+// repository adapter to call immediately after a successful
+// version-guarded Save, so the in-memory aggregate reflects the row it
+// just persisted (version+1) rather than going stale — mirroring how
+// SetRequiredShipBy lets a repository attach state after construction.
+// No business logic anywhere in this service calls this; a use case
+// never needs to.
+func (o *Order) SetVersion(v int) { o.version = v }
 
 // ReleaseOnAllocation reports whether this order releases its lines as
 // soon as they are allocated (ADR 0020 §1). True for every order not

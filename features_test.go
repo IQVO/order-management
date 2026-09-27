@@ -123,9 +123,16 @@ type world struct {
 	lastOrderID string
 	// resBySKU remembers each placement's reservation id per SKU, so a
 	// post-cancel assertion works even though a 204 body is empty.
-	resBySKU   map[string]string
-	lastStatus int
-	lastBody   []byte
+	resBySKU map[string]string
+	// lastLocation records the Location response header, so a scenario
+	// can assert where a created order advertises itself.
+	lastLocation string
+	// eventSnapshot is the per-name event count captured by the
+	// "published events are remembered" step, so a later "no new event"
+	// assertion compares against it rather than against zero.
+	eventSnapshot map[string]int
+	lastStatus    int
+	lastBody      []byte
 }
 
 func (w *world) reset() {
@@ -142,6 +149,7 @@ func (w *world) reset() {
 	server := &inboundhttp.Server{
 		ReceiveOrder:    &usecases.ReceiveOrder{Orders: orders, Events: w.publisher, Clock: clock, Inventory: w.inventory, Promise: promise},
 		RetryAllocation: &usecases.RetryAllocation{Orders: orders, Inventory: w.inventory, Events: w.publisher, Clock: clock, Promise: promise},
+		ReleaseHeld:     &usecases.ReleaseHeldOrder{Orders: orders, Inventory: w.inventory, Events: w.publisher, Clock: clock, Promise: promise},
 		CancelOrder:     &usecases.CancelOrder{Orders: orders, Inventory: w.inventory, Events: w.publisher, Clock: clock},
 		GetOrder:        &usecases.GetOrder{Orders: orders},
 	}
@@ -153,6 +161,8 @@ func (w *world) reset() {
 	w.server = httptest.NewServer(inboundhttp.NewRouter(server, logger, ""))
 	w.lastOrderID = ""
 	w.resBySKU = map[string]string{}
+	w.lastLocation = ""
+	w.eventSnapshot = nil
 	w.lastStatus = 0
 	w.lastBody = nil
 }
@@ -195,6 +205,7 @@ func (w *world) do(method, path string, body any) error {
 
 	w.lastStatus = resp.StatusCode
 	w.lastBody = raw
+	w.lastLocation = resp.Header.Get("Location")
 	return nil
 }
 
@@ -246,7 +257,13 @@ func (w *world) placeOrder(skus string, allowPartial bool) error {
 	}); err != nil {
 		return err
 	}
+	return w.capturePlacedOrder()
+}
 
+// capturePlacedOrder records the just-created order's id and each
+// line's reservation id, so later steps can address the order and
+// assert which reservations a cancellation revoked.
+func (w *world) capturePlacedOrder() error {
 	id, err := w.stringField("id")
 	if err != nil {
 		return fmt.Errorf("place order: %w", err)
@@ -271,6 +288,35 @@ func (w *world) placeOrder(skus string, allowPartial bool) error {
 		}
 	}
 	return nil
+}
+
+// tryPlaceOrder POSTs an order with an explicit releaseOnAllocation
+// flag and records the created order ONLY when intake is accepted —
+// the intake-rejection scenarios assert the problem response via the
+// Then steps instead of failing here.
+func (w *world) tryPlaceOrder(skus string, allowPartial, hold bool) error {
+	skuList := splitCSV(skus)
+	lines := make([]map[string]any, 0, len(skuList))
+	for _, sku := range skuList {
+		lines = append(lines, map[string]any{"sku": sku, "quantity": 1, "giftWrap": false})
+	}
+	if err := w.do(http.MethodPost, "/orders", map[string]any{
+		"lines":                lines,
+		"allowPartialShipment": allowPartial,
+		"releaseOnAllocation":  !hold,
+	}); err != nil {
+		return err
+	}
+	if w.lastStatus != http.StatusCreated {
+		return nil
+	}
+	return w.capturePlacedOrder()
+}
+
+// postInvalidOrder POSTs a deliberately invalid intake body: the
+// rejection is the scenario's subject, so nothing is captured.
+func (w *world) postInvalidOrder(lines []map[string]any) error {
+	return w.do(http.MethodPost, "/orders", map[string]any{"lines": lines})
 }
 
 func splitCSV(s string) []string {
@@ -317,6 +363,22 @@ func (w *world) orderPlaced(skus string) error { return w.placeOrder(skus, false
 
 func (w *world) partialOrderPlaced(skus string) error { return w.placeOrder(skus, true) }
 
+func (w *world) heldOrderPlaced(skus string) error { return w.tryPlaceOrder(skus, false, true) }
+
+func (w *world) heldPartialOrderPlaced(skus string) error { return w.tryPlaceOrder(skus, true, true) }
+
+func (w *world) orderPlacedWithEmptySKU() error {
+	return w.postInvalidOrder([]map[string]any{{"sku": "", "quantity": 1, "giftWrap": false}})
+}
+
+func (w *world) orderPlacedWithQuantity(quantity int) error {
+	return w.postInvalidOrder([]map[string]any{{"sku": "SKU-BOOK-0001", "quantity": quantity, "giftWrap": false}})
+}
+
+func (w *world) orderPlacedWithNoLines() error {
+	return w.postInvalidOrder([]map[string]any{})
+}
+
 // ---- When ----
 
 func (w *world) retryAllocation() error {
@@ -331,6 +393,28 @@ func (w *world) cancelOrder() error {
 		return fmt.Errorf("no order placed in this scenario yet")
 	}
 	return w.do(http.MethodDelete, "/orders/"+w.lastOrderID, nil)
+}
+
+func (w *world) releaseOrder() error {
+	if w.lastOrderID == "" {
+		return fmt.Errorf("no order placed in this scenario yet")
+	}
+	return w.do(http.MethodPost, "/orders/"+w.lastOrderID+"/release", nil)
+}
+
+func (w *world) fetchPlacedOrder() error {
+	if w.lastOrderID == "" {
+		return fmt.Errorf("no order placed in this scenario yet")
+	}
+	return w.do(http.MethodGet, "/orders/"+w.lastOrderID, nil)
+}
+
+func (w *world) fetchOrder(id string) error {
+	return w.do(http.MethodGet, "/orders/"+id, nil)
+}
+
+func (w *world) probeLiveness() error {
+	return w.do(http.MethodGet, "/healthz", nil)
 }
 
 // ---- Then ----
@@ -420,6 +504,84 @@ func (w *world) reservationWasRevokedFor(sku string) error {
 	return nil
 }
 
+func (w *world) responseFieldIs(field, want string) error {
+	got, err := w.stringField(field)
+	if err != nil {
+		return err
+	}
+	if got != want {
+		return fmt.Errorf("response field %q = %q, want %q", field, got, want)
+	}
+	return nil
+}
+
+func (w *world) linePathIs(lineNo int, want string) error {
+	lines, err := w.lines()
+	if err != nil {
+		return err
+	}
+	if lineNo < 1 || lineNo > len(lines) {
+		return fmt.Errorf("line %d does not exist (response has %d lines)", lineNo, len(lines))
+	}
+	got, ok := lines[lineNo-1].(map[string]any)["pathId"].(string)
+	if !ok {
+		return fmt.Errorf("line %d has no string pathId: %v", lineNo, lines[lineNo-1])
+	}
+	if got != want {
+		return fmt.Errorf("line %d process path = %q, want %q", lineNo, got, want)
+	}
+	return nil
+}
+
+func (w *world) locationHeaderPointsToCreatedOrder() error {
+	want := "/orders/" + w.lastOrderID
+	if w.lastLocation != want {
+		return fmt.Errorf("Location header = %q, want %q", w.lastLocation, want)
+	}
+	return nil
+}
+
+// eventCounts tallies the captured events by name.
+func (w *world) eventCounts() map[string]int {
+	w.publisher.mu.Lock()
+	defer w.publisher.mu.Unlock()
+	counts := map[string]int{}
+	for _, event := range w.publisher.events {
+		counts[event.EventName()]++
+	}
+	return counts
+}
+
+func (w *world) rememberEvents() error {
+	w.eventSnapshot = w.eventCounts()
+	return nil
+}
+
+func (w *world) eventWasPublished(name string) error {
+	if w.eventCounts()[name] == 0 {
+		return fmt.Errorf("no %s event was published (captured: %v)", name, w.eventCounts())
+	}
+	return nil
+}
+
+func (w *world) noEventWasPublished(name string) error {
+	if n := w.eventCounts()[name]; n > 0 {
+		return fmt.Errorf("%d %s events were published, want none", n, name)
+	}
+	return nil
+}
+
+func (w *world) noNewEventWasPublished(name string) error {
+	if w.eventSnapshot == nil {
+		return fmt.Errorf("no event snapshot was taken in this scenario yet")
+	}
+	before, after := w.eventSnapshot[name], w.eventCounts()[name]
+	if after != before {
+		return fmt.Errorf("%d new %s events were published (had %d), want none", after-before, name, before)
+	}
+	return nil
+}
+
 // InitializeScenario registers every step definition and gives each
 // scenario a fresh server over fresh in-memory adapters, so scenarios are
 // independent.
@@ -442,17 +604,33 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^inventory-storage is unreachable$`, w.unreachable)
 	sc.Step(`^an order is placed for SKUs "([^"]*)"$`, w.orderPlaced)
 	sc.Step(`^an order allowing partial shipment is placed for SKUs "([^"]*)"$`, w.partialOrderPlaced)
+	sc.Step(`^an order is placed on hold for SKUs "([^"]*)"$`, w.heldOrderPlaced)
+	sc.Step(`^an order is placed on hold allowing partial shipment for SKUs "([^"]*)"$`, w.heldPartialOrderPlaced)
+	sc.Step(`^an order is placed with an empty SKU$`, w.orderPlacedWithEmptySKU)
+	sc.Step(`^an order is placed with quantity (-?\d+)$`, w.orderPlacedWithQuantity)
+	sc.Step(`^an order is placed with no lines$`, w.orderPlacedWithNoLines)
 	sc.Step(`^the order is retried for allocation$`, w.retryAllocation)
 	sc.Step(`^the order is cancelled$`, w.cancelOrder)
+	sc.Step(`^the order is released$`, w.releaseOrder)
+	sc.Step(`^the order is fetched$`, w.fetchPlacedOrder)
+	sc.Step(`^the order "([^"]*)" is fetched$`, w.fetchOrder)
+	sc.Step(`^the service is probed for liveness$`, w.probeLiveness)
+	sc.Step(`^the published events are remembered$`, w.rememberEvents)
 
 	// Then
 	sc.Step(`^the request is accepted with status (\d+)$`, w.statusIs)
 	sc.Step(`^the request is rejected with status (\d+)$`, w.statusIs)
 	sc.Step(`^the order status is "([^"]*)"$`, w.orderStatusIs)
 	sc.Step(`^line (\d+) status is "([^"]*)"$`, w.lineStatusIs)
+	sc.Step(`^line (\d+) is on process path "([^"]*)"$`, w.linePathIs)
 	sc.Step(`^the order has a promise date$`, w.hasPromiseDate)
+	sc.Step(`^the response field "([^"]*)" is "([^"]*)"$`, w.responseFieldIs)
+	sc.Step(`^the Location header points to the created order$`, w.locationHeaderPointsToCreatedOrder)
 	sc.Step(`^the problem detail title is "([^"]*)"$`, w.problemTitleIs)
 	sc.Step(`^the reservation for SKU "([^"]*)" was revoked$`, w.reservationWasRevokedFor)
+	sc.Step(`^an "([^"]*)" event was published$`, w.eventWasPublished)
+	sc.Step(`^no "([^"]*)" event was published$`, w.noEventWasPublished)
+	sc.Step(`^no new "([^"]*)" event was published$`, w.noNewEventWasPublished)
 }
 
 // TestFeatures runs the Gherkin acceptance suite under features/.

@@ -31,10 +31,13 @@ package kafka
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	kafkago "github.com/segmentio/kafka-go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -42,6 +45,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/claudioed/order-management/internal/application/ports"
 	"github.com/claudioed/order-management/internal/application/usecases"
 )
 
@@ -54,6 +58,24 @@ const FulfillmentEventsTopic = "warehouse.fulfillment.events"
 // consumer group id — see the package doc comment for why this MUST be
 // a fixed shared name, not a per-process-unique one.
 const RepromiseConsumerGroup = "order-management-repromise"
+
+// dlqTopicSuffix names the dead-letter topic this consumer publishes a
+// poison message to, relative to its OWN source topic (never a fixed
+// constant): NewRepromiseConsumerForTopic's isolated test topics each
+// get their own matching "<topic>.dlq", exactly mirroring how
+// NewRepromiseConsumerForTopic already lets tests isolate the source
+// topic/group without touching production names.
+const dlqTopicSuffix = ".dlq"
+
+// maxHandlerAttempts bounds RepromiseOrder.Execute's in-process retry
+// (ADR-0025 §DLQ) before a message is dead-lettered: 1 initial attempt
+// plus up to 2 retries, matching the plan's "up to 3" bound.
+const maxHandlerAttempts = 3
+
+const (
+	retryInitialInterval = 100 * time.Millisecond
+	retryMaxInterval     = 2 * time.Second
+)
 
 // repromiseTracerName scopes the consume spans this adapter emits.
 const repromiseTracerName = "github.com/claudioed/order-management/internal/adapters/inbound/kafka"
@@ -77,6 +99,95 @@ type fulfillmentEnvelope struct {
 	OccurredAt time.Time       `json:"occurred_at"`
 	Source     string          `json:"source"`
 	Data       json.RawMessage `json:"data"`
+}
+
+// fulfillmentSpecversionProbe is a minimal decode used purely to
+// discriminate today's flat envelope from a CloudEvents 1.0 structured
+// envelope (ADR-0027 / ADR-0021 dual-read migration, Phase 2 Task 2e):
+// a CloudEvents message carries a non-empty `specversion` key the flat
+// envelope never has. This is a DIFFERENT probe/type from
+// kafkapathcapacity's own — see this file's package doc comment for why
+// the two consumers are kept independently updated.
+type fulfillmentSpecversionProbe struct {
+	Specversion string `json:"specversion"`
+}
+
+// fulfillmentCloudEventsEnvelope is the CloudEvents 1.0 structured
+// envelope shape fulfillment-execution's asyncapi.yaml documents for
+// this topic. `type` is the reverse-DNS event type string; `data` is
+// byte-identical to the flat envelope's `data`.
+type fulfillmentCloudEventsEnvelope struct {
+	Specversion string          `json:"specversion"`
+	ID          string          `json:"id"`
+	Type        string          `json:"type"`
+	Source      string          `json:"source"`
+	Time        time.Time       `json:"time"`
+	Data        json.RawMessage `json:"data"`
+}
+
+// cloudEventsTypeTaskCPTMissed and cloudEventsTypePackageManifested are
+// the exact reverse-DNS `type` strings fulfillment-execution's
+// asyncapi.yaml specifies for these two events (ADR-0025, ADR-0027 dual-
+// read migration). Read directly from apis/asyncapi.yaml — do not
+// re-derive the middle segments.
+const (
+	cloudEventsTypeTaskCPTMissed     = "com.warehouse.wes.fulfillment-execution.task.TaskCPTMissed"
+	cloudEventsTypePackageManifested = "com.warehouse.wes.fulfillment-execution.package.PackageManifested"
+)
+
+// fulfillmentBareEventType strips a CloudEvents reverse-DNS type string
+// back to the bare event name the existing switch/case logic in
+// handleFulfillmentEvent keys on (e.g.
+// "com.warehouse.wes.fulfillment-execution.task.TaskCPTMissed" ->
+// "TaskCPTMissed"). Returns the input unchanged if it contains no dot,
+// so a malformed/unexpected type string fails soft downstream (falls
+// into handleFulfillmentEvent's "unrecognized event type" default
+// branch) rather than panicking here.
+func fulfillmentBareEventType(ceType string) string {
+	if idx := strings.LastIndex(ceType, "."); idx >= 0 && idx+1 < len(ceType) {
+		return ceType[idx+1:]
+	}
+	return ceType
+}
+
+// decodeFulfillmentEnvelope normalizes either wire shape (today's flat
+// envelope, or a CloudEvents 1.0 structured envelope, per ADR-0027 /
+// ADR-0021 Phase 2 Task 2e) into this consumer's existing internal
+// fulfillmentEnvelope representation, so handleMessage/
+// handleFulfillmentEvent never need to know which shape arrived on the
+// wire. specversion's presence is the sole discriminator (see the ADR's
+// decision section) — never inferred from any other field.
+func decodeFulfillmentEnvelope(raw []byte) (fulfillmentEnvelope, error) {
+	var probe fulfillmentSpecversionProbe
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return fulfillmentEnvelope{}, fmt.Errorf("repromise: probe specversion: %w", err)
+	}
+	if probe.Specversion == "" {
+		// Flat envelope path (today's shape, unchanged).
+		var flat fulfillmentEnvelope
+		if err := json.Unmarshal(raw, &flat); err != nil {
+			return fulfillmentEnvelope{}, fmt.Errorf("repromise: unmarshal envelope: %w", err)
+		}
+		return flat, nil
+	}
+	if probe.Specversion != "1.0" {
+		// Malformed/unrecognized specversion: fail soft, mirroring
+		// this consumer's existing malformed-message handling
+		// posture (handleMessage logs and commits/skips rather than
+		// wedging the Run loop).
+		return fulfillmentEnvelope{}, fmt.Errorf("repromise: unrecognized CloudEvents specversion %q", probe.Specversion)
+	}
+	var ce fulfillmentCloudEventsEnvelope
+	if err := json.Unmarshal(raw, &ce); err != nil {
+		return fulfillmentEnvelope{}, fmt.Errorf("repromise: unmarshal CloudEvents envelope: %w", err)
+	}
+	return fulfillmentEnvelope{
+		EventID:    ce.ID,
+		EventType:  fulfillmentBareEventType(ce.Type),
+		OccurredAt: ce.Time,
+		Source:     ce.Source,
+		Data:       ce.Data,
+	}, nil
 }
 
 // taskCPTMissedData is fulfillment-execution's real TaskCPTMissed
@@ -107,6 +218,14 @@ type RepromiseConsumer struct {
 	reader         *kafkago.Reader
 	repromiseOrder *usecases.RepromiseOrder
 	logger         *slog.Logger
+	// dlqWriter publishes a poison message (ADR-0025 §DLQ) to
+	// topic+dlqTopicSuffix after maxHandlerAttempts in-process retries
+	// of handleFulfillmentEvent all fail with a genuine infrastructure
+	// error. nil in the zero-value struct some existing unit tests
+	// build directly (they never reach handleMessage's DLQ path, only
+	// handleFulfillmentEvent) — dlqPublish itself guards against a nil
+	// writer so those tests keep compiling unchanged.
+	dlqWriter *kafkago.Writer
 }
 
 // NewRepromiseConsumer constructs a RepromiseConsumer reading
@@ -118,7 +237,9 @@ func NewRepromiseConsumer(brokers []string, repromiseOrder *usecases.RepromiseOr
 // NewRepromiseConsumerForTopic constructs a RepromiseConsumer reading
 // topic on brokers under groupID. It supports isolated integration
 // topics/groups while NewRepromiseConsumer retains the production
-// topic/group.
+// topic/group. The dead-letter topic is always derived as
+// topic+dlqTopicSuffix, so an isolated test topic gets its own isolated
+// DLQ topic for free.
 func NewRepromiseConsumerForTopic(brokers []string, groupID, topic string, repromiseOrder *usecases.RepromiseOrder, logger *slog.Logger) *RepromiseConsumer {
 	if logger == nil {
 		logger = slog.Default()
@@ -131,12 +252,21 @@ func NewRepromiseConsumerForTopic(brokers []string, groupID, topic string, repro
 		}),
 		repromiseOrder: repromiseOrder,
 		logger:         logger,
+		dlqWriter: &kafkago.Writer{
+			Addr:  kafkago.TCP(brokers...),
+			Topic: topic + dlqTopicSuffix,
+		},
 	}
 }
 
-// Close releases the underlying Kafka reader.
+// Close releases the underlying Kafka reader and, if configured, the DLQ
+// writer.
 func (c *RepromiseConsumer) Close() error {
-	return c.reader.Close()
+	readerErr := c.reader.Close()
+	if c.dlqWriter == nil {
+		return readerErr
+	}
+	return errors.Join(readerErr, c.dlqWriter.Close())
 }
 
 // Run consumes the topic until ctx is cancelled.
@@ -162,19 +292,51 @@ func (c *RepromiseConsumer) Run(ctx context.Context) error {
 // not parse as a WorkUnitId, or a RepromiseOrder fail-soft outcome) is
 // logged and committed rather than redelivered forever — mirroring
 // labor-performance's own consumer and this fleet's other Kafka
-// consumers' commit-and-skip-on-error convention. Only a genuine
-// commit failure, or a genuine infrastructure error from RepromiseOrder
-// itself (Processed/Orders/Events erroring), aborts the consume loop.
+// consumers' commit-and-skip-on-error convention.
+//
+// ports.ErrConcurrentModification (the version-column optimistic-
+// concurrency sentinel — see the version-column ADR) gets its OWN
+// branch, deliberately distinct from every other error
+// handleFulfillmentEvent can return: the message is logged but NOT
+// committed, so THIS message is safely redelivered on the next
+// rebalance/restart rather than silently dropped — a version conflict
+// means some OTHER writer (an HTTP retry-allocation/release call, or a
+// second repromise message for the same order) already advanced this
+// order past the version RepromiseOrder read it at, and reprocessing
+// this same message against the order's now-current state is exactly
+// the at-least-once semantics this consumer already relies on for
+// redelivered messages generally. The consume loop itself continues
+// (this is NOT treated as a fatal, abort-the-whole-consumer condition:
+// one order's transient conflict must not stop repromising every other
+// order), so an in-memory reader keeps advancing past it for the
+// remainder of THIS process's run — the message becomes due for
+// redelivery only once the process restarts or the partition
+// rebalances, which is an accepted, documented trade-off (see the ADR)
+// rather than an immediate in-process retry loop.
+//
+// Every OTHER genuine infrastructure error (Processed/Orders/Events
+// erroring, decode/lookup failures returned from
+// handleFulfillmentEvent) is retried in-process, with jittered backoff,
+// up to maxHandlerAttempts total attempts (ADR-0025 §DLQ) — a
+// transient blip (a momentary Postgres hiccup, a lost connection) heals
+// itself without ever reaching the DLQ. Only once ALL attempts are
+// exhausted does the message go to the dead-letter topic
+// (topic+dlqTopicSuffix) with the raw payload and the last error's
+// context, and the offset is committed anyway — one poison message must
+// never block every order behind it on this partition. A commit
+// failure, or a DLQ publish failure, is the only thing that still
+// aborts the consume loop (a genuine infrastructure problem this
+// process cannot route around by itself).
 func (c *RepromiseConsumer) handleMessage(ctx context.Context, msg kafkago.Message) error {
 	topic := c.reader.Config().Topic
 
 	msgCtx, span := c.startConsumeSpan(ctx, topic, msg)
 	defer span.End()
 
-	var env fulfillmentEnvelope
-	if err := json.Unmarshal(msg.Value, &env); err != nil {
-		recordSpanError(span, err)
-		c.log(msgCtx, "skipping unparseable kafka message", "topic", topic, "error", err)
+	env, decodeErr := decodeFulfillmentEnvelope(msg.Value)
+	if decodeErr != nil {
+		recordSpanError(span, decodeErr)
+		c.log(msgCtx, "skipping unparseable kafka message", "topic", topic, "error", decodeErr)
 		return c.commit(ctx, msg)
 	}
 
@@ -184,14 +346,71 @@ func (c *RepromiseConsumer) handleMessage(ctx context.Context, msg kafkago.Messa
 		attribute.String("messaging.message.source", env.Source),
 	)
 
-	if err := c.handleFulfillmentEvent(msgCtx, env); err != nil {
-		recordSpanError(span, err)
-		c.log(msgCtx, "skipping kafka event",
-			"topic", topic, "event_id", env.EventID, "event_type", env.EventType, "error", err)
+	err := c.handleWithRetry(msgCtx, env)
+	if err == nil {
 		return c.commit(ctx, msg)
 	}
 
+	recordSpanError(span, err)
+	if errors.Is(err, ports.ErrConcurrentModification) {
+		c.log(msgCtx, "repromise: version conflict, leaving message uncommitted for safe redelivery",
+			"topic", topic, "event_id", env.EventID, "event_type", env.EventType, "error", err)
+		return nil
+	}
+
+	c.log(msgCtx, "repromise: exhausted retries, sending to dead-letter topic",
+		"topic", topic, "dlq_topic", topic+dlqTopicSuffix,
+		"event_id", env.EventID, "event_type", env.EventType, "attempts", maxHandlerAttempts, "error", err)
+	if dlqErr := c.dlqPublish(ctx, msg, err); dlqErr != nil {
+		return fmt.Errorf("repromise: publish to dead-letter topic: %w", dlqErr)
+	}
 	return c.commit(ctx, msg)
+}
+
+// handleWithRetry retries handleFulfillmentEvent up to maxHandlerAttempts
+// times with jittered exponential backoff (ADR-0025 §DLQ), bounded by
+// ctx's own deadline/cancellation. ports.ErrConcurrentModification is
+// NEVER retried here — handleMessage's own dedicated branch is what
+// handles it (leaving the message uncommitted for redelivery), so
+// retrying it in this loop too would just waste the retry budget on an
+// outcome this loop cannot fix.
+func (c *RepromiseConsumer) handleWithRetry(ctx context.Context, env fulfillmentEnvelope) error {
+	policy := backoff.NewExponentialBackOff(
+		backoff.WithInitialInterval(retryInitialInterval),
+		backoff.WithMaxInterval(retryMaxInterval),
+	)
+	bounded := backoff.WithContext(backoff.WithMaxRetries(policy, maxHandlerAttempts-1), ctx)
+
+	return backoff.Retry(func() error {
+		err := c.handleFulfillmentEvent(ctx, env)
+		if err == nil || errors.Is(err, ports.ErrConcurrentModification) {
+			return backoff.Permanent(err)
+		}
+		return err
+	}, bounded)
+}
+
+// dlqPublish writes the raw, unmodified message payload plus error
+// context (as headers, so the raw body stays byte-identical for a
+// manual replay tool per the plan's ask) to the dead-letter topic. A nil
+// dlqWriter (the zero-value RepromiseConsumer some unit tests construct
+// directly, which never exercises this path) is a documented no-op
+// rather than a nil-pointer panic.
+func (c *RepromiseConsumer) dlqPublish(ctx context.Context, msg kafkago.Message, cause error) error {
+	if c.dlqWriter == nil {
+		return nil
+	}
+	headers := append([]kafkago.Header{}, msg.Headers...)
+	headers = append(headers,
+		kafkago.Header{Key: "x-dlq-source-topic", Value: []byte(c.reader.Config().Topic)},
+		kafkago.Header{Key: "x-dlq-error", Value: []byte(cause.Error())},
+		kafkago.Header{Key: "x-dlq-failed-at", Value: []byte(time.Now().UTC().Format(time.RFC3339))},
+	)
+	return c.dlqWriter.WriteMessages(ctx, kafkago.Message{
+		Key:     msg.Key,
+		Value:   msg.Value,
+		Headers: headers,
+	})
 }
 
 // handleFulfillmentEvent filters for TaskCPTMissed/PackageManifested and

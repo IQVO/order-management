@@ -363,3 +363,100 @@ func TestPromiseBasisString(t *testing.T) {
 		t.Fatalf("BasisLeadTime.String() = %q", order.BasisLeadTime.String())
 	}
 }
+
+// horizonRecorder wraps a fakeSchedule and records the n each
+// NextCutoffs call was made with, so a test can assert exactly how far
+// out PromisePolicy looked.
+type horizonRecorder struct {
+	inner fakeSchedule
+	calls []int
+}
+
+func (h *horizonRecorder) NextCutoffs(siteId string, from time.Time, n int) ([]order.CPTWindow, bool) {
+	h.calls = append(h.calls, n)
+	return h.inner.NextCutoffs(siteId, from, n)
+}
+
+// TestPromisePolicy_HorizonBoundsNextCutoffsQuery pins horizon()'s two
+// branches: an unset (zero) Horizon queries DefaultCPTHorizon windows,
+// and an explicitly configured Horizon is passed through verbatim to
+// ScheduleSource.NextCutoffs.
+func TestPromisePolicy_HorizonBoundsNextCutoffsQuery(t *testing.T) {
+	tests := []struct {
+		name    string
+		horizon int
+		wantN   int
+	}{
+		{name: "zero horizon queries the default", horizon: 0, wantN: order.DefaultCPTHorizon},
+		{name: "negative horizon falls back to the default too", horizon: -3, wantN: order.DefaultCPTHorizon},
+		{name: "explicit horizon is passed through", horizon: 3, wantN: 3},
+		{name: "horizon of one queries exactly one window", horizon: 1, wantN: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := testTime()
+			o := newAllocatedOrder(t, pq("pick", 1))
+			schedule := &horizonRecorder{inner: fakeSchedule{windowsBySite: map[string][]order.CPTWindow{
+				"site-1": {{CptId: "sp1-1800", CutoffAt: now.Add(6 * time.Hour), EligiblePathIds: []string{"pick"}}},
+			}}}
+			policy := order.PromisePolicy{
+				Schedule:   schedule,
+				Capability: &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 1 * time.Hour}},
+				Fallback:   order.NewLeadTimePolicy(24*time.Hour, nil),
+				SiteId:     "site-1",
+				Horizon:    tt.horizon,
+			}
+
+			if _, ok := policy.Promise(now, o); !ok {
+				t.Fatal("Promise: expected ok=true")
+			}
+			if len(schedule.calls) != 1 {
+				t.Fatalf("NextCutoffs called %d times, want 1", len(schedule.calls))
+			}
+			if got := schedule.calls[0]; got != tt.wantN {
+				t.Fatalf("NextCutoffs n = %d, want %d", got, tt.wantN)
+			}
+		})
+	}
+}
+
+// TestPromisePolicy_HorizonChangesTheAnswer proves the bound is not
+// cosmetic: with the only window the line can make sitting BEYOND a
+// short horizon, the promise falls back to LeadTime; widening the
+// horizon to include that window yields the Capability-basis promise.
+func TestPromisePolicy_HorizonChangesTheAnswer(t *testing.T) {
+	now := testTime()
+	o := newAllocatedOrder(t, pq("pick", 1))
+
+	// Window 1 does not fit (cutoff before now+cycleTime); window 2 fits.
+	windows := []order.CPTWindow{
+		{CptId: "too-early", CutoffAt: now.Add(1 * time.Hour), EligiblePathIds: []string{"pick"}},
+		{CptId: "fits", CutoffAt: now.Add(8 * time.Hour), EligiblePathIds: []string{"pick"}},
+	}
+	base := order.PromisePolicy{
+		Schedule:   &fakeSchedule{windowsBySite: map[string][]order.CPTWindow{"site-1": windows}},
+		Capability: &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 3 * time.Hour}},
+		Fallback:   order.NewLeadTimePolicy(24*time.Hour, nil),
+		SiteId:     "site-1",
+	}
+
+	short := base
+	short.Horizon = 1
+	got, ok := short.Promise(now, o)
+	if !ok {
+		t.Fatal("Promise: expected ok=true (fallback)")
+	}
+	if got.Basis != order.BasisLeadTime {
+		t.Fatalf("Basis = %q, want LeadTime — the only fitting window is beyond the horizon", got.Basis)
+	}
+
+	wide := base
+	wide.Horizon = 2
+	got, ok = wide.Promise(now, o)
+	if !ok {
+		t.Fatal("Promise: expected ok=true")
+	}
+	if got.Basis != order.BasisCapability || got.CptId != "fits" {
+		t.Fatalf("promise = %+v, want Capability basis on window %q", got, "fits")
+	}
+}

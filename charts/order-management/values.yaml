@@ -99,6 +99,29 @@ inventoryStorage:
 
 extraEnv: []
 
+# Gates liveness and readiness until the process is actually serving.
+#
+# Without it, BOOT WORK RACES THE LIVENESS PROBE and loses: this service
+# runs migrations (and, with PATH_CATALOGUE_SOURCE=kafka, three Kafka
+# consumer dials) before it starts listening, and in this cluster every
+# injected pod's first outbound dial is reset ~10s after start (Istio
+# native sidecars, so holdApplicationUntilProxyStarts is a no-op). The
+# retried boot work (cmd/order/main.go: retry, ~31s budget) can therefore
+# push first-listen past a plain liveness threshold. Observed live as
+# CrashLoopBackOff — order-management-8646d859c7-fkvcz sat at 129
+# restarts — which reads like an app crash and is not one; see
+# network-fulfillment PR #7, the pattern this chart change ports.
+#
+# 30 x 2s = 60s of grace, comfortably past the ~31s retry budget, after
+# which liveness takes over unchanged. A genuinely broken database still
+# fails the pod; it just is not mistaken for a slow one.
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  periodSeconds: 2
+  failureThreshold: 30
+
 livenessProbe:
   httpGet:
     path: /healthz
@@ -108,10 +131,26 @@ livenessProbe:
 
 readinessProbe:
   httpGet:
-    path: /healthz
+    # /readyz (ADR-0025 §graceful shutdown), NOT /healthz: readiness
+    # must flip to not-ready during a graceful SIGTERM drain (see
+    # cmd/order/main.go's shutdown sequence) so this pod stops
+    # receiving NEW traffic while it finishes in-flight requests --
+    # /healthz stays a pure liveness signal ("is the process alive")
+    # and is deliberately never flipped by shutdown, or Kubernetes
+    # would kill the pod mid-drain instead of letting it finish.
+    path: /readyz
     port: http
   initialDelaySeconds: 3
   periodSeconds: 5
+
+# Gives cmd/order/main.go's graceful shutdown sequence (readiness flip
+# -> HTTP drain -> outbox relay / repromise consumer clean stop with
+# final offset commit -> pgx pool close LAST) room to actually finish
+# before Kubernetes SIGKILLs the container. 10s (the HTTP Shutdown
+# budget) + 10s (the same budget, reused for the relay/consumer stop)
+# + margin for the readinessProbe's periodSeconds=5 to have observed
+# the not-ready flip before traffic fully stops arriving.
+terminationGracePeriodSeconds: 30
 
 nodeSelector: {}
 tolerations: []

@@ -177,12 +177,19 @@ func publishOrderAllocationOutcome(
 // A zero-value PromisePolicy (Schedule/Capability both nil) always falls
 // back, so existing wiring/tests that only set Fallback keep working
 // unchanged.
+//
+// UnitOfWork brackets every Save + Publish allocateAndRelease makes in
+// one atomic scope (transactional outbox). Optional: nil means "no
+// transactional backing", the in-memory / log-publisher dev
+// configuration — atomically() treats that identically to every other
+// use case in this package.
 type allocationDeps struct {
-	Orders    ports.OrderRepo
-	Inventory ports.InventoryReservationClient
-	Events    ports.EventPublisher
-	Clock     ports.Clock
-	Promise   order.PromisePolicy
+	Orders     ports.OrderRepo
+	Inventory  ports.InventoryReservationClient
+	Events     ports.EventPublisher
+	Clock      ports.Clock
+	Promise    order.PromisePolicy
+	UnitOfWork ports.UnitOfWork
 }
 
 // setPromiseDate applies deps.Promise (PromisePolicy, ADR 0014/ADR 0017)
@@ -305,6 +312,25 @@ func promiseGroupByLine(o *order.Order) map[int]order.PromiseGroup {
 // floor for an order nobody committed to. It stays an explicit parameter
 // rather than being read from o in here so the release decision is
 // visible at every call site.
+//
+// TRANSACTIONAL OUTBOX: every Repo.Save and EventPublisher.Publish this
+// function makes — the per-line OrderLineAllocated/OrderLineBackordered
+// events raised inside allocateLines, the final aggregate Save, and the
+// order-level outcome event — are bracketed in ONE atomically(deps.UnitOfWork)
+// scope, so the aggregate write and every event about it commit together
+// or not at all. The one deliberate exception is the ORIGINAL hard
+// allocation failure itself (a business-visible error from
+// Inventory.Reserve, e.g. a transport failure): that error is captured
+// OUTSIDE the atomically closure's own return value (see reportErr below)
+// so that "persist whatever was genuinely reserved before the failure"
+// (the existing, documented behaviour) still COMMITS — the transaction
+// only rolls back on a genuine infrastructure failure persisting or
+// publishing that partial progress, never on the upstream Reserve
+// failure by itself. deps.Inventory.Reserve (an outbound HTTP call) runs
+// INSIDE this transaction's scope, same as PPM's reference design has no
+// occasion to consider — accepted trade-off (a held DB connection for
+// the duration of the reservation calls) documented in this service's
+// own ADR, in exchange for the stronger atomicity guarantee.
 func allocateAndRelease(
 	ctx context.Context,
 	deps allocationDeps,
@@ -313,87 +339,102 @@ func allocateAndRelease(
 	retry bool,
 	releaseOnAllocation bool,
 ) (allocationOutcome, error) {
-	outcome, allocErr := allocateLines(ctx, deps.Inventory, deps.Events, deps.Clock, o, lines, retry)
-	if allocErr != nil {
-		// Persist whatever was genuinely reserved upstream before
-		// surfacing the hard failure — see the allocateLines doc.
-		if outcome.allocated > 0 {
-			deps.setPromiseDate(o)
-			if saveErr := deps.Orders.Save(ctx, o); saveErr != nil {
-				return outcome, errors.Join(allocErr, saveErr)
-			}
-			// Best-effort visibility: a failure publishing this event
-			// must never mask or replace allocErr, the real failure —
-			// it is joined in exactly like the saveErr case above so
-			// errors.Is(err, allocErr) still holds.
-			remaining := len(o.LinesWithStatus(order.LinePending))
-			if pubErr := deps.Events.Publish(ctx, shared.NewOrderAllocationPartiallyFailed(
-				deps.Clock.Now(), o.ID(), outcome.allocated, remaining, truncateCause(allocErr.Error()),
-			)); pubErr != nil {
-				return outcome, errors.Join(allocErr, pubErr)
-			}
-		}
-		return outcome, allocErr
-	}
+	var outcome allocationOutcome
+	// reportErr is the hard allocation failure to surface to THIS
+	// function's own caller. It is captured outside the atomically
+	// closure's return value — see the doc comment above.
+	var reportErr error
 
-	deps.setPromiseDate(o)
-
-	// ADR 0020 §1: when the caller held the order at intake, stop after
-	// allocation. Lines stay Allocated, inventory reservations genuinely
-	// exist, and the promise above is computed and attached exactly as
-	// for any other order — so a holder can read the promise and decide.
-	// Nothing is released, so wes-work-planning sees no work and no task
-	// reaches the floor.
-	//
-	// OrderAllocated/OrderPartiallyAllocated is still published below:
-	// the allocation genuinely happened, and suppressing the event would
-	// hide a real state change from every other context.
-	if !releaseOnAllocation {
-		if err := deps.Orders.Save(ctx, o); err != nil {
-			return outcome, err
-		}
-		if err := publishOrderAllocationOutcome(ctx, deps.Events, deps.Clock, o, outcome, nil); err != nil {
-			return outcome, err
-		}
-		return outcome, nil
-	}
-
-	// BR3-gated release: EnsureReleasable enforces that a ship-complete
-	// order releases nothing while any line is still unallocated. When it
-	// passes, every line the aggregate now reports Allocated (this pass's
-	// newly-allocated lines, and any already-Allocated from an earlier
-	// pass) is eligible and is released right here, in the same flow.
-	promiseByLine := promiseGroupByLine(o)
-	var released []shared.ReleasedLine
-	if err := o.EnsureReleasable(); err == nil {
-		class := o.FulfillmentClass().String()
-		for _, line := range o.LinesWithStatus(order.LineAllocated) {
-			if err := o.Release(line.LineNo()); err != nil {
-				return outcome, err
-			}
-			rl := shared.ReleasedLine{
-				LineNo: line.LineNo(), SKU: line.SKU(), PathID: line.PathID(), GiftWrap: line.GiftWrap(),
-				FulfillmentClass: class,
-			}
-			if g, ok := promiseByLine[line.LineNo()]; ok {
-				cutoffAt := g.Promise.CutoffAt
-				basis := g.Promise.Basis.String()
-				rl.PromiseCutoffAt = &cutoffAt
-				rl.PromiseBasis = &basis
-				if g.Promise.CptId != "" {
-					cptId := g.Promise.CptId
-					rl.PromiseCptId = &cptId
+	txErr := atomically(ctx, deps.UnitOfWork, func(ctx context.Context) error {
+		var allocErr error
+		outcome, allocErr = allocateLines(ctx, deps.Inventory, deps.Events, deps.Clock, o, lines, retry)
+		if allocErr != nil {
+			reportErr = allocErr
+			// Persist whatever was genuinely reserved upstream before
+			// surfacing the hard failure — see the allocateLines doc.
+			if outcome.allocated > 0 {
+				deps.setPromiseDate(o)
+				if err := deps.Orders.Save(ctx, o); err != nil {
+					return errors.Join(allocErr, err)
+				}
+				// Best-effort visibility: a failure publishing this event
+				// must never mask or replace allocErr, the real failure —
+				// it is joined in exactly like the Save-error case above
+				// so errors.Is(err, allocErr) still holds on the final
+				// returned error.
+				remaining := len(o.LinesWithStatus(order.LinePending))
+				if err := deps.Events.Publish(ctx, shared.NewOrderAllocationPartiallyFailed(
+					deps.Clock.Now(), o.ID(), outcome.allocated, remaining, truncateCause(allocErr.Error()),
+				)); err != nil {
+					return errors.Join(allocErr, err)
 				}
 			}
-			released = append(released, rl)
+			// Let the transaction commit whatever partial progress was
+			// just persisted above; reportErr still carries the hard
+			// failure back to this function's own caller.
+			return nil
 		}
-	}
 
-	if err := deps.Orders.Save(ctx, o); err != nil {
-		return outcome, err
+		deps.setPromiseDate(o)
+
+		// ADR 0020 §1: when the caller held the order at intake, stop after
+		// allocation. Lines stay Allocated, inventory reservations genuinely
+		// exist, and the promise above is computed and attached exactly as
+		// for any other order — so a holder can read the promise and decide.
+		// Nothing is released, so wes-work-planning sees no work and no task
+		// reaches the floor.
+		//
+		// OrderAllocated/OrderPartiallyAllocated is still published below:
+		// the allocation genuinely happened, and suppressing the event would
+		// hide a real state change from every other context.
+		if !releaseOnAllocation {
+			if err := deps.Orders.Save(ctx, o); err != nil {
+				return err
+			}
+			return publishOrderAllocationOutcome(ctx, deps.Events, deps.Clock, o, outcome, nil)
+		}
+
+		// BR3-gated release: EnsureReleasable enforces that a ship-complete
+		// order releases nothing while any line is still unallocated. When it
+		// passes, every line the aggregate now reports Allocated (this pass's
+		// newly-allocated lines, and any already-Allocated from an earlier
+		// pass) is eligible and is released right here, in the same flow.
+		promiseByLine := promiseGroupByLine(o)
+		var released []shared.ReleasedLine
+		if err := o.EnsureReleasable(); err == nil {
+			class := o.FulfillmentClass().String()
+			for _, line := range o.LinesWithStatus(order.LineAllocated) {
+				if err := o.Release(line.LineNo()); err != nil {
+					return err
+				}
+				rl := shared.ReleasedLine{
+					LineNo: line.LineNo(), SKU: line.SKU(), PathID: line.PathID(), GiftWrap: line.GiftWrap(),
+					FulfillmentClass: class,
+				}
+				if g, ok := promiseByLine[line.LineNo()]; ok {
+					cutoffAt := g.Promise.CutoffAt
+					basis := g.Promise.Basis.String()
+					rl.PromiseCutoffAt = &cutoffAt
+					rl.PromiseBasis = &basis
+					if g.Promise.CptId != "" {
+						cptId := g.Promise.CptId
+						rl.PromiseCptId = &cptId
+					}
+				}
+				released = append(released, rl)
+			}
+		}
+
+		if err := deps.Orders.Save(ctx, o); err != nil {
+			return err
+		}
+		return publishOrderAllocationOutcome(ctx, deps.Events, deps.Clock, o, outcome, released)
+	})
+	if txErr != nil {
+		return outcome, txErr
 	}
-	if err := publishOrderAllocationOutcome(ctx, deps.Events, deps.Clock, o, outcome, released); err != nil {
-		return outcome, err
+	if reportErr != nil {
+		return outcome, reportErr
 	}
 	return outcome, nil
 }

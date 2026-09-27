@@ -40,6 +40,23 @@ var (
 	// clients fail loudly instead of fabricating a result. Only
 	// MODE=http is suitable for a real integration test or deployment.
 	ErrDownstreamNotConfigured = errors.New("downstream client is running in permissive (no-op) mode and cannot perform this operation")
+
+	// ErrConcurrentModification is OrderRepo.Save's optimistic-
+	// concurrency-control sentinel (see the version-column ADR): it is
+	// returned when Save's version-guarded write against the orders
+	// table affects zero rows for an order that DOES exist — i.e. the
+	// in-memory aggregate being saved was loaded at a version some
+	// OTHER writer has already advanced past. The caller lost the
+	// race; its whole read-modify-write attempt must be treated as
+	// failed (never partially applied — the version check runs before
+	// order_lines is touched, so a failed check leaves every row
+	// exactly as some other, concurrent writer left it). The inbound
+	// HTTP adapter maps this to 409; the Kafka-driven RepromiseOrder
+	// consumer's normal commit-and-skip-on-error handling treats it as
+	// any other infrastructure error from Orders.Save — see that
+	// consumer's own handling and the ADR for why a safe redelivery,
+	// not a dropped message, is the result.
+	ErrConcurrentModification = errors.New("order was concurrently modified by another writer; reload and retry")
 )
 
 // OrderRepo persists and retrieves Order aggregates.
@@ -54,6 +71,28 @@ type OrderRepo interface {
 // deferred broker integration is purely additive.
 type EventPublisher interface {
 	Publish(ctx context.Context, event shared.DomainEvent) error
+}
+
+// UnitOfWork brackets a use case's state change and the domain event(s)
+// it raises so both commit or neither does (transactional outbox — see
+// the ADR registered alongside this port). Execute runs fn inside one
+// atomic scope: every Repo.Save and EventPublisher.Publish made with the
+// ctx handed to fn is bound to that same scope. If fn returns an error
+// the scope is rolled back and nothing — neither the aggregate rows nor
+// the outbox rows — is visible afterwards.
+//
+// A nested Execute (fn invoked with a ctx that already carries a scope)
+// joins the outer scope rather than opening a second one, so a use case
+// that calls another helper which itself wraps its work in Execute never
+// deadlocks or double-commits.
+//
+// Adapters with no transactional backing (the in-memory repo, the log
+// publisher) satisfy this with a pass-through that simply calls fn; the
+// use cases stay adapter-agnostic either way — see atomically() in the
+// usecases package, which every publishing use case calls through
+// rather than invoking Execute directly.
+type UnitOfWork interface {
+	Execute(ctx context.Context, fn func(ctx context.Context) error) error
 }
 
 // Clock abstracts current time so use cases and tests are deterministic.

@@ -22,6 +22,7 @@ import (
 	"github.com/claudioed/order-management/internal/adapters/outbound/analyticsstore"
 	outboundkafka "github.com/claudioed/order-management/internal/adapters/outbound/kafka"
 	"github.com/claudioed/order-management/internal/adapters/outbound/postgres"
+	"github.com/claudioed/order-management/internal/bootretry"
 )
 
 // errMissingAnalyticsURL is returned when ANALYTICS_DATABASE_URL is unset: the
@@ -50,8 +51,18 @@ func run() error {
 	kafkaBrokers := strings.Split(getenv("KAFKA_BROKERS", "localhost:9092"), ",")
 	migrationsPath := getenv("ANALYTICS_MIGRATIONS_PATH", "migrations/analytics")
 
-	// The projector owns the analytical schema: run its migrations on start.
-	if err := postgres.RunMigrations(analyticsURL, migrationsPath); err != nil {
+	// The projector owns the analytical schema: run its migrations on
+	// start. Retried with exponential backoff, mirroring cmd/order's
+	// buildRepoAdapters: in this cluster every injected pod's first
+	// outbound TCP dial (Postgres included) is reset ~10s after the app
+	// starts (Istio native sidecars; holdApplicationUntilProxyStarts is a
+	// no-op for them), and a single attempt turns that transient
+	// condition into CrashLoopBackOff. This does not weaken fail-closed:
+	// after the ~31s budget is exhausted this still returns the real
+	// underlying error and the caller still refuses to boot.
+	if err := bootretry.Retry(rootCtx, logger, "run analytics migrations", func() error {
+		return postgres.RunMigrations(analyticsURL, migrationsPath)
+	}); err != nil {
 		return err
 	}
 
@@ -60,6 +71,15 @@ func run() error {
 		return err
 	}
 	defer pool.Close()
+
+	// NewPool/ParseConfig do not themselves establish a connection, so
+	// without this the first real failure would surface inside the first
+	// consumed message rather than at boot.
+	if err := bootretry.Retry(rootCtx, logger, "ping analytics database", func() error {
+		return pool.Ping(rootCtx)
+	}); err != nil {
+		return err
+	}
 
 	projection := analyticsstore.NewPostgresProjection(pool)
 	consumed := analyticsstore.NewConsumedEventsRepo(pool)

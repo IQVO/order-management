@@ -224,3 +224,88 @@ func TestConsumer_MalformedMessage_LoggedAndSkipped(t *testing.T) {
 		t.Fatalf("units=%d known=%v, want 7/true -- the valid message after the malformed one should still apply", units, known)
 	}
 }
+
+// --- ADR-0021 Phase 2 Task 2b: CloudEvents dual-read tests ---
+
+func cloudEventsMsg(t *testing.T, partition int, offset int64, ceType string, data any) kafkago.Message {
+	t.Helper()
+	rawData, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("marshal data: %v", err)
+	}
+	ce := map[string]any{
+		"specversion":     "1.0",
+		"id":              "5c7d3f92-1b64-4a08-9e73-2f6a8c1d5b40",
+		"type":            ceType,
+		"source":          "/warehouse/wes-work-planning",
+		"subject":         "pick-to-tote",
+		"time":            "2026-08-21T22:40:00Z",
+		"datacontenttype": "application/json",
+		"data":            json.RawMessage(rawData),
+	}
+	rawEnv, err := json.Marshal(ce)
+	if err != nil {
+		t.Fatalf("marshal CloudEvents envelope: %v", err)
+	}
+	return kafkago.Message{Partition: partition, Offset: offset, Value: rawEnv}
+}
+
+func TestConsumer_DecodesCloudEventsShapedMessage_SameResultAsFlat(t *testing.T) {
+	cutoff := time.Date(2026, 9, 13, 18, 0, 0, 0, time.UTC)
+	reader := &fakeReader{
+		messages: []kafkago.Message{
+			cloudEventsMsg(t, 0, 0, cloudEventsTypePathCapacityChanged, capacityData{
+				PathId: "pick", CutoffAt: cutoff, RemainingUnits: 42, Known: true,
+			}),
+		},
+	}
+	c := newTestConsumer(reader, targetOffsets{0: 1})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go func() { _ = c.Run(ctx) }()
+
+	if err := c.WaitReady(ctx); err != nil {
+		t.Fatalf("expected Ready before timeout, got: %v", err)
+	}
+
+	units, known := c.Remaining(shared.PathId("pick"), "sp1-1800", cutoff)
+	if !known {
+		t.Fatal("expected known=true for a CloudEvents-shaped PathCapacityChanged")
+	}
+	if units != 42 {
+		t.Fatalf("units = %d, want 42 -- must match the equivalent flat-shaped fixture's result", units)
+	}
+}
+
+func TestConsumer_CloudEventsUnrecognizedSpecversion_FailsSoftAndSkips(t *testing.T) {
+	cutoff := time.Date(2026, 9, 13, 18, 0, 0, 0, time.UTC)
+	malformed := kafkago.Message{
+		Partition: 0, Offset: 0,
+		Value: []byte(`{"specversion":"2.0","type":"com.warehouse.wes.work-planning.workpool.PathCapacityChanged","data":{"path_id":"pick","cutoff_at":"2026-09-13T18:00:00Z","remaining_units":42,"known":true}}`),
+	}
+	reader := &fakeReader{
+		messages: []kafkago.Message{
+			malformed,
+			envelopeMsg(t, 0, 1, eventTypeChanged, capacityData{
+				PathId: "pick", CutoffAt: cutoff, RemainingUnits: 9, Known: true,
+			}),
+		},
+	}
+	c := newTestConsumer(reader, targetOffsets{0: 2})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go func() { _ = c.Run(ctx) }()
+
+	if err := c.WaitReady(ctx); err != nil {
+		t.Fatalf("expected Ready before timeout despite one unrecognized-specversion message, got: %v", err)
+	}
+	// The malformed-specversion message must be skipped (fail soft),
+	// not applied and not fatal to the consumer -- the valid message
+	// after it must still apply.
+	units, known := c.Remaining(shared.PathId("pick"), "sp1-1800", cutoff)
+	if !known || units != 9 {
+		t.Fatalf("units=%d known=%v, want 9/true -- an unrecognized specversion must fail soft, not wedge the consumer", units, known)
+	}
+}

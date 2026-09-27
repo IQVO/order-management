@@ -296,7 +296,7 @@ error schema, is in [`apis/openapi.yaml`](apis/openapi.yaml).
 
 | Method | Path | Use case |
 | --- | --- | --- |
-| `POST` | `/orders` | ReceiveOrder — allocates and releases automatically |
+| `POST` | `/orders` | ReceiveOrder — allocates and releases automatically. Requires an `Idempotency-Key` request header (ADR 0023); a request without one gets `400`. |
 | `GET` | `/orders/{id}` | GetOrder |
 | `POST` | `/orders/{id}/retry-allocation` | RetryAllocation — retries and releases automatically |
 | `POST` | `/orders/{id}/release` | ReleaseHeldOrder — releases an order received with `releaseOnAllocation: false` (ADR 0020) |
@@ -327,11 +327,18 @@ curl -s localhost:8080/healthz
 
 **ReceiveOrder** — allocates and releases automatically, in the same call.
 `pathId` is never part of the request (every line gets the internal
-default); `allowPartialShipment` defaults to `false` (ship-complete):
+default); `allowPartialShipment` defaults to `false` (ship-complete).
+This is the one route that creates a NEW resource with a
+server-generated id, so it requires a caller-supplied `Idempotency-Key`
+header (ADR 0023): a retried request with the SAME key and the SAME body
+replays the original response instead of creating a second order; the
+same key with a DIFFERENT body is rejected with `422`; a missing key is
+rejected with `400`.
 
 ```bash
 curl -s -X POST localhost:8080/orders \
   -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: 5f8a1e2e-....' \
   -d '{
         "allowPartialShipment": false,
         "lines": [

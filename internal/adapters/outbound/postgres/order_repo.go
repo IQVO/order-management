@@ -3,20 +3,22 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/claudioed/order-management/internal/application/ports"
 	"github.com/claudioed/order-management/internal/domain/order"
 	"github.com/claudioed/order-management/internal/domain/shared"
 )
 
 // OrderRepo is a pgxpool-backed implementation of ports.OrderRepo. The
-// Order aggregate is stored across two tables (orders + order_lines) and
-// always written in a single transaction, because a line's status and its
-// order are one unit of consistency.
+// Order aggregate is stored across three tables (orders, order_lines,
+// order_promise_groups) and always written in a single transaction,
+// because a line's status and its order are one unit of consistency.
 type OrderRepo struct {
 	pool *pgxpool.Pool
 }
@@ -26,12 +28,38 @@ func NewOrderRepo(pool *pgxpool.Pool) *OrderRepo {
 	return &OrderRepo{pool: pool}
 }
 
+// Save opens its own transaction for the three-table write, UNLESS ctx
+// already carries one (i.e. this call runs inside a
+// ports.UnitOfWork.Execute scope) — in that case it joins the outer
+// transaction via beginOrJoin, so the aggregate write and the outbox
+// insert(s) made by the same use case commit together or not at all
+// (the transactional outbox).
+//
+// The orders-table write is optimistic-concurrency-guarded (see the
+// version-column ADR): an existing row is only updated when its
+// current version matches the version this aggregate was loaded at
+// (o.Version()), and the write bumps the stored version by exactly one.
+// This check runs FIRST, before order_lines or order_promise_groups is
+// touched at all — a stale-version Save returns
+// ports.ErrConcurrentModification and rolls back before any line write
+// is even attempted, so a lost writer's Save never partially applies.
+//
+// The write is an explicit UPDATE-then-INSERT pair, not a single
+// `INSERT ... ON CONFLICT DO UPDATE ... WHERE version = $x` statement.
+// Both forms were considered; the explicit pair is what this repo
+// ships because it makes the three real outcomes (fresh insert,
+// version-matched update, version-mismatched conflict) three distinct,
+// individually-verified code paths rather than one statement whose
+// RowsAffected()==0 case conflates "no row with this id yet" with "row
+// exists but version didn't match" — see
+// TestOrderRepo_Save_VersionGuard_* in order_repo_integration_test.go,
+// which exercises all three against a real Postgres.
 func (r *OrderRepo) Save(ctx context.Context, o *order.Order) error {
-	tx, err := r.pool.Begin(ctx)
+	tx, commit, rollback, err := beginOrJoin(ctx, r.pool)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() { _ = rollback(ctx) }()
 
 	var promiseDate *time.Time
 	if d := o.PromiseDate(); d != nil {
@@ -44,15 +72,54 @@ func (r *OrderRepo) Save(ctx context.Context, o *order.Order) error {
 		promiseBasis = &s
 	}
 
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO orders (id, allow_partial_shipment, promise_date, promise_cpt_id, promise_basis, release_on_allocation, required_ship_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (id) DO UPDATE SET
-			promise_date = EXCLUDED.promise_date,
-			promise_cpt_id = EXCLUDED.promise_cpt_id,
-			promise_basis = EXCLUDED.promise_basis
-	`, o.ID().String(), o.AllowPartialShipment(), promiseDate, promiseCptId, promiseBasis, o.ReleaseOnAllocation(), o.RequiredShipBy()); err != nil {
+	// Version-guarded UPDATE first: this is the common case (an order
+	// that already exists — every Save after the very first one for a
+	// given id). A row matching id AND o.Version() gets its version
+	// bumped by exactly one in the same statement.
+	var insertedFresh bool
+	tag, err := tx.Exec(ctx, `
+		UPDATE orders SET
+			promise_date = $3,
+			promise_cpt_id = $4,
+			promise_basis = $5,
+			release_on_allocation = $6,
+			required_ship_by = $7,
+			version = version + 1
+		WHERE id = $1 AND version = $2
+	`, o.ID().String(), o.Version(), promiseDate, promiseCptId, promiseBasis, o.ReleaseOnAllocation(), o.RequiredShipBy())
+	if err != nil {
 		return err
+	}
+
+	switch tag.RowsAffected() {
+	case 1:
+		// Version matched and was bumped by the UPDATE itself.
+	case 0:
+		// Ambiguous by RowsAffected alone: either no row with this id
+		// exists yet (a brand-new order's first Save), or a row exists
+		// at some OTHER version (a lost race). Disambiguate with a
+		// direct existence check.
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM orders WHERE id = $1)`, o.ID().String()).Scan(&exists); err != nil {
+			return err
+		}
+		if exists {
+			// A row is there, just not at the version we loaded —
+			// some other writer already advanced it. Return before
+			// touching order_lines/order_promise_groups at all.
+			return ports.ErrConcurrentModification
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO orders (id, allow_partial_shipment, promise_date, promise_cpt_id, promise_basis, release_on_allocation, required_ship_by, version)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		`, o.ID().String(), o.AllowPartialShipment(), promiseDate, promiseCptId, promiseBasis, o.ReleaseOnAllocation(), o.RequiredShipBy(), o.Version()); err != nil {
+			return err
+		}
+		insertedFresh = true
+	default:
+		// Cannot happen: id is the primary key, so at most one row can
+		// ever match. Guarded defensively rather than silently ignored.
+		return fmt.Errorf("postgres: orders version-guarded update affected %d rows for id %s, want 0 or 1", tag.RowsAffected(), o.ID().String())
 	}
 
 	for _, l := range o.Lines() {
@@ -89,22 +156,47 @@ func (r *OrderRepo) Save(ctx context.Context, o *order.Order) error {
 		}
 	}
 
-	return tx.Commit(ctx)
+	if err := commit(ctx); err != nil {
+		return err
+	}
+	// Reflect the version this Save just persisted onto the in-memory
+	// aggregate, so a caller that keeps using the same *order.Order
+	// after Save (e.g. a use case that returns it to its own caller)
+	// is not left holding a stale version that would spuriously
+	// conflict with itself on a later Save within the same process. A
+	// fresh insert stored o.Version() itself (typically 1, from New);
+	// an existing row's update bumped the STORED version by one via
+	// `version = version + 1`, so the in-memory value must move to
+	// match.
+	if !insertedFresh {
+		o.SetVersion(o.Version() + 1)
+	}
+	return nil
 }
 
 // FindByID returns (nil, nil) when no order has this id — "not found" is
 // the application's concern, not the repository's.
+//
+// It reads through querierFrom rather than r.pool directly so that a
+// call made from INSIDE a UnitOfWork scope (e.g. the analytics
+// publisher's path-enrichment lookup, called from Encode while the same
+// use case's Save is still uncommitted) sees the just-saved row rather
+// than racing its own not-yet-committed transaction under READ COMMITTED
+// isolation.
 func (r *OrderRepo) FindByID(ctx context.Context, id shared.OrderId) (*order.Order, error) {
+	q := querierFrom(ctx, r.pool)
+
 	var allowPartialShipment bool
 	var promiseDate *time.Time
 	var promiseCptId *string
 	var promiseBasisRaw *string
 	var releaseOnAllocation bool
 	var requiredShipBy *time.Time
+	var version int
 
-	err := r.pool.QueryRow(ctx, `
-		SELECT allow_partial_shipment, promise_date, promise_cpt_id, promise_basis, release_on_allocation, required_ship_by FROM orders WHERE id = $1
-	`, id.String()).Scan(&allowPartialShipment, &promiseDate, &promiseCptId, &promiseBasisRaw, &releaseOnAllocation, &requiredShipBy)
+	err := q.QueryRow(ctx, `
+		SELECT allow_partial_shipment, promise_date, promise_cpt_id, promise_basis, release_on_allocation, required_ship_by, version FROM orders WHERE id = $1
+	`, id.String()).Scan(&allowPartialShipment, &promiseDate, &promiseCptId, &promiseBasisRaw, &releaseOnAllocation, &requiredShipBy, &version)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -112,7 +204,7 @@ func (r *OrderRepo) FindByID(ctx context.Context, id shared.OrderId) (*order.Ord
 		return nil, err
 	}
 
-	rows, err := r.pool.Query(ctx, `
+	rows, err := q.Query(ctx, `
 		SELECT line_no, sku, quantity, path_id, gift_wrap, line_status, reservation_id
 		FROM order_lines WHERE order_id = $1 ORDER BY line_no
 	`, id.String())
@@ -150,7 +242,7 @@ func (r *OrderRepo) FindByID(ctx context.Context, id shared.OrderId) (*order.Ord
 		promiseBasis = &b
 	}
 
-	groupRows, err := r.pool.Query(ctx, `
+	groupRows, err := q.Query(ctx, `
 		SELECT line_nos, cpt_id, cutoff_at, basis
 		FROM order_promise_groups WHERE order_id = $1 ORDER BY group_no
 	`, id.String())
@@ -183,7 +275,7 @@ func (r *OrderRepo) FindByID(ctx context.Context, id shared.OrderId) (*order.Ord
 		return nil, err
 	}
 
-	o := order.RehydrateHeld(id, lines, allowPartialShipment, promiseDate, promiseCptId, promiseBasis, promiseGroups, releaseOnAllocation)
+	o := order.RehydrateHeld(id, lines, allowPartialShipment, promiseDate, promiseCptId, promiseBasis, promiseGroups, releaseOnAllocation, version)
 	// Set after rehydration rather than as a fourth Rehydrate parameter:
 	// the deadline is optional and most orders have none, so widening the
 	// constructor chain again would cost every call site an argument it

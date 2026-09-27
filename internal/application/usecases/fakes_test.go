@@ -243,6 +243,20 @@ func (f *fakeClassificationLookup) GetClassification(_ context.Context, sku stri
 	return ports.ProductClassification{SKU: sku, HandlingTags: tags, Known: true}, nil
 }
 
+// countingMetrics is a scripted ports.OrderMetrics: it counts the
+// accepted/rejected outcomes ReceiveOrder records so a test can assert
+// the business-fact signal fires exactly once per intake attempt.
+type countingMetrics struct {
+	accepted int
+	rejected int
+}
+
+func (m *countingMetrics) OrderAccepted(context.Context) { m.accepted++ }
+
+func (m *countingMetrics) OrderRejected(context.Context) { m.rejected++ }
+
+var _ ports.OrderMetrics = (*countingMetrics)(nil)
+
 // fixture bundles everything a use-case test needs, wired to in-memory and
 // fake adapters. No test in this package touches a real network or DB.
 type fixture struct {
