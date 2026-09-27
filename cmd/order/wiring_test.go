@@ -31,7 +31,7 @@ func TestBuildRepoAdapters_RetriesTheDatabaseNotJustOnce(t *testing.T) {
 	databaseURL := "postgres://u:p@127.0.0.1:1/order_management?sslmode=disable&connect_timeout=1"
 
 	start := time.Now()
-	_, _, _, _, err := buildRepoAdapters(context.Background(), databaseURL, migrationsDirForTest(t), "log", quietLogger())
+	_, _, _, _, _, _, err := buildRepoAdapters(context.Background(), databaseURL, migrationsDirForTest(t), "log", quietLogger())
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -53,7 +53,7 @@ func TestBuildRepoAdapters_RetriesTheDatabaseNotJustOnce(t *testing.T) {
 // nothing: no dial, no backoff, no delay to a local run.
 func TestBuildRepoAdapters_NoDatabaseURLUsesMemoryImmediately(t *testing.T) {
 	start := time.Now()
-	orders, _, pool, closeFn, err := buildRepoAdapters(context.Background(), "", migrationsDirForTest(t), "log", quietLogger())
+	orders, _, pool, _, _, closeFn, err := buildRepoAdapters(context.Background(), "", migrationsDirForTest(t), "log", quietLogger())
 	if err != nil {
 		t.Fatalf("buildRepoAdapters: %v", err)
 	}
