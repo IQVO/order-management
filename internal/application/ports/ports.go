@@ -56,6 +56,28 @@ type EventPublisher interface {
 	Publish(ctx context.Context, event shared.DomainEvent) error
 }
 
+// UnitOfWork brackets a use case's state change and the domain event(s)
+// it raises so both commit or neither does (transactional outbox — see
+// the ADR registered alongside this port). Execute runs fn inside one
+// atomic scope: every Repo.Save and EventPublisher.Publish made with the
+// ctx handed to fn is bound to that same scope. If fn returns an error
+// the scope is rolled back and nothing — neither the aggregate rows nor
+// the outbox rows — is visible afterwards.
+//
+// A nested Execute (fn invoked with a ctx that already carries a scope)
+// joins the outer scope rather than opening a second one, so a use case
+// that calls another helper which itself wraps its work in Execute never
+// deadlocks or double-commits.
+//
+// Adapters with no transactional backing (the in-memory repo, the log
+// publisher) satisfy this with a pass-through that simply calls fn; the
+// use cases stay adapter-agnostic either way — see atomically() in the
+// usecases package, which every publishing use case calls through
+// rather than invoking Execute directly.
+type UnitOfWork interface {
+	Execute(ctx context.Context, fn func(ctx context.Context) error) error
+}
+
 // Clock abstracts current time so use cases and tests are deterministic.
 type Clock interface {
 	Now() time.Time

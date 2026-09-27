@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -87,7 +88,7 @@ func run() error {
 	databaseURL := os.Getenv("DATABASE_URL")
 	migrationsPath := getenv("MIGRATIONS_PATH", "migrations")
 
-	orders, publisher, dbPool, closeAdapters, err := buildRepoAdapters(ctx, databaseURL, migrationsPath, getenv("EVENT_PUBLISHER", "log"), logger)
+	orders, publisher, dbPool, uow, relay, closeAdapters, err := buildRepoAdapters(ctx, databaseURL, migrationsPath, getenv("EVENT_PUBLISHER", "log"), logger)
 	if err != nil {
 		return err
 	}
@@ -164,11 +165,16 @@ func run() error {
 
 	clock := memory.SystemClock{}
 	server := &inboundhttp.Server{
-		ReceiveOrder:    &usecases.ReceiveOrder{Orders: orders, Events: publisher, Clock: clock, Inventory: inventory, Promise: promise, Catalogue: catalogue, Classification: classification, Metrics: orderMetrics},
-		ReleaseHeld:     &usecases.ReleaseHeldOrder{Orders: orders, Events: publisher, Clock: clock, Inventory: inventory, Promise: promise},
-		RetryAllocation: &usecases.RetryAllocation{Orders: orders, Inventory: inventory, Events: publisher, Clock: clock, Promise: promise},
-		CancelOrder:     &usecases.CancelOrder{Orders: orders, Inventory: inventory, Events: publisher, Clock: clock},
+		ReceiveOrder:    &usecases.ReceiveOrder{Orders: orders, Events: publisher, Clock: clock, Inventory: inventory, Promise: promise, Catalogue: catalogue, Classification: classification, Metrics: orderMetrics, UnitOfWork: uow},
+		ReleaseHeld:     &usecases.ReleaseHeldOrder{Orders: orders, Events: publisher, Clock: clock, Inventory: inventory, Promise: promise, UnitOfWork: uow},
+		RetryAllocation: &usecases.RetryAllocation{Orders: orders, Inventory: inventory, Events: publisher, Clock: clock, Promise: promise, UnitOfWork: uow},
+		CancelOrder:     &usecases.CancelOrder{Orders: orders, Inventory: inventory, Events: publisher, Clock: clock, UnitOfWork: uow},
 		GetOrder:        &usecases.GetOrder{Orders: orders},
+		// IdempotencyPool reuses the SAME pool buildRepoAdapters opened
+		// against DATABASE_URL (nil in the in-memory dev/test
+		// configuration) — see Server.IdempotencyPool's doc comment and
+		// the idempotency-key-middleware ADR.
+		IdempotencyPool: dbPool,
 	}
 
 	// RepromiseOrder consumer (ADR 0014 §5 / ADR 0018) — the final
@@ -183,7 +189,7 @@ func run() error {
 	// per-process-unique group (see that package's doc comment).
 	repromiseOrder := &usecases.RepromiseOrder{
 		Orders: orders, Promise: promise, Events: publisher, Clock: clock,
-		Processed: repromiseProcessed, Logger: logger,
+		Processed: repromiseProcessed, Logger: logger, UnitOfWork: uow,
 	}
 	repromiseConsumerCtx, cancelRepromiseConsumer := context.WithCancel(context.Background())
 	defer cancelRepromiseConsumer()
@@ -203,7 +209,7 @@ func run() error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 	go func() {
 		logger.Info("http server listening", "addr", httpAddr)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -227,6 +233,24 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// The outbox relay drains outbox_events onto Kafka alongside the HTTP
+	// server, in the same process. It is only wired when both Postgres
+	// and EVENT_PUBLISHER=kafka are configured (see buildRepoAdapters).
+	relayDone := make(chan struct{})
+	relayCtx, stopRelay := context.WithCancel(ctx)
+	defer stopRelay()
+	if relay != nil {
+		go func() {
+			defer close(relayDone)
+			logger.Info("outbox relay running")
+			if err := relay.Run(relayCtx); err != nil && !errors.Is(err, context.Canceled) {
+				errCh <- err
+			}
+		}()
+	} else {
+		close(relayDone)
+	}
+
 	select {
 	case err := <-errCh:
 		return err
@@ -236,7 +260,17 @@ func run() error {
 	cancelRepromiseConsumer()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return httpServer.Shutdown(shutdownCtx)
+	err = httpServer.Shutdown(shutdownCtx)
+	// Let the relay finish its in-flight pass so an event committed by a
+	// request that completed just before shutdown is not stranded until
+	// the next pod boots.
+	stopRelay()
+	select {
+	case <-relayDone:
+	case <-shutdownCtx.Done():
+		logger.Warn("outbox relay did not stop before the shutdown deadline")
+	}
+	return err
 }
 
 // newLogger builds the process-wide structured logger. LOG_LEVEL maps
@@ -279,13 +313,12 @@ func newLogger(level string) *slog.Logger {
 // this still returns the real underlying error and the caller still
 // refuses to boot.
 func buildRepoAdapters(ctx context.Context, databaseURL, migrationsPath, eventPublisher string, logger *slog.Logger) (
-	ports.OrderRepo, ports.EventPublisher, *pgxpool.Pool, func(), error,
+	ports.OrderRepo, ports.EventPublisher, *pgxpool.Pool, ports.UnitOfWork, *postgres.OutboxRelay, func(), error,
 ) {
 	noop := func() {}
 
 	var (
 		orders     ports.OrderRepo
-		defaultPub ports.EventPublisher
 		pool       *pgxpool.Pool
 		closeRepos = noop
 	)
@@ -293,17 +326,16 @@ func buildRepoAdapters(ctx context.Context, databaseURL, migrationsPath, eventPu
 	if databaseURL == "" {
 		logger.Info("database url not configured; using in-memory adapters")
 		orders = memory.NewOrderRepo()
-		defaultPub = events.NewLogPublisher(logger)
 	} else {
 		if err := bootretry.Retry(ctx, logger, "run migrations", func() error {
 			return postgres.RunMigrations(databaseURL, migrationsPath)
 		}); err != nil {
-			return nil, nil, nil, noop, err
+			return nil, nil, nil, nil, nil, noop, err
 		}
 		var err error
 		pool, err = postgres.NewPool(ctx, databaseURL)
 		if err != nil {
-			return nil, nil, nil, noop, err
+			return nil, nil, nil, nil, nil, noop, err
 		}
 		// NewPool/ParseConfig do not themselves establish a connection,
 		// so without this the first real failure would surface inside a
@@ -314,37 +346,78 @@ func buildRepoAdapters(ctx context.Context, databaseURL, migrationsPath, eventPu
 			return pool.Ping(ctx)
 		}); err != nil {
 			pool.Close()
-			return nil, nil, nil, noop, err
+			return nil, nil, nil, nil, nil, noop, err
 		}
 		orders = postgres.NewOrderRepo(pool)
-		defaultPub = postgres.NewEventPublisher(pool)
 		closeRepos = pool.Close
 	}
 
 	if !strings.EqualFold(eventPublisher, "kafka") {
-		return orders, defaultPub, pool, closeRepos, nil
+		// No transactional outbox without Kafka to relay onto: the log
+		// publisher is used regardless of persistence mode (mirrors
+		// process-path-management's buildEventPublisher convention) —
+		// use cases run their Save+Publish back to back (uow=nil, see
+		// atomically()) exactly as before this rollout. This also
+		// retires the old postgres.EventPublisher (`events` table with
+		// no relay ever draining it); Postgres persistence without Kafka
+		// now always logs instead of silently accumulating undelivered
+		// rows.
+		return orders, events.NewLogPublisher(logger), pool, nil, nil, closeRepos, nil
 	}
 
 	brokers := strings.Split(getenv("KAFKA_BROKERS", "localhost:9092"), ",")
 
-	// Integration publisher: forwards OrderAllocated/OrderPartiallyAllocated/
-	// OrderRepromised onto warehouse.order-management.events. Left
-	// exactly as-is.
+	// Integration encoder/writer: forwards OrderAllocated/
+	// OrderPartiallyAllocated/OrderRepromised onto
+	// warehouse.order-management.events. Left exactly as-is.
 	writer := kafkaadapter.NewWriter(brokers...)
 	integration := kafkaadapter.NewPublisher(writer)
 
-	// Analytics publisher: forwards the full report-input event set onto the
-	// SEPARATE warehouse.order-management.analytics topic for the data product
-	// (ADR-0006). It enriches each event with its process path via the order
-	// repo. A single OLTP event stream fans out to both publishers.
+	// Analytics encoder/writer: forwards the full report-input event set
+	// onto the SEPARATE warehouse.order-management.analytics topic for
+	// the data product (ADR-0006). It enriches each event with its
+	// process path via the order repo. A single OLTP event stream fans
+	// out to both.
 	analytics := kafkaadapter.NewAnalyticsPublisher(brokers, orders, uuid.NewString)
 
 	logger.Info("event publisher configured", "publisher", "kafka",
 		"integration_topic", kafkaadapter.Topic, "analytics_topic", kafkaadapter.AnalyticsTopic, "brokers", brokers)
 
-	fanOut := kafkaadapter.NewFanOutPublisher(integration, analytics)
+	if pool == nil {
+		// Kafka configured but no Postgres (in-memory dev run): publish
+		// straight to the broker, exactly as before this rollout — there
+		// is no transaction to bind an outbox row to.
+		fanOut := kafkaadapter.NewFanOutPublisher(integration, analytics)
+		closeAll := func() {
+			if err := analytics.Close(); err != nil {
+				logger.Error("error closing analytics kafka writer", "error", err)
+			}
+			if err := writer.Close(); err != nil {
+				logger.Error("error closing kafka writer", "error", err)
+			}
+			closeRepos()
+		}
+		return orders, fanOut, pool, nil, nil, closeAll, nil
+	}
+
+	// Transactional outbox: every event is enqueued once per (event x
+	// encoder) — one row for the integration topic, one for the
+	// analytics topic — in the SAME transaction as the aggregate write
+	// (via ports.UnitOfWork), so the store and both topics can never
+	// diverge from what actually happened. A background relay
+	// (started in run()) drains the rows onto Kafka afterwards.
+	uow := postgres.NewUnitOfWork(pool)
+	outboxPublisher := postgres.NewOutboxPublisher(pool, integration, analytics)
+	sink := kafkaadapter.NewRelaySink(brokers...)
+	relay := postgres.NewOutboxRelay(pool, sink, logger,
+		postgres.WithInterval(durationEnv("OUTBOX_RELAY_INTERVAL", time.Second, logger)))
+	logger.Info("event publisher configured (transactional outbox)",
+		"integration_topic", kafkaadapter.Topic, "analytics_topic", kafkaadapter.AnalyticsTopic)
 
 	closeAll := func() {
+		if err := sink.Close(); err != nil {
+			logger.Error("error closing relay sink", "error", err)
+		}
 		if err := analytics.Close(); err != nil {
 			logger.Error("error closing analytics kafka writer", "error", err)
 		}
@@ -354,7 +427,7 @@ func buildRepoAdapters(ctx context.Context, databaseURL, migrationsPath, eventPu
 		closeRepos()
 	}
 
-	return orders, fanOut, pool, closeAll, nil
+	return orders, outboxPublisher, pool, uow, relay, closeAll, nil
 }
 
 // buildRepromiseProcessedEvents selects RepromiseOrder's idempotency-gate

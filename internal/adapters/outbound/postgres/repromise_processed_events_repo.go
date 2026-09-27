@@ -22,7 +22,7 @@ func NewRepromiseProcessedEventsRepo(pool *pgxpool.Pool) *RepromiseProcessedEven
 // MarkProcessed records eventId in repromise_processed_events if absent,
 // returning true iff this call newly recorded it.
 func (r *RepromiseProcessedEventsRepo) MarkProcessed(ctx context.Context, eventId string) (bool, error) {
-	tag, err := r.pool.Exec(ctx,
+	tag, err := querierFrom(ctx, r.pool).Exec(ctx,
 		`INSERT INTO repromise_processed_events (event_id) VALUES ($1) ON CONFLICT (event_id) DO NOTHING`,
 		eventId)
 	if err != nil {

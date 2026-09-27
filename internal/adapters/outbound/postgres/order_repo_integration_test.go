@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/claudioed/order-management/internal/adapters/outbound/kafka"
 	"github.com/claudioed/order-management/internal/adapters/outbound/postgres"
 	"github.com/claudioed/order-management/internal/domain/order"
 	"github.com/claudioed/order-management/internal/domain/shared"
@@ -332,12 +333,17 @@ func TestOrderRepo_PromiseGroups_RoundTrip(t *testing.T) {
 	})
 }
 
-// TestEventPublisher_AppendsToEventsTable covers the Postgres EventPublisher:
-// every published event lands in the events table with its name, occurrence
-// time, and JSON payload.
-func TestEventPublisher_AppendsToEventsTable(t *testing.T) {
+// TestOutboxPublisher_AppendsToOutboxEventsTable covers the Postgres
+// OutboxPublisher: every published event lands in outbox_events, once
+// per configured encoder that has a wire form for it, with its topic,
+// type, and encoded payload — replacing the old EventPublisher (which
+// wrote to `events` with no relay ever draining it).
+func TestOutboxPublisher_AppendsToOutboxEventsTable(t *testing.T) {
 	pool := newPool(t)
-	pub := postgres.NewEventPublisher(pool)
+	orders := postgres.NewOrderRepo(pool)
+	writer := kafka.NewPublisher(nil)
+	analytics := &kafka.AnalyticsPublisher{Orders: orders, NewID: func() string { return "evt-int" }}
+	pub := postgres.NewOutboxPublisher(pool, writer, analytics)
 	ctx := context.Background()
 
 	occurredAt := time.Date(2026, 9, 7, 11, 30, 0, 0, time.UTC).UTC()
@@ -346,21 +352,34 @@ func TestEventPublisher_AppendsToEventsTable(t *testing.T) {
 		t.Fatalf("Publish: %v", err)
 	}
 
-	var name string
-	var payload []byte
+	// OrderReceived is analytics-only (kafka.Publisher's own published
+	// contract is OrderAllocated/OrderPartiallyAllocated/OrderRepromised
+	// — see that package's doc comment), so exactly one row is expected.
+	var topic, eventType string
+	var value []byte
 	err := pool.QueryRow(ctx,
-		`SELECT event_name, payload FROM events
-		 WHERE event_name = 'OrderReceived' AND payload::text LIKE '%ord-int-evt%'
+		`SELECT topic, event_type, value FROM outbox_events
+		 WHERE event_type = 'OrderReceived' AND published_at IS NULL
 		 LIMIT 1`,
-	).Scan(&name, &payload)
+	).Scan(&topic, &eventType, &value)
 	if err != nil {
-		t.Fatalf("query events: %v", err)
+		t.Fatalf("query outbox_events: %v", err)
 	}
-	if name != "OrderReceived" {
-		t.Errorf("event_name = %s, want OrderReceived", name)
+	if topic != kafka.AnalyticsTopic {
+		t.Errorf("topic = %s, want %s", topic, kafka.AnalyticsTopic)
 	}
-	if len(payload) == 0 {
-		t.Error("payload = empty, want the marshalled event JSON")
+	if eventType != "OrderReceived" {
+		t.Errorf("event_type = %s, want OrderReceived", eventType)
+	}
+	if len(value) == 0 {
+		t.Error("value = empty, want the marshalled event JSON")
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox_events WHERE event_type = 'OrderReceived'`).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly 1 outbox row for OrderReceived (analytics only), got %d", count)
 	}
 }
 

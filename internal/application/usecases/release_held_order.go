@@ -39,11 +39,12 @@ import (
 // carry the current state. Clearing it would make the order's history
 // unreadable and would break the retry-safety it exists to provide.
 type ReleaseHeldOrder struct {
-	Orders    ports.OrderRepo
-	Inventory ports.InventoryReservationClient
-	Events    ports.EventPublisher
-	Clock     ports.Clock
-	Promise   order.PromisePolicy
+	Orders     ports.OrderRepo
+	Inventory  ports.InventoryReservationClient
+	Events     ports.EventPublisher
+	Clock      ports.Clock
+	Promise    order.PromisePolicy
+	UnitOfWork ports.UnitOfWork
 }
 
 func (uc *ReleaseHeldOrder) Execute(ctx context.Context, id shared.OrderId) (*order.Order, error) {
@@ -85,7 +86,7 @@ func (uc *ReleaseHeldOrder) Execute(ctx context.Context, id shared.OrderId) (*or
 		return o, nil
 	}
 
-	deps := allocationDeps{Orders: uc.Orders, Inventory: uc.Inventory, Events: uc.Events, Clock: uc.Clock, Promise: uc.Promise}
+	deps := allocationDeps{Orders: uc.Orders, Inventory: uc.Inventory, Events: uc.Events, Clock: uc.Clock, Promise: uc.Promise, UnitOfWork: uc.UnitOfWork}
 	if _, err := allocateAndRelease(ctx, deps, o, nil, false, true); err != nil {
 		return nil, err
 	}

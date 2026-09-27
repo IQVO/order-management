@@ -44,6 +44,11 @@ type RepromiseOrder struct {
 	// silences it, mirroring this repo's other optional-Logger use
 	// cases.
 	Logger *slog.Logger
+	// UnitOfWork brackets the idempotency-gate MarkProcessed, the
+	// aggregate Save, and the OrderRepromised Publish in one atomic
+	// scope (transactional outbox). Optional: nil means "no
+	// transactional backing".
+	UnitOfWork ports.UnitOfWork
 }
 
 // RepromiseOrderRequest is one fulfillment-execution signal, already
@@ -79,59 +84,61 @@ type RepromiseOrderRequest struct {
 // erroring) is returned, so the Kafka consumer's own
 // commit-and-skip-on-error convention applies uniformly to both layers.
 func (uc *RepromiseOrder) Execute(ctx context.Context, req RepromiseOrderRequest) error {
-	isNew, err := uc.Processed.MarkProcessed(ctx, req.SourceEventId)
-	if err != nil {
-		return err
-	}
-	if !isNew {
-		uc.log("repromise: event already processed, skipping", "event_id", req.SourceEventId)
-		return nil
-	}
+	return atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
+		isNew, err := uc.Processed.MarkProcessed(ctx, req.SourceEventId)
+		if err != nil {
+			return err
+		}
+		if !isNew {
+			uc.log("repromise: event already processed, skipping", "event_id", req.SourceEventId)
+			return nil
+		}
 
-	o, err := uc.Orders.FindByID(ctx, req.OrderId)
-	if err != nil {
-		return err
-	}
-	if o == nil {
-		uc.log("repromise: order not found, skipping",
-			"event_id", req.SourceEventId, "order_id", req.OrderId.String())
-		return nil
-	}
+		o, err := uc.Orders.FindByID(ctx, req.OrderId)
+		if err != nil {
+			return err
+		}
+		if o == nil {
+			uc.log("repromise: order not found, skipping",
+				"event_id", req.SourceEventId, "order_id", req.OrderId.String())
+			return nil
+		}
 
-	currentGroup, found := groupContainingLine(o.PromiseGroups(), req.LineNo)
-	if !found {
-		uc.log("repromise: line not found in any current promise group, skipping",
-			"event_id", req.SourceEventId, "order_id", req.OrderId.String(), "line_no", req.LineNo)
-		return nil
-	}
+		currentGroup, found := groupContainingLine(o.PromiseGroups(), req.LineNo)
+		if !found {
+			uc.log("repromise: line not found in any current promise group, skipping",
+				"event_id", req.SourceEventId, "order_id", req.OrderId.String(), "line_no", req.LineNo)
+			return nil
+		}
 
-	freshGroups, ok := uc.Promise.PromiseGroups(uc.Clock.Now(), o)
-	if !ok {
-		uc.log("repromise: no fresh promise available for this order, skipping",
-			"event_id", req.SourceEventId, "order_id", req.OrderId.String(), "line_no", req.LineNo)
-		return nil
-	}
+		freshGroups, ok := uc.Promise.PromiseGroups(uc.Clock.Now(), o)
+		if !ok {
+			uc.log("repromise: no fresh promise available for this order, skipping",
+				"event_id", req.SourceEventId, "order_id", req.OrderId.String(), "line_no", req.LineNo)
+			return nil
+		}
 
-	freshGroup, found := groupContainingLine(freshGroups, req.LineNo)
-	if !found {
-		uc.log("repromise: line not found in the freshly recomputed promise groups, skipping",
-			"event_id", req.SourceEventId, "order_id", req.OrderId.String(), "line_no", req.LineNo)
-		return nil
-	}
+		freshGroup, found := groupContainingLine(freshGroups, req.LineNo)
+		if !found {
+			uc.log("repromise: line not found in the freshly recomputed promise groups, skipping",
+				"event_id", req.SourceEventId, "order_id", req.OrderId.String(), "line_no", req.LineNo)
+			return nil
+		}
 
-	if !promiseMoved(currentGroup.Promise, freshGroup.Promise) {
-		uc.log("repromise: promise unchanged, no re-promise needed",
-			"event_id", req.SourceEventId, "order_id", req.OrderId.String(), "line_no", req.LineNo)
-		return nil
-	}
+		if !promiseMoved(currentGroup.Promise, freshGroup.Promise) {
+			uc.log("repromise: promise unchanged, no re-promise needed",
+				"event_id", req.SourceEventId, "order_id", req.OrderId.String(), "line_no", req.LineNo)
+			return nil
+		}
 
-	o.SetPromiseGroups(freshGroups)
-	if err := uc.Orders.Save(ctx, o); err != nil {
-		return err
-	}
-	return uc.Events.Publish(ctx, shared.NewOrderRepromised(
-		uc.Clock.Now(), o.ID(), currentGroup.Promise.CptId, freshGroup.Promise.CptId, req.Reason,
-	))
+		o.SetPromiseGroups(freshGroups)
+		if err := uc.Orders.Save(ctx, o); err != nil {
+			return err
+		}
+		return uc.Events.Publish(ctx, shared.NewOrderRepromised(
+			uc.Clock.Now(), o.ID(), currentGroup.Promise.CptId, freshGroup.Promise.CptId, req.Reason,
+		))
+	})
 }
 
 // groupContainingLine returns the PromiseGroup in groups whose LineNos

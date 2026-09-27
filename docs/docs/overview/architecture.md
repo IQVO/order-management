@@ -102,7 +102,8 @@ The rule is enforced by `internal/architecture` (the `arch-test` CI job).
 | Port | Responsibility | Implementations |
 | --- | --- | --- |
 | `OrderRepo` | Persist/retrieve `Order`; mint IDs | `postgres`, `memory` |
-| `EventPublisher` | Publish a `shared.DomainEvent` | `events` (log), `postgres` (event table), `kafka` (integration + analytics fan-out) |
+| `EventPublisher` | Publish a `shared.DomainEvent` | `events` (log), `postgres` (transactional outbox, ADR 0022), `kafka` (integration + analytics fan-out, direct or via the outbox relay) |
+| `UnitOfWork` | Bracket a Save + Publish(es) atomically (ADR 0022) | `postgres` (real Postgres transaction), nil (pass-through) |
 | `Clock` | `Now()` — makes promise computation deterministic in tests | `memory.SystemClock`, fixed clocks in tests |
 | `OrderMetrics` | Order accepted/rejected counter | `telemetry` (OpenTelemetry) |
 | `InventoryReservationClient` | `Reserve`/`Revoke` against inventory-storage | `outbound/inventorystorage` (http), permissive no-op |

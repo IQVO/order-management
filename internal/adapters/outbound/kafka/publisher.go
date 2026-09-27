@@ -7,6 +7,13 @@
 // CLAUDE.md's Kafka integration section); every other domain event is a
 // local concern and is not forwarded here — mirroring inventory-storage's
 // own precedent of forwarding only a subset of its several domain events.
+//
+// Since the transactional outbox (see the ADR registered alongside
+// postgres.OutboxPublisher), Publish's work is split into Encode (build
+// the wire-ready message, no broker call) and the actual WriteMessages —
+// Encode is what postgres.OutboxPublisher calls to build an outbox row
+// inside the use case's transaction, and Publish itself is just
+// Encode + write for the direct (no-outbox) dev/test path.
 package kafka
 
 import (
@@ -43,6 +50,33 @@ const spanName = "kafka.publish " + Topic
 // tests can substitute a fake without a real broker.
 type Writer interface {
 	WriteMessages(ctx context.Context, msgs ...kafkago.Message) error
+}
+
+// Encoded is one already-encoded, wire-ready Kafka message: the topic it
+// belongs on (a multi-topic outbox/relay routes purely off this field —
+// the underlying relay writer carries no fixed topic of its own), the
+// partition key, the JSON-marshalled envelope, and the W3C trace headers
+// captured at encode time. It is the unit postgres.OutboxPublisher stores
+// and postgres.OutboxRelay later hands to a Sink, so the direct-publish
+// and outbox paths can never disagree about what a message looks like.
+type Encoded struct {
+	Topic     string
+	EventType string
+	Key       []byte
+	Value     []byte
+	Headers   []kafkago.Header
+}
+
+// Encoder turns one domain event into its Kafka wire form for one topic,
+// without sending it. Both Publisher (this file) and AnalyticsPublisher
+// (analytics_publisher.go) implement it, so postgres.NewOutboxPublisher
+// can fan a single event out to both topics inside one transaction. ok is
+// false when this encoder does not forward event's type at all — the
+// same "not part of my published contract" skip each encoder's own
+// Publish already performs, now exposed as data instead of a silent no-op
+// write.
+type Encoder interface {
+	Encode(ctx context.Context, event shared.DomainEvent) (enc Encoded, ok bool, err error)
 }
 
 // envelope is the integration event wrapper shared across all
@@ -161,7 +195,13 @@ func toReleasedLineData(lines []shared.ReleasedLine) []releasedLineData {
 	return out
 }
 
-func (p *Publisher) Publish(ctx context.Context, event shared.DomainEvent) error {
+// encodeEnvelope maps event onto its integration envelope and marshals it,
+// without touching tracing or the broker. ok is false for a domain event
+// outside this publisher's published contract (see the package doc
+// comment) — the caller (Publish, Encode) treats that as "nothing to do",
+// matching this publisher's pre-outbox behaviour of silently skipping
+// such events.
+func encodeEnvelope(event shared.DomainEvent) (env envelope, msg []byte, ok bool, err error) {
 	var data any
 
 	switch e := event.(type) {
@@ -189,15 +229,15 @@ func (p *Publisher) Publish(ctx context.Context, event shared.DomainEvent) error
 			Reason:   e.Reason,
 		}
 	default:
-		return nil
+		return envelope{}, nil, false, nil
 	}
 
 	payload, err := json.Marshal(data)
 	if err != nil {
-		return err
+		return envelope{}, nil, false, err
 	}
 
-	env := envelope{
+	env = envelope{
 		EventID:    uuid.NewString(),
 		EventType:  event.EventName(),
 		OccurredAt: event.OccurredAt(),
@@ -205,8 +245,49 @@ func (p *Publisher) Publish(ctx context.Context, event shared.DomainEvent) error
 		Data:       payload,
 	}
 
-	msg, err := json.Marshal(env)
+	msg, err = json.Marshal(env)
 	if err != nil {
+		return envelope{}, nil, false, err
+	}
+	return env, msg, true, nil
+}
+
+// Encode implements Encoder: it builds the wire-ready integration message
+// for event (no span of its own — "or none", per the outbox design doc —
+// so the trace headers it injects carry whatever span is already active
+// on ctx, typically the HTTP request that caused this event, letting a
+// consumer parent onto the REQUEST that enqueued the row rather than a
+// later, unrelated relay pass).
+func (p *Publisher) Encode(ctx context.Context, event shared.DomainEvent) (Encoded, bool, error) {
+	env, msg, ok, err := encodeEnvelope(event)
+	if err != nil || !ok {
+		return Encoded{}, ok, err
+	}
+	headers := []kafkago.Header{}
+	otel.GetTextMapPropagator().Inject(ctx, headerCarrier{headers: &headers})
+	return Encoded{Topic: Topic, EventType: env.EventType, Value: msg, Headers: headers}, true, nil
+}
+
+// Publish forwards event onto Kafka directly (no outbox) — used when the
+// service runs without Postgres (EVENT_PUBLISHER=kafka with no
+// DATABASE_URL). It is Encode's logic plus the actual broker write,
+// unchanged in observable behaviour from before the outbox refactor: one
+// producer span per call, header injection from that span's context, and
+// the call's error recorded on the span before it is returned.
+func (p *Publisher) Publish(ctx context.Context, event shared.DomainEvent) error {
+	_, msg, ok, err := encodeEnvelope(event)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+
+	// Re-decode just enough of the envelope for the span attributes —
+	// cheaper and simpler than threading env through unchanged, and this
+	// path is not hot (a request thread, not the relay's tight loop).
+	var env envelope
+	if err := json.Unmarshal(msg, &env); err != nil {
 		return err
 	}
 
