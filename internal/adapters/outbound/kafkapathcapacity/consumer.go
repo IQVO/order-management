@@ -46,6 +46,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -68,11 +69,84 @@ const consumerGroupPrefix = "order-management-path-capacity"
 // eventTypeChanged is the one event type this consumer acts on.
 const eventTypeChanged = "PathCapacityChanged"
 
+// cloudEventsTypePathCapacityChanged is the exact reverse-DNS `type`
+// string wes-work-planning's asyncapi.yaml specifies for
+// PathCapacityChanged (ADR-0018, ADR-0021 dual-read migration). Read
+// directly from apis/asyncapi.yaml — do not re-derive the middle
+// segment.
+const cloudEventsTypePathCapacityChanged = "com.warehouse.wes.work-planning.workpool.PathCapacityChanged"
+
 // envelope is the CloudEvents-like wrapper shared across every
 // warehouse-systems publisher.
 type envelope struct {
 	EventType string          `json:"event_type"`
 	Data      json.RawMessage `json:"data"`
+}
+
+// specversionProbe is a minimal decode used purely to discriminate the
+// flat envelope from a CloudEvents 1.0 structured envelope (ADR-0021
+// Phase 2 Task 2b): a CloudEvents message carries a non-empty
+// `specversion` key that the flat envelope never has.
+type specversionProbe struct {
+	Specversion string `json:"specversion"`
+}
+
+// cloudEventsEnvelope is the CloudEvents 1.0 structured envelope shape
+// wes-work-planning's asyncapi.yaml documents for this topic. `type` is
+// the reverse-DNS event type string; `data` is byte-identical to the
+// flat envelope's `data`.
+type cloudEventsEnvelope struct {
+	Specversion string          `json:"specversion"`
+	Type        string          `json:"type"`
+	Data        json.RawMessage `json:"data"`
+}
+
+// bareEventType strips a CloudEvents reverse-DNS type string back to
+// the bare event name the existing switch/case logic keys on (e.g.
+// "com.warehouse.wes.work-planning.workpool.PathCapacityChanged" ->
+// "PathCapacityChanged"). Returns the input unchanged if it contains no
+// dot, so a malformed/unexpected type string fails soft downstream
+// (falls into the "unrecognized event type" default branch) rather than
+// panicking here.
+func bareEventType(ceType string) string {
+	if idx := strings.LastIndex(ceType, "."); idx >= 0 && idx+1 < len(ceType) {
+		return ceType[idx+1:]
+	}
+	return ceType
+}
+
+// decodeEnvelope normalizes either wire shape (today's flat envelope, or
+// a CloudEvents 1.0 structured envelope, per ADR-0021 Phase 2 Task 2b)
+// into this consumer's existing internal envelope representation, so
+// the unchanged handle/switch logic below never needs to know which
+// shape arrived on the wire. specversion's presence is the sole
+// discriminator (see ADR-0021's decision section) — never inferred from
+// any other field.
+func decodeEnvelope(raw []byte) (envelope, error) {
+	var probe specversionProbe
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return envelope{}, fmt.Errorf("kafkapathcapacity: probe specversion: %w", err)
+	}
+	if probe.Specversion == "" {
+		// Flat envelope path (today's shape, unchanged).
+		var flat envelope
+		if err := json.Unmarshal(raw, &flat); err != nil {
+			return envelope{}, fmt.Errorf("kafkapathcapacity: unmarshal envelope: %w", err)
+		}
+		return flat, nil
+	}
+	if probe.Specversion != "1.0" {
+		// Malformed/unrecognized specversion: fail soft, mirroring
+		// this consumer's existing malformed-message handling
+		// posture (handle() logs and skips rather than wedging the
+		// Run loop).
+		return envelope{}, fmt.Errorf("kafkapathcapacity: unrecognized CloudEvents specversion %q", probe.Specversion)
+	}
+	var ce cloudEventsEnvelope
+	if err := json.Unmarshal(raw, &ce); err != nil {
+		return envelope{}, fmt.Errorf("kafkapathcapacity: unmarshal CloudEvents envelope: %w", err)
+	}
+	return envelope{EventType: bareEventType(ce.Type), Data: ce.Data}, nil
 }
 
 // capacityData is the wire payload shape for PathCapacityChanged,
@@ -330,9 +404,9 @@ func (c *Consumer) checkReady(msg kafkago.Message) {
 }
 
 func (c *Consumer) handle(msg kafkago.Message) error {
-	var env envelope
-	if err := json.Unmarshal(msg.Value, &env); err != nil {
-		return fmt.Errorf("kafkapathcapacity: unmarshal envelope: %w", err)
+	env, err := decodeEnvelope(msg.Value)
+	if err != nil {
+		return fmt.Errorf("kafkapathcapacity: decode envelope: %w", err)
 	}
 
 	switch env.EventType {
