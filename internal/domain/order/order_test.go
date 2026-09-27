@@ -53,26 +53,34 @@ func TestNewOrderInvariants(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			o, err := order.New(tt.id, tt.lines, false)
-			if !errors.Is(err, tt.wantErr) {
-				t.Fatalf("err = %v, want %v", err, tt.wantErr)
-			}
-			if tt.wantErr != nil {
-				if o != nil {
-					t.Fatalf("expected no order on error, got %+v", o)
-				}
-				return
-			}
-			if o.ID() != tt.id {
-				t.Fatalf("ID() = %q, want %q", o.ID(), tt.id)
-			}
-			if o.Status() != order.StatusReceived {
-				t.Fatalf("Status() = %q, want %q", o.Status(), order.StatusReceived)
-			}
-			if o.PromiseDate() != nil {
-				t.Fatalf("a received order must have no promise date")
-			}
+			assertNewOrderOutcome(t, tt.id, tt.lines, tt.wantErr)
 		})
+	}
+}
+
+// assertNewOrderOutcome pins one New() case's outcome: the exact
+// validation error (and no aggregate) for a rejected intake, or the
+// Received / correct-id / no-promise-yet shape for a valid one.
+func assertNewOrderOutcome(t *testing.T, id shared.OrderId, lines []*order.OrderLine, wantErr error) {
+	t.Helper()
+	o, err := order.New(id, lines, false)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+	if wantErr != nil {
+		if o != nil {
+			t.Fatalf("expected no order on error, got %+v", o)
+		}
+		return
+	}
+	if o.ID() != id {
+		t.Fatalf("ID() = %q, want %q", o.ID(), id)
+	}
+	if o.Status() != order.StatusReceived {
+		t.Fatalf("Status() = %q, want %q", o.Status(), order.StatusReceived)
+	}
+	if o.PromiseDate() != nil {
+		t.Fatalf("a received order must have no promise date")
 	}
 }
 
@@ -107,51 +115,55 @@ func TestAllocateRejectsAnAlreadyAllocatedLine(t *testing.T) {
 
 // INVARIANT: a Backordered line may return to Allocated ONLY via RetryAllocate.
 func TestBackorderedLineOnlyReturnsToAllocatedViaRetry(t *testing.T) {
-	t.Run("Allocate refuses a backordered line", func(t *testing.T) {
-		o := newOrder(t, false, lineSpec{sku: "SKU-1", qty: 1})
-		if err := o.MarkBackordered(1); err != nil {
-			t.Fatalf("MarkBackordered: %v", err)
-		}
-		err := o.Allocate(1, "res-1")
-		if !errors.Is(err, order.ErrLineNotPending) {
-			t.Fatalf("Allocate err = %v, want %v", err, order.ErrLineNotPending)
-		}
-		if o.Lines()[0].Status() != order.LineBackordered {
-			t.Fatalf("line status = %q, want %q", o.Lines()[0].Status(), order.LineBackordered)
-		}
-	})
+	t.Run("Allocate refuses a backordered line", testAllocateRefusesBackorderedLine)
+	t.Run("RetryAllocate refuses a line that is not backordered", testRetryAllocateRefusesNotBackordered)
+	t.Run("RetryAllocate is the sanctioned route", testRetryAllocateIsSanctionedRoute)
+}
 
-	t.Run("RetryAllocate refuses a line that is not backordered", func(t *testing.T) {
-		o := newOrder(t, false, lineSpec{sku: "SKU-1", qty: 1})
-		err := o.RetryAllocate(1, "res-1")
-		if !errors.Is(err, order.ErrLineNotBackordered) {
-			t.Fatalf("RetryAllocate on a Pending line err = %v, want %v", err, order.ErrLineNotBackordered)
-		}
+func testAllocateRefusesBackorderedLine(t *testing.T) {
+	o := newOrder(t, false, lineSpec{sku: "SKU-1", qty: 1})
+	if err := o.MarkBackordered(1); err != nil {
+		t.Fatalf("MarkBackordered: %v", err)
+	}
+	err := o.Allocate(1, "res-1")
+	if !errors.Is(err, order.ErrLineNotPending) {
+		t.Fatalf("Allocate err = %v, want %v", err, order.ErrLineNotPending)
+	}
+	if o.Lines()[0].Status() != order.LineBackordered {
+		t.Fatalf("line status = %q, want %q", o.Lines()[0].Status(), order.LineBackordered)
+	}
+}
 
-		if err := o.Allocate(1, "res-1"); err != nil {
-			t.Fatalf("Allocate: %v", err)
-		}
-		err = o.RetryAllocate(1, "res-2")
-		if !errors.Is(err, order.ErrLineNotBackordered) {
-			t.Fatalf("RetryAllocate on an Allocated line err = %v, want %v", err, order.ErrLineNotBackordered)
-		}
-	})
+func testRetryAllocateRefusesNotBackordered(t *testing.T) {
+	o := newOrder(t, false, lineSpec{sku: "SKU-1", qty: 1})
+	err := o.RetryAllocate(1, "res-1")
+	if !errors.Is(err, order.ErrLineNotBackordered) {
+		t.Fatalf("RetryAllocate on a Pending line err = %v, want %v", err, order.ErrLineNotBackordered)
+	}
 
-	t.Run("RetryAllocate is the sanctioned route", func(t *testing.T) {
-		o := newOrder(t, false, lineSpec{sku: "SKU-1", qty: 1})
-		if err := o.MarkBackordered(1); err != nil {
-			t.Fatalf("MarkBackordered: %v", err)
-		}
-		if err := o.RetryAllocate(1, "res-7"); err != nil {
-			t.Fatalf("RetryAllocate: %v", err)
-		}
-		if o.Lines()[0].Status() != order.LineAllocated {
-			t.Fatalf("line status = %q, want %q", o.Lines()[0].Status(), order.LineAllocated)
-		}
-		if got := o.Lines()[0].ReservationID(); got == nil || *got != "res-7" {
-			t.Fatalf("ReservationID() = %v, want res-7", got)
-		}
-	})
+	if err := o.Allocate(1, "res-1"); err != nil {
+		t.Fatalf("Allocate: %v", err)
+	}
+	err = o.RetryAllocate(1, "res-2")
+	if !errors.Is(err, order.ErrLineNotBackordered) {
+		t.Fatalf("RetryAllocate on an Allocated line err = %v, want %v", err, order.ErrLineNotBackordered)
+	}
+}
+
+func testRetryAllocateIsSanctionedRoute(t *testing.T) {
+	o := newOrder(t, false, lineSpec{sku: "SKU-1", qty: 1})
+	if err := o.MarkBackordered(1); err != nil {
+		t.Fatalf("MarkBackordered: %v", err)
+	}
+	if err := o.RetryAllocate(1, "res-7"); err != nil {
+		t.Fatalf("RetryAllocate: %v", err)
+	}
+	if o.Lines()[0].Status() != order.LineAllocated {
+		t.Fatalf("line status = %q, want %q", o.Lines()[0].Status(), order.LineAllocated)
+	}
+	if got := o.Lines()[0].ReservationID(); got == nil || *got != "res-7" {
+		t.Fatalf("ReservationID() = %v, want res-7", got)
+	}
 }
 
 func TestMarkBackordered(t *testing.T) {

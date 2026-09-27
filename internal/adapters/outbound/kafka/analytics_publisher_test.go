@@ -157,44 +157,53 @@ func TestAnalyticsPublisher_PublishesEachEventType(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			w := &fakeWriter{}
-			p := kafka.NewAnalyticsPublisher(nil, fakeOrderRepo{order: orderOnPath(t, "o1", "pick")}, func() string { return "evt-fixed" })
-			p.Writer = w
-
-			if err := p.Publish(context.Background(), tt.event); err != nil {
-				t.Fatalf("Publish: %v", err)
-			}
-			if len(w.messages) != 1 {
-				t.Fatalf("expected 1 message, got %d", len(w.messages))
-			}
-			msg := w.messages[0]
-			if string(msg.Key) != tt.wantKey {
-				t.Errorf("key = %q, want %q", string(msg.Key), tt.wantKey)
-			}
-
-			env, data := decodeAnalytics(t, msg.Value)
-			if env.EventType != tt.wantType {
-				t.Errorf("event_type = %q, want %q", env.EventType, tt.wantType)
-			}
-			if env.EventID != "evt-fixed" {
-				t.Errorf("event_id = %q, want evt-fixed", env.EventID)
-			}
-			if env.Source != "order-management" {
-				t.Errorf("source = %q, want order-management", env.Source)
-			}
-			if env.SchemaVersion != 1 {
-				t.Errorf("schema_version = %d, want 1", env.SchemaVersion)
-			}
-			if !env.OccurredAt.Equal(at) {
-				t.Errorf("occurred_at = %v, want %v", env.OccurredAt, at)
-			}
-			if data["path_id"] != tt.wantPath {
-				t.Errorf("path_id = %v, want %q", data["path_id"], tt.wantPath)
-			}
-			if got := data[tt.wantDataField]; got != tt.wantDataValue {
-				t.Errorf("data[%q] = %v (%T), want %v (%T)", tt.wantDataField, got, got, tt.wantDataValue, tt.wantDataValue)
-			}
+			assertAnalyticsEvent(t, at, tt.event, tt.wantKey, tt.wantType, tt.wantPath, tt.wantDataField, tt.wantDataValue)
 		})
+	}
+}
+
+// assertAnalyticsEvent publishes event through a fresh analytics
+// publisher over the fake writer and asserts the envelope, key, path
+// enrichment and one per-case data field — the common shape every
+// TestAnalyticsPublisher_PublishesEachEventType case checks.
+func assertAnalyticsEvent(t *testing.T, at time.Time, event shared.DomainEvent, wantKey, wantType, wantPath, wantDataField string, wantDataValue any) {
+	t.Helper()
+	w := &fakeWriter{}
+	p := kafka.NewAnalyticsPublisher(nil, fakeOrderRepo{order: orderOnPath(t, "o1", "pick")}, func() string { return "evt-fixed" })
+	p.Writer = w
+
+	if err := p.Publish(context.Background(), event); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if len(w.messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(w.messages))
+	}
+	msg := w.messages[0]
+	if string(msg.Key) != wantKey {
+		t.Errorf("key = %q, want %q", string(msg.Key), wantKey)
+	}
+
+	env, data := decodeAnalytics(t, msg.Value)
+	if env.EventType != wantType {
+		t.Errorf("event_type = %q, want %q", env.EventType, wantType)
+	}
+	if env.EventID != "evt-fixed" {
+		t.Errorf("event_id = %q, want evt-fixed", env.EventID)
+	}
+	if env.Source != "order-management" {
+		t.Errorf("source = %q, want order-management", env.Source)
+	}
+	if env.SchemaVersion != 1 {
+		t.Errorf("schema_version = %d, want 1", env.SchemaVersion)
+	}
+	if !env.OccurredAt.Equal(at) {
+		t.Errorf("occurred_at = %v, want %v", env.OccurredAt, at)
+	}
+	if data["path_id"] != wantPath {
+		t.Errorf("path_id = %v, want %q", data["path_id"], wantPath)
+	}
+	if got := data[wantDataField]; got != wantDataValue {
+		t.Errorf("data[%q] = %v (%T), want %v (%T)", wantDataField, got, got, wantDataValue, wantDataValue)
 	}
 }
 

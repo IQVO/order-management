@@ -352,26 +352,14 @@ func allocateAndRelease(
 			reportErr = allocErr
 			// Persist whatever was genuinely reserved upstream before
 			// surfacing the hard failure — see the allocateLines doc.
+			// Only an infrastructure failure persisting/publishing that
+			// partial progress fails the closure (joined onto allocErr
+			// so errors.Is still holds); otherwise the transaction
+			// commits the partial progress and reportErr carries the
+			// hard failure back to this function's own caller.
 			if outcome.allocated > 0 {
-				deps.setPromiseDate(o)
-				if err := deps.Orders.Save(ctx, o); err != nil {
-					return errors.Join(allocErr, err)
-				}
-				// Best-effort visibility: a failure publishing this event
-				// must never mask or replace allocErr, the real failure —
-				// it is joined in exactly like the Save-error case above
-				// so errors.Is(err, allocErr) still holds on the final
-				// returned error.
-				remaining := len(o.LinesWithStatus(order.LinePending))
-				if err := deps.Events.Publish(ctx, shared.NewOrderAllocationPartiallyFailed(
-					deps.Clock.Now(), o.ID(), outcome.allocated, remaining, truncateCause(allocErr.Error()),
-				)); err != nil {
-					return errors.Join(allocErr, err)
-				}
+				return salvageAllocationFailure(ctx, deps, o, outcome, allocErr)
 			}
-			// Let the transaction commit whatever partial progress was
-			// just persisted above; reportErr still carries the hard
-			// failure back to this function's own caller.
 			return nil
 		}
 
@@ -399,30 +387,9 @@ func allocateAndRelease(
 		// passes, every line the aggregate now reports Allocated (this pass's
 		// newly-allocated lines, and any already-Allocated from an earlier
 		// pass) is eligible and is released right here, in the same flow.
-		promiseByLine := promiseGroupByLine(o)
-		var released []shared.ReleasedLine
-		if err := o.EnsureReleasable(); err == nil {
-			class := o.FulfillmentClass().String()
-			for _, line := range o.LinesWithStatus(order.LineAllocated) {
-				if err := o.Release(line.LineNo()); err != nil {
-					return err
-				}
-				rl := shared.ReleasedLine{
-					LineNo: line.LineNo(), SKU: line.SKU(), PathID: line.PathID(), GiftWrap: line.GiftWrap(),
-					FulfillmentClass: class,
-				}
-				if g, ok := promiseByLine[line.LineNo()]; ok {
-					cutoffAt := g.Promise.CutoffAt
-					basis := g.Promise.Basis.String()
-					rl.PromiseCutoffAt = &cutoffAt
-					rl.PromiseBasis = &basis
-					if g.Promise.CptId != "" {
-						cptId := g.Promise.CptId
-						rl.PromiseCptId = &cptId
-					}
-				}
-				released = append(released, rl)
-			}
+		released, relErr := releaseAllocatedLines(o, promiseGroupByLine(o))
+		if relErr != nil {
+			return relErr
 		}
 
 		if err := deps.Orders.Save(ctx, o); err != nil {
@@ -437,6 +404,72 @@ func allocateAndRelease(
 		return outcome, reportErr
 	}
 	return outcome, nil
+}
+
+// salvageAllocationFailure persists the partial allocation that genuinely
+// happened before a hard (non-business) allocation failure, so a real
+// upstream reservation is never stranded with nothing in this context able
+// to revoke it, and publishes OrderAllocationPartiallyFailed for
+// visibility. It returns nil when the partial progress was persisted —
+// the hard failure itself travels to the caller via allocateAndRelease's
+// reportErr, letting the transaction COMMIT the progress — and any save
+// or publish failure is returned joined onto allocErr so
+// errors.Is(err, allocErr) still holds.
+func salvageAllocationFailure(ctx context.Context, deps allocationDeps, o *order.Order, outcome allocationOutcome, allocErr error) error {
+	deps.setPromiseDate(o)
+	if saveErr := deps.Orders.Save(ctx, o); saveErr != nil {
+		return errors.Join(allocErr, saveErr)
+	}
+	// Best-effort visibility: a failure publishing this event must never
+	// mask or replace allocErr, the real failure — it is joined in
+	// exactly like the saveErr case above so errors.Is(err, allocErr)
+	// still holds.
+	remaining := len(o.LinesWithStatus(order.LinePending))
+	if pubErr := deps.Events.Publish(ctx, shared.NewOrderAllocationPartiallyFailed(
+		deps.Clock.Now(), o.ID(), outcome.allocated, remaining, truncateCause(allocErr.Error()),
+	)); pubErr != nil {
+		return errors.Join(allocErr, pubErr)
+	}
+	return nil
+}
+
+// releaseAllocatedLines performs allocateAndRelease's release leg: when
+// the aggregate passes the BR3 gate (o.EnsureReleasable), every line it
+// currently reports Allocated is released via the pure domain transition
+// o.Release, and its released-line detail — attributed to the specific
+// PromiseGroup the line belongs to (ADR 0014 §3 / ADR 0017) — is
+// collected for the integration event payload.
+//
+// A nil slice with a nil error means release did not run or had nothing
+// to release: EnsureReleasable refusing a ship-complete order that still
+// has unallocated lines is a gate, not a failure.
+func releaseAllocatedLines(o *order.Order, promiseByLine map[int]order.PromiseGroup) ([]shared.ReleasedLine, error) {
+	if err := o.EnsureReleasable(); err != nil {
+		return nil, nil
+	}
+	class := o.FulfillmentClass().String()
+	var released []shared.ReleasedLine
+	for _, line := range o.LinesWithStatus(order.LineAllocated) {
+		if err := o.Release(line.LineNo()); err != nil {
+			return nil, err
+		}
+		rl := shared.ReleasedLine{
+			LineNo: line.LineNo(), SKU: line.SKU(), PathID: line.PathID(), GiftWrap: line.GiftWrap(),
+			FulfillmentClass: class,
+		}
+		if g, ok := promiseByLine[line.LineNo()]; ok {
+			cutoffAt := g.Promise.CutoffAt
+			basis := g.Promise.Basis.String()
+			rl.PromiseCutoffAt = &cutoffAt
+			rl.PromiseBasis = &basis
+			if g.Promise.CptId != "" {
+				cptId := g.Promise.CptId
+				rl.PromiseCptId = &cptId
+			}
+		}
+		released = append(released, rl)
+	}
+	return released, nil
 }
 
 // WorkUnitID builds the deterministic, deliberately-never-transmitted id

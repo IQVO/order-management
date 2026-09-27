@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/claudioed/order-management/internal/adapters/outbound/kafkacatalog"
 	"github.com/claudioed/order-management/internal/adapters/outbound/kafkacptschedule"
@@ -61,14 +62,58 @@ func wireProcessPathCatalogue(ctx context.Context, catalogueSource, kafkaBrokers
 	consumerCtx, cancel := context.WithCancel(context.Background())
 	cleanup := func() { cancel() }
 
+	kafkaCatalogue, err := startCatalogueConsumer(ctx, consumerCtx, brokerList, logger)
+	if err != nil {
+		cleanup()
+		return nil, nil, nil, noop, fmt.Errorf("failed to start the Kafka-sourced process-path catalogue: %w", err)
+	}
+
+	cptScheduleConsumer, err := startCPTScheduleConsumer(ctx, consumerCtx, brokerList, logger)
+	if err != nil {
+		cleanup()
+		return nil, nil, nil, noop, fmt.Errorf("failed to start the Kafka-sourced CPT schedule cache: %w", err)
+	}
+
+	pathCapacityConsumer, err := startPathCapacityConsumer(ctx, consumerCtx, brokerList, logger)
+	if err != nil {
+		cleanup()
+		return nil, nil, nil, noop, fmt.Errorf("failed to start the Kafka-sourced path capacity cache: %w", err)
+	}
+
+	if err := waitReady(logger, "waiting for the process-path catalogue to replay its initial history before accepting traffic",
+		kafkacatalog.WaitReadyTimeout, kafkaCatalogue.WaitReady); err != nil {
+		cleanup()
+		return nil, nil, nil, noop, fmt.Errorf("process-path catalogue did not become ready within %s: %w", kafkacatalog.WaitReadyTimeout, err)
+	}
+
+	if err := waitReady(logger, "waiting for the CPT schedule cache to replay its initial history before accepting traffic",
+		kafkacptschedule.WaitReadyTimeout, cptScheduleConsumer.WaitReady); err != nil {
+		cleanup()
+		return nil, nil, nil, noop, fmt.Errorf("CPT schedule cache did not become ready within %s: %w", kafkacptschedule.WaitReadyTimeout, err)
+	}
+
+	if err := waitReady(logger, "waiting for the path capacity cache to replay its initial history before accepting traffic",
+		kafkapathcapacity.WaitReadyTimeout, pathCapacityConsumer.WaitReady); err != nil {
+		cleanup()
+		return nil, nil, nil, noop, fmt.Errorf("path capacity cache did not become ready within %s: %w", kafkapathcapacity.WaitReadyTimeout, err)
+	}
+
+	return kafkaCatalogue, cptScheduleConsumer, pathCapacityConsumer, cleanup, nil
+}
+
+// startCatalogueConsumer retries the Kafka-sourced process-path
+// catalogue's constructor with exponential backoff (see
+// wireProcessPathCatalogue's doc comment for why), then starts its Run
+// loop on consumerCtx so the caller's WaitReady calls are answered by a
+// consumer that is already draining the topic.
+func startCatalogueConsumer(ctx, consumerCtx context.Context, brokerList []string, logger *slog.Logger) (*kafkacatalog.Consumer, error) {
 	var kafkaCatalogue *kafkacatalog.Consumer
 	if err := bootretry.Retry(ctx, logger, "start process-path catalogue consumer", func() error {
 		var err error
 		kafkaCatalogue, err = kafkacatalog.NewConsumer(context.Background(), brokerList, logger)
 		return err
 	}); err != nil {
-		cleanup()
-		return nil, nil, nil, noop, fmt.Errorf("failed to start the Kafka-sourced process-path catalogue: %w", err)
+		return nil, err
 	}
 	logger.Info("process-path catalogue source configured", "source", "kafka", "topic", kafkacatalog.Topic)
 	go func() {
@@ -77,15 +122,21 @@ func wireProcessPathCatalogue(ctx context.Context, catalogueSource, kafkaBrokers
 			logger.Error("process-path catalogue consumer stopped", "error", err)
 		}
 	}()
+	return kafkaCatalogue, nil
+}
 
+// startCPTScheduleConsumer retries the Kafka-sourced CPT schedule cache's
+// constructor with exponential backoff, then starts its Run loop on
+// consumerCtx — the same boot sequence as the catalogue consumer, on the
+// cache ADR-0014 step A added.
+func startCPTScheduleConsumer(ctx, consumerCtx context.Context, brokerList []string, logger *slog.Logger) (*kafkacptschedule.Consumer, error) {
 	var cptScheduleConsumer *kafkacptschedule.Consumer
 	if err := bootretry.Retry(ctx, logger, "start CPT schedule cache consumer", func() error {
 		var err error
 		cptScheduleConsumer, err = kafkacptschedule.NewConsumer(context.Background(), brokerList, logger)
 		return err
 	}); err != nil {
-		cleanup()
-		return nil, nil, nil, noop, fmt.Errorf("failed to start the Kafka-sourced CPT schedule cache: %w", err)
+		return nil, err
 	}
 	logger.Info("CPT schedule cache source configured", "source", "kafka", "topic", kafkacptschedule.Topic)
 	go func() {
@@ -94,15 +145,21 @@ func wireProcessPathCatalogue(ctx context.Context, catalogueSource, kafkaBrokers
 			logger.Error("CPT schedule consumer stopped", "error", err)
 		}
 	}()
+	return cptScheduleConsumer, nil
+}
 
+// startPathCapacityConsumer retries the Kafka-sourced path capacity
+// cache's constructor with exponential backoff, then starts its Run loop
+// on consumerCtx — the same boot sequence as the catalogue consumer, on
+// the cache ADR-0015 added.
+func startPathCapacityConsumer(ctx, consumerCtx context.Context, brokerList []string, logger *slog.Logger) (*kafkapathcapacity.Consumer, error) {
 	var pathCapacityConsumer *kafkapathcapacity.Consumer
 	if err := bootretry.Retry(ctx, logger, "start path capacity cache consumer", func() error {
 		var err error
 		pathCapacityConsumer, err = kafkapathcapacity.NewConsumer(context.Background(), brokerList, logger)
 		return err
 	}); err != nil {
-		cleanup()
-		return nil, nil, nil, noop, fmt.Errorf("failed to start the Kafka-sourced path capacity cache: %w", err)
+		return nil, err
 	}
 	logger.Info("path capacity cache source configured", "source", "kafka", "topic", kafkapathcapacity.Topic)
 	go func() {
@@ -111,33 +168,15 @@ func wireProcessPathCatalogue(ctx context.Context, catalogueSource, kafkaBrokers
 			logger.Error("path capacity consumer stopped", "error", err)
 		}
 	}()
+	return pathCapacityConsumer, nil
+}
 
-	logger.Info("waiting for the process-path catalogue to replay its initial history before accepting traffic")
-	waitCtx, waitCancel := context.WithTimeout(context.Background(), kafkacatalog.WaitReadyTimeout)
-	err := kafkaCatalogue.WaitReady(waitCtx)
-	waitCancel()
-	if err != nil {
-		cleanup()
-		return nil, nil, nil, noop, fmt.Errorf("process-path catalogue did not become ready within %s: %w", kafkacatalog.WaitReadyTimeout, err)
-	}
-
-	logger.Info("waiting for the CPT schedule cache to replay its initial history before accepting traffic")
-	scheduleWaitCtx, scheduleWaitCancel := context.WithTimeout(context.Background(), kafkacptschedule.WaitReadyTimeout)
-	err = cptScheduleConsumer.WaitReady(scheduleWaitCtx)
-	scheduleWaitCancel()
-	if err != nil {
-		cleanup()
-		return nil, nil, nil, noop, fmt.Errorf("CPT schedule cache did not become ready within %s: %w", kafkacptschedule.WaitReadyTimeout, err)
-	}
-
-	logger.Info("waiting for the path capacity cache to replay its initial history before accepting traffic")
-	capacityWaitCtx, capacityWaitCancel := context.WithTimeout(context.Background(), kafkapathcapacity.WaitReadyTimeout)
-	err = pathCapacityConsumer.WaitReady(capacityWaitCtx)
-	capacityWaitCancel()
-	if err != nil {
-		cleanup()
-		return nil, nil, nil, noop, fmt.Errorf("path capacity cache did not become ready within %s: %w", kafkapathcapacity.WaitReadyTimeout, err)
-	}
-
-	return kafkaCatalogue, cptScheduleConsumer, pathCapacityConsumer, cleanup, nil
+// waitReady waits for one cache's initial history replay under its own
+// WaitReadyTimeout budget, emitting the same waiting message the original
+// inline blocks did.
+func waitReady(logger *slog.Logger, waitingMsg string, timeout time.Duration, ready func(context.Context) error) error {
+	logger.Info(waitingMsg)
+	waitCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return ready(waitCtx)
 }
