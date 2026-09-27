@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riandyrn/otelchi"
 	otelchimetric "github.com/riandyrn/otelchi/metric"
 
@@ -30,6 +31,15 @@ type Server struct {
 	ReleaseHeld     *usecases.ReleaseHeldOrder
 	CancelOrder     *usecases.CancelOrder
 	GetOrder        *usecases.GetOrder
+	// IdempotencyPool, when non-nil, wires RequireIdempotencyKey onto
+	// POST /orders (see idempotency.go). A nil pool means "no
+	// transactional Postgres backing wired" (in-memory dev/test
+	// configuration) — the idempotency middleware needs a real
+	// pgxpool.Pool to begin its own transaction, so it is simply not
+	// applied in that case, exactly this codebase's existing convention
+	// for every other optional Postgres-backed capability (UnitOfWork,
+	// the outbox relay).
+	IdempotencyPool *pgxpool.Pool
 }
 
 // NewRouter builds the chi router for every endpoint in CLAUDE.md's REST
@@ -67,7 +77,20 @@ func NewRouter(s *Server, logger *slog.Logger, serviceName string) http.Handler 
 
 	r.Get("/healthz", s.handleHealthz)
 
-	r.Post("/orders", s.handleReceiveOrder)
+	// POST /orders is route-scoped (r.With, not r.Use) behind
+	// RequireIdempotencyKey — it is the one mutating endpoint that
+	// creates a NEW resource with a server-generated id, so a lost
+	// response and a client retry would otherwise create a duplicate
+	// order. The other mutating routes act on a caller-supplied {id}
+	// and are lower priority for v1 (see the ADR). IdempotencyPool nil
+	// (in-memory dev/test configuration, no transactional Postgres
+	// backing) skips the middleware entirely, mirroring every other
+	// optional Postgres-backed capability's nil convention in this repo.
+	if s.IdempotencyPool != nil {
+		r.With(RequireIdempotencyKey(s.IdempotencyPool)).Post("/orders", s.handleReceiveOrder)
+	} else {
+		r.Post("/orders", s.handleReceiveOrder)
+	}
 	r.Get("/orders/{id}", s.handleGetOrder)
 	r.Post("/orders/{id}/retry-allocation", s.handleRetryAllocation)
 	r.Post("/orders/{id}/release", s.handleReleaseHeldOrder)
