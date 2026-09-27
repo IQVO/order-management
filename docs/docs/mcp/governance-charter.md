@@ -151,10 +151,67 @@ Jaeger and Grafana alongside HTTP.
    the platform's ≥90% coverage bar, plus at least one transport-level test.
 2. The MCP adapter **MUST** pass `make check` (fmt, vet, build, lint, test) and
    the arch-go fitness tests.
-3. **Phase-6 CI gate (planned):** a workflow that lints tool schemas, enforces
-   the naming conventions and mandatory annotations, and fails a PR that exceeds
-   the tool-count budget without justification — the left-shift equivalent of
-   `make check` for the MCP surface.
+3. **Phase-6 governance gate:** implemented in this repository as
+   `internal/adapters/inbound/mcp/governance_test.go` — a plain `go test`
+   (so it runs in the CI `test` job) that boots the real server and asserts
+   the tool-count budget, the naming convention, mandatory annotations and
+   non-empty descriptions.
+4. **Eval gate (E1–E3):** the tool surface **MUST** pass the eval suites in
+   `internal/adapters/inbound/mcp/eval_*_test.go` and
+   `evalsuite_test.go`, all plain `go test`s inside the CI `test` job:
+   - **E1 — schema & metadata** (`eval_governance_test.go`): every
+     advertised tool's input schema resolves as a JSON Schema, accepts a
+     schema-shaped arguments object, and REJECTS wrong-typed values (it
+     constrains model input, not just decorates it); every parameter
+     carries a non-empty description; the advertised surface matches
+     `testdata/tool_registry.golden`; and this repo's tools are present,
+     correctly credited, and globally unique in
+     `testdata/fleet_tool_snapshot.golden` (the federated registry kept
+     identical across all fleet repos — a model host mounts several of
+     these servers together, so tool names MUST NOT collide).
+   - **E2 — wire conformance** (`eval_conformance_test.go`): over the real
+     Streamable HTTP handler — initialize handshake carries server info
+     and non-empty instructions; unknown tools, wrong-typed arguments,
+     unknown extra arguments, unknown resources and prompts are rejected;
+     resource templates and prompts are discoverable (here: the EMPTY
+     lists are the pinned contract — this server deliberately exposes
+     neither surface); a closed session fails loudly.
+   - **E3 — behavioral evals** (`evalsuite_test.go` +
+     `testdata/features/mcp_tools.feature`): Gherkin scenarios driving
+     `tools/call` with model-realistic arguments (stray keys, wrong types,
+     unknown ids, missing required bounds) against seeded state, pinning
+     structured results. This context exposes no write tool over MCP, so
+     there is no write happy/error/side-effect scenario to pin — the
+     read-only surface itself is what E1's golden registry enforces.
+
+### Pinned behavioral contracts the evals found
+
+- Typed tool schemas are **strict** (`additionalProperties: false`, the
+  SDK default): stray model-generated argument keys are rejected with a
+  validation error, not silently ignored.
+- `get_order` surfaces both an unknown id and an empty id as clean
+  tool-level errors ("order not found" / "order id must not be empty") —
+  never a silent success, and never a bare protocol failure.
+- An unallocated order line **omits** `reservationId` in the structured
+  result rather than sending `""` — "not allocated" is unambiguous to a
+  calling model (mapping.go's contract).
+- `get_promise_health` with a `pathId` filter zeroes the fleet-wide
+  re-promise KPI (`OrdersRepromised` carries no path dimension; the
+  re-promise row is path-less) — documented on the tool description, now
+  pinned as the visible contract.
+- Both tools (`get_order`, `get_promise_health`) are registered
+  unconditionally — unlike inventory-storage's `REPORTS_BASE_URL`-gated
+  report tool, this server has no conditionally-advertised tool, so the
+  default-deps surface the evals pin IS the deployed surface.
+
+### Status in this repository
+
+`order-management-mcp` exposes 2 read-only tools (`get_order`,
+`get_promise_health`), and deliberately no resources, resource templates,
+or prompts (server.go's design note: the single-order read is already the
+`get_order` tool, and there is no multi-step SOP worth a prompt). No write
+tool is exposed by design (see `tools.go`'s Deps doc comment). Each tool
+call gets an OTel span (`mcp.tool <name>`).
 
 ## 11. Changing this charter
 
