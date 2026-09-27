@@ -300,3 +300,87 @@ func createTopic(ctx context.Context, brokers []string, topic string) error {
 		time.Sleep(100 * time.Millisecond)
 	}
 }
+
+// TestNewConsumer_DualShapeSameEventId_ConvergesToOneConsistentEntry is
+// the ADR-0021 Phase 2 Task 2b dual-write-safety regression: during the
+// eventual dual-write bake period, ONE domain PathCapacityChanged event
+// produces TWO physical Kafka messages on the same topic/key (same
+// event id) -- a flat-shaped one and a CloudEvents-shaped one, carrying
+// byte-identical `data`. This consumer is a full-replay LOCAL-CACHE
+// consumer (see the fleet skill's "idempotent by construction" note),
+// not a processed_events-gated use case: it has no dedup ledger, so
+// "fires exactly once" here means the two physical messages -- decoded
+// via two different wire shapes -- must converge on exactly the SAME
+// final cache entry rather than corrupt or duplicate state. That is
+// what this test proves: after both messages are consumed, exactly one
+// logical (path, cutoff) entry exists and its value is correct,
+// regardless of which physical message the reader saw first.
+func TestNewConsumer_DualShapeSameEventId_ConvergesToOneConsistentEntry(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	container, err := tckafka.Run(ctx, "confluentinc/confluent-local:7.6.1", tckafka.WithClusterID("om-pathcapacity-dualshape"))
+	if err != nil {
+		t.Fatalf("start Kafka container: %v", err)
+	}
+	testcontainers.CleanupContainer(t, container)
+	brokers, err := container.Brokers(ctx)
+	if err != nil {
+		t.Fatalf("Kafka brokers: %v", err)
+	}
+	topic := fmt.Sprintf("warehouse.work-planning.events.dualshape-%d", time.Now().UnixNano())
+	if err := createTopic(ctx, brokers, topic); err != nil {
+		t.Fatalf("create Kafka topic: %v", err)
+	}
+
+	cutoff := time.Date(2026, 9, 26, 2, 0, 0, 0, time.UTC)
+	eventID := "5c7d3f92-1b64-4a08-9e73-2f6a8c1d5b40" // same id/event_id on both physical messages
+	flatValue := []byte(fmt.Sprintf(
+		`{"event_id":%q,"event_type":"PathCapacityChanged","occurred_at":"2026-09-26T02:00:00Z","source":"wes-work-planning","data":{"path_id":"pick-to-tote","cutoff_at":%q,"remaining_units":17,"known":true}}`,
+		eventID, cutoff.Format(time.RFC3339)))
+	cloudEventsValue := []byte(fmt.Sprintf(
+		`{"specversion":"1.0","id":%q,"type":"com.warehouse.wes.work-planning.workpool.PathCapacityChanged","source":"/warehouse/wes-work-planning","subject":"pick-to-tote","time":"2026-09-26T02:00:00Z","datacontenttype":"application/json","data":{"path_id":"pick-to-tote","cutoff_at":%q,"remaining_units":17,"known":true}}`,
+		eventID, cutoff.Format(time.RFC3339)))
+
+	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false}
+	if err := writer.WriteMessages(ctx,
+		kafkago.Message{Key: []byte(eventID), Value: flatValue},
+		kafkago.Message{Key: []byte(eventID), Value: cloudEventsValue},
+	); err != nil {
+		t.Fatalf("seed publish: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close Kafka writer: %v", err)
+	}
+
+	consumer, err := NewConsumerForTopic(ctx, brokers, topic, nil)
+	if err != nil {
+		t.Fatalf("NewConsumerForTopic: %v", err)
+	}
+	defer func() { _ = consumer.Close() }()
+	runCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	go func() { _ = consumer.Run(runCtx) }()
+
+	waitCtx, waitCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer waitCancel()
+	if err := consumer.WaitReady(waitCtx); err != nil {
+		t.Fatalf("consumer never became ready: %v", err)
+	}
+
+	units, known := consumer.Remaining(shared.PathId("pick-to-tote"), "sp1-0200", cutoff)
+	if !known {
+		t.Fatal("expected known=true after consuming both physical shapes of the same event")
+	}
+	if units != 17 {
+		t.Fatalf("units = %d, want 17 -- both physical messages carry byte-identical data, so the converged entry must match", units)
+	}
+
+	c := consumer
+	c.mu.RLock()
+	entryCount := len(c.entries)
+	c.mu.RUnlock()
+	if entryCount != 1 {
+		t.Fatalf("cache entries = %d, want exactly 1 -- two physical messages for the same logical event must converge, not duplicate", entryCount)
+	}
+}

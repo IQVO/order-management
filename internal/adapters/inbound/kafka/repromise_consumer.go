@@ -33,6 +33,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	kafkago "github.com/segmentio/kafka-go"
@@ -77,6 +78,95 @@ type fulfillmentEnvelope struct {
 	OccurredAt time.Time       `json:"occurred_at"`
 	Source     string          `json:"source"`
 	Data       json.RawMessage `json:"data"`
+}
+
+// fulfillmentSpecversionProbe is a minimal decode used purely to
+// discriminate today's flat envelope from a CloudEvents 1.0 structured
+// envelope (ADR-0027 / ADR-0021 dual-read migration, Phase 2 Task 2e):
+// a CloudEvents message carries a non-empty `specversion` key the flat
+// envelope never has. This is a DIFFERENT probe/type from
+// kafkapathcapacity's own — see this file's package doc comment for why
+// the two consumers are kept independently updated.
+type fulfillmentSpecversionProbe struct {
+	Specversion string `json:"specversion"`
+}
+
+// fulfillmentCloudEventsEnvelope is the CloudEvents 1.0 structured
+// envelope shape fulfillment-execution's asyncapi.yaml documents for
+// this topic. `type` is the reverse-DNS event type string; `data` is
+// byte-identical to the flat envelope's `data`.
+type fulfillmentCloudEventsEnvelope struct {
+	Specversion string          `json:"specversion"`
+	ID          string          `json:"id"`
+	Type        string          `json:"type"`
+	Source      string          `json:"source"`
+	Time        time.Time       `json:"time"`
+	Data        json.RawMessage `json:"data"`
+}
+
+// cloudEventsTypeTaskCPTMissed and cloudEventsTypePackageManifested are
+// the exact reverse-DNS `type` strings fulfillment-execution's
+// asyncapi.yaml specifies for these two events (ADR-0025, ADR-0027 dual-
+// read migration). Read directly from apis/asyncapi.yaml — do not
+// re-derive the middle segments.
+const (
+	cloudEventsTypeTaskCPTMissed     = "com.warehouse.wes.fulfillment-execution.task.TaskCPTMissed"
+	cloudEventsTypePackageManifested = "com.warehouse.wes.fulfillment-execution.package.PackageManifested"
+)
+
+// fulfillmentBareEventType strips a CloudEvents reverse-DNS type string
+// back to the bare event name the existing switch/case logic in
+// handleFulfillmentEvent keys on (e.g.
+// "com.warehouse.wes.fulfillment-execution.task.TaskCPTMissed" ->
+// "TaskCPTMissed"). Returns the input unchanged if it contains no dot,
+// so a malformed/unexpected type string fails soft downstream (falls
+// into handleFulfillmentEvent's "unrecognized event type" default
+// branch) rather than panicking here.
+func fulfillmentBareEventType(ceType string) string {
+	if idx := strings.LastIndex(ceType, "."); idx >= 0 && idx+1 < len(ceType) {
+		return ceType[idx+1:]
+	}
+	return ceType
+}
+
+// decodeFulfillmentEnvelope normalizes either wire shape (today's flat
+// envelope, or a CloudEvents 1.0 structured envelope, per ADR-0027 /
+// ADR-0021 Phase 2 Task 2e) into this consumer's existing internal
+// fulfillmentEnvelope representation, so handleMessage/
+// handleFulfillmentEvent never need to know which shape arrived on the
+// wire. specversion's presence is the sole discriminator (see the ADR's
+// decision section) — never inferred from any other field.
+func decodeFulfillmentEnvelope(raw []byte) (fulfillmentEnvelope, error) {
+	var probe fulfillmentSpecversionProbe
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return fulfillmentEnvelope{}, fmt.Errorf("repromise: probe specversion: %w", err)
+	}
+	if probe.Specversion == "" {
+		// Flat envelope path (today's shape, unchanged).
+		var flat fulfillmentEnvelope
+		if err := json.Unmarshal(raw, &flat); err != nil {
+			return fulfillmentEnvelope{}, fmt.Errorf("repromise: unmarshal envelope: %w", err)
+		}
+		return flat, nil
+	}
+	if probe.Specversion != "1.0" {
+		// Malformed/unrecognized specversion: fail soft, mirroring
+		// this consumer's existing malformed-message handling
+		// posture (handleMessage logs and commits/skips rather than
+		// wedging the Run loop).
+		return fulfillmentEnvelope{}, fmt.Errorf("repromise: unrecognized CloudEvents specversion %q", probe.Specversion)
+	}
+	var ce fulfillmentCloudEventsEnvelope
+	if err := json.Unmarshal(raw, &ce); err != nil {
+		return fulfillmentEnvelope{}, fmt.Errorf("repromise: unmarshal CloudEvents envelope: %w", err)
+	}
+	return fulfillmentEnvelope{
+		EventID:    ce.ID,
+		EventType:  fulfillmentBareEventType(ce.Type),
+		OccurredAt: ce.Time,
+		Source:     ce.Source,
+		Data:       ce.Data,
+	}, nil
 }
 
 // taskCPTMissedData is fulfillment-execution's real TaskCPTMissed
@@ -171,10 +261,10 @@ func (c *RepromiseConsumer) handleMessage(ctx context.Context, msg kafkago.Messa
 	msgCtx, span := c.startConsumeSpan(ctx, topic, msg)
 	defer span.End()
 
-	var env fulfillmentEnvelope
-	if err := json.Unmarshal(msg.Value, &env); err != nil {
-		recordSpanError(span, err)
-		c.log(msgCtx, "skipping unparseable kafka message", "topic", topic, "error", err)
+	env, decodeErr := decodeFulfillmentEnvelope(msg.Value)
+	if decodeErr != nil {
+		recordSpanError(span, decodeErr)
+		c.log(msgCtx, "skipping unparseable kafka message", "topic", topic, "error", decodeErr)
 		return c.commit(ctx, msg)
 	}
 
