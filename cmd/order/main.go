@@ -55,14 +55,7 @@ func run() error {
 
 	ctx := context.Background()
 
-	serviceName := getenv("OTEL_SERVICE_NAME", inboundhttp.DefaultServiceName)
-	otlpEndpoint := getenv("OTEL_EXPORTER_OTLP_ENDPOINT", telemetry.DefaultEndpoint)
-
-	// Telemetry comes up before any adapter, so every subsequent adapter is
-	// built against the real providers rather than the no-op globals.
-	// Export is non-blocking: an unreachable Collector costs telemetry,
-	// never availability.
-	shutdownTelemetry, err := telemetry.Setup(ctx, serviceName, getenv("SERVICE_VERSION", telemetry.DefaultServiceVersion), otlpEndpoint)
+	serviceName, shutdownTelemetry, err := setupServiceTelemetry(ctx, logger)
 	if err != nil {
 		return err
 	}
@@ -73,12 +66,6 @@ func run() error {
 			logger.Warn("telemetry shutdown did not flush cleanly", "error", err)
 		}
 	}()
-	logger.Info("telemetry configured",
-		"service_name", serviceName,
-		"service_version", getenv("SERVICE_VERSION", telemetry.DefaultServiceVersion),
-		"environment", getenv("ENVIRONMENT", telemetry.DefaultEnvironment),
-		"otlp_endpoint", otlpEndpoint,
-	)
 
 	orderMetrics, err := telemetry.NewOrderMetrics()
 	if err != nil {
@@ -105,87 +92,157 @@ func run() error {
 	// the drain window that follows.
 	readiness := &inboundhttp.Readiness{}
 
-	// circuitBreakerMetrics wires both outbound breakers' OnStateChange
-	// into the circuit_breaker.state gauge (ADR-0025), reusing the SAME
-	// OTel MeterProvider telemetry.Setup already installed above rather
-	// than standing up a second Prometheus registry. Errors here mirror
-	// NewOrderMetrics' contract (invalid instrument name only, a
-	// programming error) -- non-fatal: a nil recorder just means this
-	// process runs without the gauge, never without the breaker itself.
-	circuitBreakerMetrics, err := telemetry.NewCircuitBreakerMetrics()
-	if err != nil {
-		logger.Warn("circuit breaker metrics unavailable; breakers will run without the circuit_breaker.state gauge", "error", err)
-	}
+	lookups := wireOutboundLookups(logger)
 
-	inventory := buildInventoryClient(getenv("INVENTORY_STORAGE_MODE", "permissive"), os.Getenv("INVENTORY_STORAGE_BASE_URL"), circuitBreakerMetrics, logger)
-
-	// The product-classification lookup (ADR-0016 / ADR-0014 step B)
-	// shares INVENTORY_STORAGE_BASE_URL with the inventory reservation
-	// client above -- both call the SAME downstream service, so there is
-	// deliberately no second base-URL knob for it, only its own
-	// independent PRODUCT_CLASSIFICATION_MODE switch, mirroring
-	// wes-work-planning's exact convention.
-	classification := buildClassificationLookup(getenv("PRODUCT_CLASSIFICATION_MODE", "permissive"), os.Getenv("INVENTORY_STORAGE_BASE_URL"), circuitBreakerMetrics, logger)
-
-	// The process-path catalogue's SOURCE is selectable, defaulting to
-	// "none" (validation skipped -- a nil ports.ProcessPathCatalogue is
-	// this fleet's established "not yet wired" convention, see
-	// ReceiveOrder's doc comment). Set PATH_CATALOGUE_SOURCE=kafka for a
-	// real deployment, mirroring wes-work-planning/fulfillment-execution/
-	// workforce-management's identical PATH_CATALOGUE_SOURCE convention.
-	// Unlike those three services, order-management never had a
-	// file-based catalogue to begin with (see ADR-0013's scope decision),
-	// so there is no "file" mode here -- only "none" (skip) and "kafka"
-	// (real validation).
-	//
-	// ADR-0014 step A extends this SAME switch: the CPT schedule cache
-	// (kafkacptschedule) is a SEPARATE consumer instance on the SAME
-	// topic/broker as the catalogue, so it is gated identically -- it
-	// only runs when the catalogue does, since both need KAFKA_BROKERS.
-	//
-	// ADR-0015 extends it a THIRD time: the path capacity cache
-	// (kafkapathcapacity) is yet another separate consumer instance, on
-	// a DIFFERENT topic (wes-work-planning's warehouse.work-planning.
-	// events, not process-path-management's), but the SAME broker and
-	// the SAME PATH_CATALOGUE_SOURCE switch -- there is no new env knob
-	// for an operator to learn. When the switch is "none" (or unset),
-	// ports.PathCapacity stays wired to UnknownPathCapacity, exactly
-	// today's behaviour.
-	// wireProcessPathCatalogue also retries every boot-time Kafka dial it
-	// makes (each NewConsumer call's newTargetOffsets dials the broker
-	// directly before the real reader exists) with exponential backoff,
-	// mirroring network-fulfillment PR #7 — this cluster resets every
-	// injected pod's first outbound dial ~10s after start (Istio native
-	// sidecars; holdApplicationUntilProxyStarts is a no-op for them), and
-	// a single attempt turns that transient condition into
-	// CrashLoopBackOff. See wiring.go's doc comment for the full detail.
-	catalogue, cptSchedule, capacity, closeCatalogue, err := wireProcessPathCatalogue(
-		ctx, getenv("PATH_CATALOGUE_SOURCE", "none"), os.Getenv("KAFKA_BROKERS"), logger)
+	catalogue, cptSchedule, capacity, closeCatalogue, err := wireCatalogue(ctx, logger)
 	if err != nil {
 		return err
 	}
 	defer closeCatalogue()
 
+	promise := buildPromisePolicy(catalogue, cptSchedule, capacity, logger)
+
+	clock := memory.SystemClock{}
+	server := buildInboundServer(orders, publisher, clock, promise, lookups.inventory, lookups.classification, catalogue, orderMetrics, uow, dbPool, readiness)
+
+	repromiseConsumerCtx, cancelRepromiseConsumer := context.WithCancel(context.Background())
+	defer cancelRepromiseConsumer()
+	repromiseOrder := newRepromiseOrder(orders, publisher, clock, promise, repromiseProcessed, uow, logger)
+	repromiseConsumer := newRepromiseConsumer(repromiseOrder, logger)
+
+	httpServer := buildHTTPServer(server, serviceName, logger)
+
+	return serveAndShutdown(logger, httpAddr, httpServer, repromiseConsumer, repromiseConsumerCtx, cancelRepromiseConsumer, readiness, relay)
+}
+
+// setupServiceTelemetry wires OTel before any adapter is built, so every
+// subsequent adapter is built against the real providers rather than the
+// no-op globals. Export is non-blocking: an unreachable Collector costs
+// telemetry, never availability. It returns the resolved service name
+// (the HTTP router's metrics label needs it) alongside the shutdown
+// flush, which the caller defers.
+func setupServiceTelemetry(ctx context.Context, logger *slog.Logger) (string, func(context.Context) error, error) {
+	serviceName := getenv("OTEL_SERVICE_NAME", inboundhttp.DefaultServiceName)
+	otlpEndpoint := getenv("OTEL_EXPORTER_OTLP_ENDPOINT", telemetry.DefaultEndpoint)
+	shutdownTelemetry, err := telemetry.Setup(ctx, serviceName, getenv("SERVICE_VERSION", telemetry.DefaultServiceVersion), otlpEndpoint)
+	if err != nil {
+		return "", nil, err
+	}
+	logger.Info("telemetry configured",
+		"service_name", serviceName,
+		"service_version", getenv("SERVICE_VERSION", telemetry.DefaultServiceVersion),
+		"environment", getenv("ENVIRONMENT", telemetry.DefaultEnvironment),
+		"otlp_endpoint", otlpEndpoint,
+	)
+	return serviceName, shutdownTelemetry, nil
+}
+
+// outboundLookups bundles the two cross-context outbound clients: the
+// inventory reservation client and the product-classification lookup
+// (ADR-0016 / ADR-0014 step B), each behind the shared circuit-breaker
+// recorder.
+type outboundLookups struct {
+	inventory      ports.InventoryReservationClient
+	classification ports.ProductClassificationLookup
+}
+
+// wireOutboundLookups wires both outbound clients plus their shared
+// circuit-breaker gauge. circuitBreakerMetrics wires both outbound
+// breakers' OnStateChange into the circuit_breaker.state gauge
+// (ADR-0025), reusing the SAME OTel MeterProvider telemetry.Setup already
+// installed rather than standing up a second Prometheus registry. Errors
+// here mirror NewOrderMetrics' contract (invalid instrument name only, a
+// programming error) -- non-fatal: a nil recorder just means this
+// process runs without the gauge, never without the breaker itself.
+//
+// The product-classification lookup shares INVENTORY_STORAGE_BASE_URL
+// with the inventory reservation client -- both call the SAME downstream
+// service, so there is deliberately no second base-URL knob for it, only
+// its own independent PRODUCT_CLASSIFICATION_MODE switch, mirroring
+// wes-work-planning's exact convention.
+func wireOutboundLookups(logger *slog.Logger) outboundLookups {
+	circuitBreakerMetrics, err := telemetry.NewCircuitBreakerMetrics()
+	if err != nil {
+		logger.Warn("circuit breaker metrics unavailable; breakers will run without the circuit_breaker.state gauge", "error", err)
+	}
+	return outboundLookups{
+		inventory:      buildInventoryClient(getenv("INVENTORY_STORAGE_MODE", "permissive"), os.Getenv("INVENTORY_STORAGE_BASE_URL"), circuitBreakerMetrics, logger),
+		classification: buildClassificationLookup(getenv("PRODUCT_CLASSIFICATION_MODE", "permissive"), os.Getenv("INVENTORY_STORAGE_BASE_URL"), circuitBreakerMetrics, logger),
+	}
+}
+
+// wireCatalogue resolves the process-path catalogue and its two sibling
+// caches from the PATH_CATALOGUE_SOURCE switch (defaulting to "none":
+// validation skipped -- a nil ports.ProcessPathCatalogue is this fleet's
+// established "not yet wired" convention, see ReceiveOrder's doc
+// comment). Set PATH_CATALOGUE_SOURCE=kafka for a real deployment,
+// mirroring wes-work-planning/fulfillment-execution/workforce-management's
+// identical convention. Unlike those three services, order-management
+// never had a file-based catalogue to begin with (see ADR-0013's scope
+// decision), so there is no "file" mode here -- only "none" (skip) and
+// "kafka" (real validation).
+//
+// ADR-0014 step A extends this SAME switch: the CPT schedule cache
+// (kafkacptschedule) is a SEPARATE consumer instance on the SAME
+// topic/broker as the catalogue, so it is gated identically -- it only
+// runs when the catalogue does, since both need KAFKA_BROKERS.
+//
+// ADR-0015 extends it a THIRD time: the path capacity cache
+// (kafkapathcapacity) is yet another separate consumer instance, on a
+// DIFFERENT topic (wes-work-planning's warehouse.work-planning.events,
+// not process-path-management's), but the SAME broker and the SAME
+// PATH_CATALOGUE_SOURCE switch -- there is no new env knob for an
+// operator to learn. When the switch is "none" (or unset),
+// ports.PathCapacity stays wired to UnknownPathCapacity, exactly today's
+// behaviour.
+//
+// wireProcessPathCatalogue also retries every boot-time Kafka dial it
+// makes (each NewConsumer call's newTargetOffsets dials the broker
+// directly before the real reader exists) with exponential backoff,
+// mirroring network-fulfillment PR #7 — this cluster resets every
+// injected pod's first outbound dial ~10s after start (Istio native
+// sidecars; holdApplicationUntilProxyStarts is a no-op for them), and a
+// single attempt turns that transient condition into CrashLoopBackOff.
+// See wiring.go's doc comment for the full detail.
+func wireCatalogue(ctx context.Context, logger *slog.Logger) (ports.ProcessPathCatalogue, ports.CPTScheduleCache, ports.PathCapacity, func(), error) {
+	return wireProcessPathCatalogue(ctx, getenv("PATH_CATALOGUE_SOURCE", "none"), os.Getenv("KAFKA_BROKERS"), logger)
+}
+
+// buildPromisePolicy assembles the ADR-0014 promise policy: the primary
+// Schedule/Capability/Capacity trio (nil, and therefore unused, when the
+// Kafka catalogue source is not configured) over the leadTime fallback,
+// unchanged in its own logic.
+func buildPromisePolicy(catalogue ports.ProcessPathCatalogue, cptSchedule ports.CPTScheduleCache, capacity ports.PathCapacity, logger *slog.Logger) order.PromisePolicy {
 	leadTime := order.NewLeadTimePolicy(
 		durationEnv("PROMISE_DEFAULT_LEAD_TIME", order.DefaultLeadTime, logger),
 		perPathLeadTimes(os.Getenv("PROMISE_PATH_LEAD_TIMES"), logger),
 	)
-
-	// PromisePolicy (ADR 0014) is the primary policy; leadTime is its
-	// fallback, unchanged in its own logic. Capability/Schedule are nil
-	// when the Kafka catalogue source is not configured, in which case
-	// PromisePolicy always falls back to leadTime -- exactly this
-	// service's pre-ADR-0014 behaviour.
-	promise := order.PromisePolicy{
+	return order.PromisePolicy{
 		Schedule:   cptSchedule,
 		Capability: catalogue,
 		Capacity:   capacity,
 		Fallback:   leadTime,
 		SiteId:     getenv("DEFAULT_SITE_ID", DefaultSiteId),
 	}
+}
 
-	clock := memory.SystemClock{}
-	server := &inboundhttp.Server{
+// buildInboundServer wires every use case into the inbound HTTP server's
+// dependency struct, including the idempotency pool and readiness gate
+// of the graceful-shutdown/idempotency ADRs.
+func buildInboundServer(
+	orders ports.OrderRepo,
+	publisher ports.EventPublisher,
+	clock memory.SystemClock,
+	promise order.PromisePolicy,
+	inventory ports.InventoryReservationClient,
+	classification ports.ProductClassificationLookup,
+	catalogue ports.ProcessPathCatalogue,
+	orderMetrics *telemetry.OrderMetrics,
+	uow ports.UnitOfWork,
+	dbPool *pgxpool.Pool,
+	readiness *inboundhttp.Readiness,
+) *inboundhttp.Server {
+	return &inboundhttp.Server{
 		ReceiveOrder:    &usecases.ReceiveOrder{Orders: orders, Events: publisher, Clock: clock, Inventory: inventory, Promise: promise, Catalogue: catalogue, Classification: classification, Metrics: orderMetrics, UnitOfWork: uow},
 		ReleaseHeld:     &usecases.ReleaseHeldOrder{Orders: orders, Events: publisher, Clock: clock, Inventory: inventory, Promise: promise, UnitOfWork: uow},
 		RetryAllocation: &usecases.RetryAllocation{Orders: orders, Inventory: inventory, Events: publisher, Clock: clock, Promise: promise, UnitOfWork: uow},
@@ -201,46 +258,69 @@ func run() error {
 		// before anything else stops.
 		Readiness: readiness,
 	}
+}
 
-	// RepromiseOrder consumer (ADR 0014 §5 / ADR 0018) — the final
-	// piece of ADR 0014's rollout. It is wired independently of
-	// PATH_CATALOGUE_SOURCE/EVENT_PUBLISHER: it needs its own inbound
-	// Kafka consumer on fulfillment-execution's warehouse.fulfillment.events
-	// topic, gated on KAFKA_BROKERS alone, mirroring this repo's other
-	// KAFKA_BROKERS-gated conditional constructions. A STABLE, shared
-	// consumer group (kafka.RepromiseConsumerGroup) is used — this is a
-	// normal at-least-once "process and commit" consumer, not a
-	// full-replay local-cache one, so it must NOT use a
-	// per-process-unique group (see that package's doc comment).
-	repromiseOrder := &usecases.RepromiseOrder{
+// newRepromiseOrder builds the use case behind the RepromiseOrder
+// consumer (ADR 0014 §5 / ADR 0018).
+func newRepromiseOrder(orders ports.OrderRepo, publisher ports.EventPublisher, clock memory.SystemClock, promise order.PromisePolicy, repromiseProcessed ports.RepromiseProcessedEvents, uow ports.UnitOfWork, logger *slog.Logger) *usecases.RepromiseOrder {
+	return &usecases.RepromiseOrder{
 		Orders: orders, Promise: promise, Events: publisher, Clock: clock,
 		Processed: repromiseProcessed, Logger: logger, UnitOfWork: uow,
 	}
-	repromiseConsumerCtx, cancelRepromiseConsumer := context.WithCancel(context.Background())
-	defer cancelRepromiseConsumer()
-	// repromiseConsumerDone closes once the repromise consumer's Run
-	// goroutine has returned — including having committed the offset
-	// for whatever message it was mid-handling when
-	// cancelRepromiseConsumer was called (see handleMessage's own
-	// commit-before-return shape) — so graceful shutdown can wait for
-	// a REAL stop, not just fire-and-forget the cancel.
-	repromiseConsumerDone := make(chan struct{})
-	var repromiseConsumer *inboundkafka.RepromiseConsumer
-	if kafkaBrokers := os.Getenv("KAFKA_BROKERS"); kafkaBrokers != "" {
-		repromiseConsumer = inboundkafka.NewRepromiseConsumer(strings.Split(kafkaBrokers, ","), repromiseOrder, logger)
-		logger.Info("repromise consumer configured",
-			"topic", inboundkafka.FulfillmentEventsTopic, "group_id", inboundkafka.RepromiseConsumerGroup)
-	} else {
+}
+
+// newRepromiseConsumer builds the RepromiseOrder consumer when
+// KAFKA_BROKERS is configured, or nil (with a warning) when it is not.
+// It is wired independently of PATH_CATALOGUE_SOURCE/EVENT_PUBLISHER:
+// it needs its own inbound Kafka consumer on fulfillment-execution's
+// warehouse.fulfillment.events topic, gated on KAFKA_BROKERS alone,
+// mirroring this repo's other KAFKA_BROKERS-gated conditional
+// constructions. A STABLE, shared consumer group
+// (kafka.RepromiseConsumerGroup) is used — this is a normal
+// at-least-once "process and commit" consumer, not a full-replay
+// local-cache one, so it must NOT use a per-process-unique group (see
+// that package's doc comment).
+func newRepromiseConsumer(repromiseOrder *usecases.RepromiseOrder, logger *slog.Logger) *inboundkafka.RepromiseConsumer {
+	kafkaBrokers := os.Getenv("KAFKA_BROKERS")
+	if kafkaBrokers == "" {
 		logger.Warn("KAFKA_BROKERS not configured; RepromiseOrder consumer will not run, OrderRepromised will never fire",
 			"hint", "set KAFKA_BROKERS for a real deployment")
+		return nil
 	}
+	consumer := inboundkafka.NewRepromiseConsumer(strings.Split(kafkaBrokers, ","), repromiseOrder, logger)
+	logger.Info("repromise consumer configured",
+		"topic", inboundkafka.FulfillmentEventsTopic, "group_id", inboundkafka.RepromiseConsumerGroup)
+	return consumer
+}
 
-	httpServer := &http.Server{
-		Addr:              httpAddr,
+// buildHTTPServer builds the HTTP server around the inbound router.
+func buildHTTPServer(server *inboundhttp.Server, serviceName string, logger *slog.Logger) *http.Server {
+	return &http.Server{
+		Addr:              getenv("HTTP_ADDR", ":8080"),
 		Handler:           inboundhttp.NewRouter(server, logger, serviceName),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+}
 
+// serveAndShutdown runs the HTTP server, the RepromiseOrder consumer and
+// the outbox relay until SIGINT/SIGTERM (or a component failure), then
+// drains all three under the ADR-0025 §graceful shutdown sequence. The
+// repromiseConsumerDone bookkeeping lives here alongside its goroutine:
+// the channel closes once the consumer's Run goroutine has returned —
+// including having committed the offset for whatever message it was
+// mid-handling when the cancel fires (see handleMessage's own
+// commit-before-return shape) — so graceful shutdown can wait for a REAL
+// stop, not just fire-and-forget the cancel.
+func serveAndShutdown(
+	logger *slog.Logger,
+	httpAddr string,
+	httpServer *http.Server,
+	repromiseConsumer *inboundkafka.RepromiseConsumer,
+	repromiseConsumerCtx context.Context,
+	cancelRepromiseConsumer context.CancelFunc,
+	readiness *inboundhttp.Readiness,
+	relay *postgres.OutboxRelay,
+) error {
 	errCh := make(chan error, 3)
 	go func() {
 		logger.Info("http server listening", "addr", httpAddr)
@@ -248,6 +328,7 @@ func run() error {
 			errCh <- err
 		}
 	}()
+	repromiseConsumerDone := make(chan struct{})
 	if repromiseConsumer != nil {
 		defer func() {
 			if err := repromiseConsumer.Close(); err != nil {
@@ -292,36 +373,29 @@ func run() error {
 	case <-ctx.Done():
 	}
 
-	// Graceful shutdown (ADR-0025 §graceful shutdown), in order:
-	//
-	//  1. Flip readiness to not-ready FIRST, before anything else
-	//     stops — a Kubernetes readinessProbe polling /readyz needs a
-	//     window to observe this and stop routing NEW traffic to this
-	//     pod before step 2 below ever closes the listener, so a
-	//     request racing the SIGTERM is far less likely to be routed
-	//     here only to hit a closing connection.
-	//  2. Stop accepting new HTTP connections and drain in-flight
-	//     requests, bounded by shutdownCtx.
-	//  3. Stop the outbox relay and the repromise Kafka consumer's
-	//     loop cleanly: cancel their contexts (no new message is
-	//     fetched/handled after this) and wait, bounded by the SAME
-	//     shutdownCtx, for their goroutines to actually finish
-	//     in-flight work (a message already being handled commits its
-	//     offset before Run returns — see RepromiseConsumer.Run/
-	//     handleMessage) rather than merely asking them to stop and
-	//     moving on. This is the "final offset commit" guarantee: no
-	//     message is left processed-but-uncommitted by an abrupt stop.
-	//  4. Only THEN do the deferred closeAdapters/closeCatalogue calls
-	//     (registered earlier in this function, so by defer's LIFO
-	//     order they run AFTER repromiseConsumer.Close() below, and
-	//     closeAdapters — which closes the pgx pool — runs LAST of
-	//     all, after every consumer/relay goroutine has already
-	//     stopped touching it).
-	readiness.SetNotReady()
+	return drainUnderShutdown(logger, httpServer, readiness,
+		stopRelay, relayDone,
+		repromiseConsumer, repromiseConsumerDone, cancelRepromiseConsumer)
+}
+
+// drainUnderShutdown performs the ADR-0025 §graceful shutdown sequence:
+// flip readiness first, drain the HTTP server, then stop and await the
+// outbox relay and the repromise consumer, all bounded by one 10s
+// deadline (see the numbered steps below).
+func drainUnderShutdown(
+	logger *slog.Logger,
+	httpServer *http.Server,
+	readiness *inboundhttp.Readiness,
+	stopRelay context.CancelFunc,
+	relayDone <-chan struct{},
+	repromiseConsumer *inboundkafka.RepromiseConsumer,
+	repromiseConsumerDone <-chan struct{},
+	cancelRepromiseConsumer context.CancelFunc,
+) error {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	err = httpServer.Shutdown(shutdownCtx)
+	err := httpServer.Shutdown(shutdownCtx)
 
 	// Let the relay finish its in-flight pass so an event committed by a
 	// request that completed just before shutdown is not stranded until
@@ -442,6 +516,21 @@ func buildRepoAdapters(ctx context.Context, databaseURL, migrationsPath, eventPu
 		return orders, events.NewLogPublisher(logger), pool, nil, nil, closeRepos, nil
 	}
 
+	publisher, uow, relay, closeAll := buildKafkaPublishing(orders, pool, closeRepos, logger)
+	return orders, publisher, pool, uow, relay, closeAll, nil
+}
+
+// buildKafkaPublishing wires the EVENT_PUBLISHER=kafka outbound side, on
+// top of whichever repos buildRepoAdapters already selected. Without
+// Postgres (in-memory dev run) events publish straight to the broker via
+// a fan-out publisher — exactly as before this rollout, there being no
+// transaction to bind an outbox row to. With Postgres, every event is
+// enqueued once per (event x encoder) — one row for the integration
+// topic, one for the analytics topic — in the SAME transaction as the
+// aggregate write (via ports.UnitOfWork), so the store and both topics
+// can never diverge from what actually happened; a background relay
+// (started in run()) drains the rows onto Kafka afterwards.
+func buildKafkaPublishing(orders ports.OrderRepo, pool *pgxpool.Pool, closeRepos func(), logger *slog.Logger) (ports.EventPublisher, ports.UnitOfWork, *postgres.OutboxRelay, func()) {
 	brokers := strings.Split(getenv("KAFKA_BROKERS", "localhost:9092"), ",")
 
 	// Integration encoder/writer: forwards OrderAllocated/
@@ -474,15 +563,9 @@ func buildRepoAdapters(ctx context.Context, databaseURL, migrationsPath, eventPu
 			}
 			closeRepos()
 		}
-		return orders, fanOut, pool, nil, nil, closeAll, nil
+		return fanOut, nil, nil, closeAll
 	}
 
-	// Transactional outbox: every event is enqueued once per (event x
-	// encoder) — one row for the integration topic, one for the
-	// analytics topic — in the SAME transaction as the aggregate write
-	// (via ports.UnitOfWork), so the store and both topics can never
-	// diverge from what actually happened. A background relay
-	// (started in run()) drains the rows onto Kafka afterwards.
 	uow := postgres.NewUnitOfWork(pool)
 	outboxPublisher := postgres.NewOutboxPublisher(pool, integration, analytics)
 	sink := kafkaadapter.NewRelaySink(brokers...)
@@ -504,7 +587,7 @@ func buildRepoAdapters(ctx context.Context, databaseURL, migrationsPath, eventPu
 		closeRepos()
 	}
 
-	return orders, outboxPublisher, pool, uow, relay, closeAll, nil
+	return outboxPublisher, uow, relay, closeAll
 }
 
 // buildRepromiseProcessedEvents selects RepromiseOrder's idempotency-gate

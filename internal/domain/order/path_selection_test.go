@@ -148,98 +148,109 @@ func TestPathSelectionPolicySelect(t *testing.T) {
 // new behaviour: enumerating and ranking MORE THAN ONE active candidate,
 // which ADR-0016 §4 documented as impossible before this change.
 func TestPathSelectionPolicySelect_MultiPath(t *testing.T) {
-	permissive := shared.NewEligibility(nil, nil, nil, false)
+	t.Run("a line ineligible for the default path routes to a different eligible active path", testMultiPathRoutesToEligibleAlternative)
+	t.Run("among several eligible candidates the shortest known cycle time wins", testMultiPathShortestKnownCycleTimeWins)
+	t.Run("a candidate with unknown cycle time never beats one with a known cycle time", testMultiPathKnownCycleTimeBeatsUnknown)
+	t.Run("a cycle-time-unknown candidate is still picked when it is the only eligible one", testMultiPathUnknownCycleTimeAsOnlyCandidate)
+	t.Run("a tie on known cycle time breaks on the lower PathId, deterministically", testMultiPathTieBreaksOnLowerPathID)
+	t.Run("no active candidate is eligible for the line -- ok=false, zero PathId", testMultiPathNoEligibleCandidateRejects)
+}
+
+func testMultiPathRoutesToEligibleAlternative(t *testing.T) {
+	catalogue := fakeEligibilitySource{active: []shared.ActivePathCandidate{
+		candidate(shared.DefaultPathId, 30*time.Minute, true, shared.NewEligibility(nil, []string{"hazmat"}, nil, false)),
+		candidate("HAZMAT", 90*time.Minute, true, shared.NewEligibility(nil, nil, nil, false)),
+	}}
+	var policy PathSelectionPolicy
+	// No hazmat attribute -- PICK's RequiredProductAttributes rejects
+	// it, but HAZMAT (permissive) still admits it. Before ADR-0021
+	// this line would have been rejected outright (ADR-0016 §4).
+	gotID, gotOK := policy.Select("SKU-1", 1, false, nil, catalogue)
+	if !gotOK {
+		t.Fatalf("Select(...) ok = false, want true (HAZMAT path should have admitted the line)")
+	}
+	if gotID != "HAZMAT" {
+		t.Fatalf("Select(...) = %q, want %q", gotID, "HAZMAT")
+	}
+}
+
+func testMultiPathShortestKnownCycleTimeWins(t *testing.T) {
+	catalogue := fakeEligibilitySource{active: []shared.ActivePathCandidate{
+		candidate(shared.DefaultPathId, 45*time.Minute, true, permissiveMultiPathEligibility()),
+		candidate("SINGLES", 20*time.Minute, true, permissiveMultiPathEligibility()),
+		candidate("SLOW", 90*time.Minute, true, permissiveMultiPathEligibility()),
+	}}
+	var policy PathSelectionPolicy
+	gotID, gotOK := policy.Select("SKU-1", 1, false, nil, catalogue)
+	if !gotOK || gotID != "SINGLES" {
+		t.Fatalf("Select(...) = (%q, %v), want (%q, true)", gotID, gotOK, "SINGLES")
+	}
+}
+
+func testMultiPathKnownCycleTimeBeatsUnknown(t *testing.T) {
+	catalogue := fakeEligibilitySource{active: []shared.ActivePathCandidate{
+		candidate(shared.DefaultPathId, 0, false, permissiveMultiPathEligibility()),
+		candidate("SINGLES", 999*time.Hour, true, permissiveMultiPathEligibility()),
+	}}
+	var policy PathSelectionPolicy
+	gotID, gotOK := policy.Select("SKU-1", 1, false, nil, catalogue)
+	if !gotOK || gotID != "SINGLES" {
+		t.Fatalf("Select(...) = (%q, %v), want (%q, true) -- known cycle time must beat unknown", gotID, gotOK, "SINGLES")
+	}
+}
+
+func testMultiPathUnknownCycleTimeAsOnlyCandidate(t *testing.T) {
 	maxOne := 1
-	singles := shared.NewEligibility(&maxOne, nil, nil, false)
-	requiresHazmat := shared.NewEligibility(nil, []string{"hazmat"}, nil, false)
+	catalogue := fakeEligibilitySource{active: []shared.ActivePathCandidate{
+		candidate(shared.DefaultPathId, 0, false, shared.NewEligibility(&maxOne, nil, nil, false)),
+	}}
+	var policy PathSelectionPolicy
+	// quantity 5 exceeds singles' MaxUnitsPerLine=1, so DefaultPathId
+	// is the only candidate AND it's ineligible -- must reject.
+	if _, ok := policy.Select("SKU-1", 5, false, nil, catalogue); ok {
+		t.Fatalf("Select(...) ok = true, want false (no eligible candidate)")
+	}
+	// quantity 1 is within bound: the sole candidate, cycle-time
+	// unknown, must still be pickable.
+	gotID, gotOK := policy.Select("SKU-1", 1, false, nil, catalogue)
+	if !gotOK || gotID != shared.DefaultPathId {
+		t.Fatalf("Select(...) = (%q, %v), want (%q, true)", gotID, gotOK, shared.DefaultPathId)
+	}
+}
 
-	t.Run("a line ineligible for the default path routes to a different eligible active path", func(t *testing.T) {
-		catalogue := fakeEligibilitySource{active: []shared.ActivePathCandidate{
-			candidate(shared.DefaultPathId, 30*time.Minute, true, requiresHazmat),
-			candidate("HAZMAT", 90*time.Minute, true, permissive),
-		}}
-		var policy PathSelectionPolicy
-		// No hazmat attribute -- PICK's RequiredProductAttributes rejects
-		// it, but HAZMAT (permissive) still admits it. Before ADR-0021
-		// this line would have been rejected outright (ADR-0016 §4).
+func testMultiPathTieBreaksOnLowerPathID(t *testing.T) {
+	catalogue := fakeEligibilitySource{active: []shared.ActivePathCandidate{
+		candidate("ZULU", 30*time.Minute, true, permissiveMultiPathEligibility()),
+		candidate("ALPHA", 30*time.Minute, true, permissiveMultiPathEligibility()),
+	}}
+	var policy PathSelectionPolicy
+	for i := 0; i < 5; i++ {
 		gotID, gotOK := policy.Select("SKU-1", 1, false, nil, catalogue)
-		if !gotOK {
-			t.Fatalf("Select(...) ok = false, want true (HAZMAT path should have admitted the line)")
+		if !gotOK || gotID != "ALPHA" {
+			t.Fatalf("Select(...) run %d = (%q, %v), want (%q, true)", i, gotID, gotOK, "ALPHA")
 		}
-		if gotID != "HAZMAT" {
-			t.Fatalf("Select(...) = %q, want %q", gotID, "HAZMAT")
-		}
-	})
+	}
+}
 
-	t.Run("among several eligible candidates the shortest known cycle time wins", func(t *testing.T) {
-		catalogue := fakeEligibilitySource{active: []shared.ActivePathCandidate{
-			candidate(shared.DefaultPathId, 45*time.Minute, true, permissive),
-			candidate("SINGLES", 20*time.Minute, true, permissive),
-			candidate("SLOW", 90*time.Minute, true, permissive),
-		}}
-		var policy PathSelectionPolicy
-		gotID, gotOK := policy.Select("SKU-1", 1, false, nil, catalogue)
-		if !gotOK || gotID != "SINGLES" {
-			t.Fatalf("Select(...) = (%q, %v), want (%q, true)", gotID, gotOK, "SINGLES")
-		}
-	})
+func testMultiPathNoEligibleCandidateRejects(t *testing.T) {
+	maxOne := 1
+	catalogue := fakeEligibilitySource{active: []shared.ActivePathCandidate{
+		candidate(shared.DefaultPathId, 30*time.Minute, true, shared.NewEligibility(nil, []string{"hazmat"}, nil, false)),
+		candidate("SINGLES", 20*time.Minute, true, shared.NewEligibility(&maxOne, nil, nil, false)),
+	}}
+	var policy PathSelectionPolicy
+	gotID, gotOK := policy.Select("SKU-1", 5, false, nil, catalogue)
+	if gotOK {
+		t.Fatalf("Select(...) ok = true, want false")
+	}
+	if gotID != "" {
+		t.Fatalf("Select(...) on ok=false must return the zero PathId, got %q", gotID)
+	}
+}
 
-	t.Run("a candidate with unknown cycle time never beats one with a known cycle time", func(t *testing.T) {
-		catalogue := fakeEligibilitySource{active: []shared.ActivePathCandidate{
-			candidate(shared.DefaultPathId, 0, false, permissive),
-			candidate("SINGLES", 999*time.Hour, true, permissive),
-		}}
-		var policy PathSelectionPolicy
-		gotID, gotOK := policy.Select("SKU-1", 1, false, nil, catalogue)
-		if !gotOK || gotID != "SINGLES" {
-			t.Fatalf("Select(...) = (%q, %v), want (%q, true) -- known cycle time must beat unknown", gotID, gotOK, "SINGLES")
-		}
-	})
-
-	t.Run("a cycle-time-unknown candidate is still picked when it is the only eligible one", func(t *testing.T) {
-		catalogue := fakeEligibilitySource{active: []shared.ActivePathCandidate{
-			candidate(shared.DefaultPathId, 0, false, singles),
-		}}
-		var policy PathSelectionPolicy
-		// quantity 5 exceeds singles' MaxUnitsPerLine=1, so DefaultPathId
-		// is the only candidate AND it's ineligible -- must reject.
-		if _, ok := policy.Select("SKU-1", 5, false, nil, catalogue); ok {
-			t.Fatalf("Select(...) ok = true, want false (no eligible candidate)")
-		}
-		// quantity 1 is within bound: the sole candidate, cycle-time
-		// unknown, must still be pickable.
-		gotID, gotOK := policy.Select("SKU-1", 1, false, nil, catalogue)
-		if !gotOK || gotID != shared.DefaultPathId {
-			t.Fatalf("Select(...) = (%q, %v), want (%q, true)", gotID, gotOK, shared.DefaultPathId)
-		}
-	})
-
-	t.Run("a tie on known cycle time breaks on the lower PathId, deterministically", func(t *testing.T) {
-		catalogue := fakeEligibilitySource{active: []shared.ActivePathCandidate{
-			candidate("ZULU", 30*time.Minute, true, permissive),
-			candidate("ALPHA", 30*time.Minute, true, permissive),
-		}}
-		var policy PathSelectionPolicy
-		for i := 0; i < 5; i++ {
-			gotID, gotOK := policy.Select("SKU-1", 1, false, nil, catalogue)
-			if !gotOK || gotID != "ALPHA" {
-				t.Fatalf("Select(...) run %d = (%q, %v), want (%q, true)", i, gotID, gotOK, "ALPHA")
-			}
-		}
-	})
-
-	t.Run("no active candidate is eligible for the line -- ok=false, zero PathId", func(t *testing.T) {
-		catalogue := fakeEligibilitySource{active: []shared.ActivePathCandidate{
-			candidate(shared.DefaultPathId, 30*time.Minute, true, requiresHazmat),
-			candidate("SINGLES", 20*time.Minute, true, singles),
-		}}
-		var policy PathSelectionPolicy
-		gotID, gotOK := policy.Select("SKU-1", 5, false, nil, catalogue)
-		if gotOK {
-			t.Fatalf("Select(...) ok = true, want false")
-		}
-		if gotID != "" {
-			t.Fatalf("Select(...) on ok=false must return the zero PathId, got %q", gotID)
-		}
-	})
+// permissiveMultiPathEligibility is the zero-value Eligibility every
+// multi-path candidate in TestPathSelectionPolicySelect_MultiPath uses
+// unless a case specifically scripts a constraint.
+func permissiveMultiPathEligibility() shared.Eligibility {
+	return shared.NewEligibility(nil, nil, nil, false)
 }

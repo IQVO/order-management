@@ -99,67 +99,64 @@ func (h *harness) mustSaveOrder(id string, lines []*order.OrderLine, allowPartia
 }
 
 func TestGetOrder(t *testing.T) {
-	tests := []struct {
-		name    string
-		orderID string
-		wantErr bool
-		assert  func(t *testing.T, out orderDTO)
-	}{
-		{
-			name:    "empty orderId rejected",
-			orderID: "",
-			wantErr: true,
-		},
-		{
-			name:    "unknown order rejected",
-			orderID: "ORD-NOPE",
-			wantErr: true,
-		},
-		{
-			name:    "order with an allocated and a backordered line",
-			orderID: "ORD-1",
-			assert: func(t *testing.T, out orderDTO) {
-				if out.ID != "ORD-1" {
-					t.Fatalf("unexpected order id %q", out.ID)
-				}
-				if out.Status != "PartiallyAllocated" {
-					t.Fatalf("unexpected status %q", out.Status)
-				}
-				if len(out.Lines) != 2 {
-					t.Fatalf("expected 2 lines, got %d", len(out.Lines))
-				}
-				allocated := out.Lines[0]
-				if allocated.Status != "Allocated" || allocated.ReservationID == nil || *allocated.ReservationID != "RES-1" {
-					t.Fatalf("unexpected allocated line %+v", allocated)
-				}
-				backordered := out.Lines[1]
-				if backordered.Status != "Backordered" || backordered.ReservationID != nil {
-					t.Fatalf("unexpected backordered line %+v", backordered)
-				}
-			},
-		},
+	t.Run("empty orderId rejected", testGetOrderEmptyOrderIDRejected)
+	t.Run("unknown order rejected", testGetOrderUnknownOrderRejected)
+	t.Run("order with an allocated and a backordered line", testGetOrderAllocatedAndBackorderedLines)
+}
+
+// newGetOrderHarness returns a harness whose repo already holds ORD-1 —
+// one Allocated line carrying RES-1 and one Backordered line — the
+// read-back fixture every TestGetOrder case starts from, mirroring the
+// original table-driven form's setup.
+func newGetOrderHarness(t *testing.T) *harness {
+	t.Helper()
+	h := newHarness(t)
+	resID := "RES-1"
+	h.mustSaveOrder("ORD-1", []*order.OrderLine{
+		order.RehydrateOrderLine(1, "SKU-1", 2, "pick", false, order.LineAllocated, &resID),
+		order.RehydrateOrderLine(2, "SKU-2", 1, "pick", true, order.LineBackordered, nil),
+	}, true)
+	return h
+}
+
+func testGetOrderEmptyOrderIDRejected(t *testing.T) {
+	h := newGetOrderHarness(t)
+
+	if _, err := h.deps.getOrder(h.ctx(), getOrderInput{OrderId: ""}); err == nil {
+		t.Fatal("expected error, got nil")
 	}
+}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newHarness(t)
-			resID := "RES-1"
-			h.mustSaveOrder("ORD-1", []*order.OrderLine{
-				order.RehydrateOrderLine(1, "SKU-1", 2, "pick", false, order.LineAllocated, &resID),
-				order.RehydrateOrderLine(2, "SKU-2", 1, "pick", true, order.LineBackordered, nil),
-			}, true)
+func testGetOrderUnknownOrderRejected(t *testing.T) {
+	h := newGetOrderHarness(t)
 
-			out, err := h.deps.getOrder(h.ctx(), getOrderInput{OrderId: tc.orderID})
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			tc.assert(t, out)
-		})
+	if _, err := h.deps.getOrder(h.ctx(), getOrderInput{OrderId: "ORD-NOPE"}); err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+func testGetOrderAllocatedAndBackorderedLines(t *testing.T) {
+	h := newGetOrderHarness(t)
+
+	out, err := h.deps.getOrder(h.ctx(), getOrderInput{OrderId: "ORD-1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.ID != "ORD-1" {
+		t.Fatalf("unexpected order id %q", out.ID)
+	}
+	if out.Status != "PartiallyAllocated" {
+		t.Fatalf("unexpected status %q", out.Status)
+	}
+	if len(out.Lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d", len(out.Lines))
+	}
+	allocated := out.Lines[0]
+	if allocated.Status != "Allocated" || allocated.ReservationID == nil || *allocated.ReservationID != "RES-1" {
+		t.Fatalf("unexpected allocated line %+v", allocated)
+	}
+	backordered := out.Lines[1]
+	if backordered.Status != "Backordered" || backordered.ReservationID != nil {
+		t.Fatalf("unexpected backordered line %+v", backordered)
 	}
 }

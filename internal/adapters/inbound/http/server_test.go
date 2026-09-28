@@ -190,158 +190,170 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestPostOrders(t *testing.T) {
-	t.Run("success — both lines allocate cleanly, so a partial-shipment order comes back released", func(t *testing.T) {
-		e := newTestEnv(t)
-		rec := e.do(t, http.MethodPost, "/orders",
-			`{"lines":[{"sku":"SKU-1","quantity":2,"giftWrap":true},{"sku":"SKU-2","quantity":1}],"allowPartialShipment":true}`)
+	t.Run("success — both lines allocate cleanly, so a partial-shipment order comes back released", testPostOrdersReleased)
+	t.Run("success: a request pathId field is rejected as unknown JSON, not silently accepted", testPostOrdersCallerPathIdIgnored)
+	t.Run("success: a hard allocation failure does not fail intake", testPostOrdersHardAllocationFailureStillReceived)
+	t.Run("error: no lines", testPostOrdersNoLinesProblem)
+	t.Run("error: empty sku", testPostOrdersEmptySKUProblem)
+	t.Run("error: non-positive quantity", testPostOrdersNonPositiveQuantityProblem)
+	t.Run("error: malformed body", testPostOrdersMalformedBodyProblem)
+	t.Run("error: null on an order-level typed field is rejected, not coerced to its zero value", testPostOrdersNullOrderFieldProblem)
+	t.Run("error: null on a line-level typed field is rejected, not coerced to its zero value", testPostOrdersNullLineFieldProblem)
+	t.Run("error: null releaseOnAllocation is rejected rather than read as the default true", testPostOrdersNullReleaseOnAllocationProblem)
+	t.Run("success: a null-valued UNKNOWN field is ignored, not rejected", testPostOrdersUnknownNullFieldIgnored)
+}
 
-		if rec.Code != http.StatusCreated {
-			t.Fatalf("status = %d, want 201 (body: %s)", rec.Code, rec.Body.String())
-		}
-		body := decodeOrder(t, rec)
-		if body.Status != string(order.StatusReleased) {
-			t.Fatalf("status = %q, want %q", body.Status, order.StatusReleased)
-		}
-		if !body.AllowPartialShipment {
-			t.Fatal("allowPartialShipment must reflect what was requested")
-		}
-		if len(body.Lines) != 2 {
-			t.Fatalf("lines = %d, want 2", len(body.Lines))
-		}
-		if !body.Lines[0].GiftWrap {
-			t.Fatalf("line 1 = %+v", body.Lines[0])
-		}
-		// pathId is never caller-supplied any more: every line gets the
-		// internal default regardless of what the request DTO says (the
-		// DTO no longer even has a pathId field to set).
-		if body.Lines[0].PathID != string(shared.DefaultPathId) {
-			t.Fatalf("line 1 pathId = %q, want %q (internal default, never caller-supplied)", body.Lines[0].PathID, shared.DefaultPathId)
-		}
-		if body.Lines[1].PathID != string(shared.DefaultPathId) {
-			t.Fatalf("line 2 pathId = %q, want %q", body.Lines[1].PathID, shared.DefaultPathId)
-		}
-		if body.Lines[0].ReservationID == nil || *body.Lines[0].ReservationID != "res-stub" {
-			t.Fatalf("a released order's lines must still carry their reservation id, got %v", body.Lines[0].ReservationID)
-		}
-		if body.PromiseDate == nil {
-			t.Fatal("an allocated (and released) order must have a promise date")
-		}
-		if _, err := time.Parse(time.RFC3339, *body.PromiseDate); err != nil {
-			t.Fatalf("promiseDate %q is not RFC 3339: %v", *body.PromiseDate, err)
-		}
-		if loc := rec.Header().Get("Location"); loc != "/orders/"+body.ID {
-			t.Fatalf("Location = %q, want /orders/%s", loc, body.ID)
-		}
-	})
+func testPostOrdersReleased(t *testing.T) {
+	e := newTestEnv(t)
+	rec := e.do(t, http.MethodPost, "/orders",
+		`{"lines":[{"sku":"SKU-1","quantity":2,"giftWrap":true},{"sku":"SKU-2","quantity":1}],"allowPartialShipment":true}`)
 
-	t.Run("success: a request pathId field is rejected as unknown JSON, not silently accepted", func(t *testing.T) {
-		// The public intake DTO no longer has a pathId field at all —
-		// sending one is simply ignored by json.Decode (unknown fields
-		// are not rejected by default), proving the caller has no way to
-		// influence the internally-assigned value.
-		e := newTestEnv(t)
-		rec := e.do(t, http.MethodPost, "/orders", `{"lines":[{"sku":"SKU-1","quantity":1,"pathId":"singles"}]}`)
-		if rec.Code != http.StatusCreated {
-			t.Fatalf("status = %d, want 201 (body: %s)", rec.Code, rec.Body.String())
-		}
-		body := decodeOrder(t, rec)
-		if body.Lines[0].PathID != string(shared.DefaultPathId) {
-			t.Fatalf("line pathId = %q, want %q — a caller-supplied pathId must be ignored", body.Lines[0].PathID, shared.DefaultPathId)
-		}
-	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (body: %s)", rec.Code, rec.Body.String())
+	}
+	body := decodeOrder(t, rec)
+	if body.Status != string(order.StatusReleased) {
+		t.Fatalf("status = %q, want %q", body.Status, order.StatusReleased)
+	}
+	if !body.AllowPartialShipment {
+		t.Fatal("allowPartialShipment must reflect what was requested")
+	}
+	if len(body.Lines) != 2 {
+		t.Fatalf("lines = %d, want 2", len(body.Lines))
+	}
+	if !body.Lines[0].GiftWrap {
+		t.Fatalf("line 1 = %+v", body.Lines[0])
+	}
+	// pathId is never caller-supplied any more: every line gets the
+	// internal default regardless of what the request DTO says (the
+	// DTO no longer even has a pathId field to set).
+	if body.Lines[0].PathID != string(shared.DefaultPathId) {
+		t.Fatalf("line 1 pathId = %q, want %q (internal default, never caller-supplied)", body.Lines[0].PathID, shared.DefaultPathId)
+	}
+	if body.Lines[1].PathID != string(shared.DefaultPathId) {
+		t.Fatalf("line 2 pathId = %q, want %q", body.Lines[1].PathID, shared.DefaultPathId)
+	}
+	if body.Lines[0].ReservationID == nil || *body.Lines[0].ReservationID != "res-stub" {
+		t.Fatalf("a released order's lines must still carry their reservation id, got %v", body.Lines[0].ReservationID)
+	}
+	if body.PromiseDate == nil {
+		t.Fatal("an allocated (and released) order must have a promise date")
+	}
+	if _, err := time.Parse(time.RFC3339, *body.PromiseDate); err != nil {
+		t.Fatalf("promiseDate %q is not RFC 3339: %v", *body.PromiseDate, err)
+	}
+	if loc := rec.Header().Get("Location"); loc != "/orders/"+body.ID {
+		t.Fatalf("Location = %q, want /orders/%s", loc, body.ID)
+	}
+}
 
-	t.Run("success: a hard allocation failure does not fail intake", func(t *testing.T) {
-		e := newTestEnv(t)
-		e.inventory.reserveErr = ports.ErrDownstreamNotConfigured
+func testPostOrdersCallerPathIdIgnored(t *testing.T) {
+	// The public intake DTO no longer has a pathId field at all —
+	// sending one is simply ignored by json.Decode (unknown fields
+	// are not rejected by default), proving the caller has no way to
+	// influence the internally-assigned value.
+	e := newTestEnv(t)
+	rec := e.do(t, http.MethodPost, "/orders", `{"lines":[{"sku":"SKU-1","quantity":1,"pathId":"singles"}]}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (body: %s)", rec.Code, rec.Body.String())
+	}
+	body := decodeOrder(t, rec)
+	if body.Lines[0].PathID != string(shared.DefaultPathId) {
+		t.Fatalf("line pathId = %q, want %q — a caller-supplied pathId must be ignored", body.Lines[0].PathID, shared.DefaultPathId)
+	}
+}
 
-		rec := e.do(t, http.MethodPost, "/orders", `{"lines":[{"sku":"SKU-1","quantity":1}]}`)
-		if rec.Code != http.StatusCreated {
-			t.Fatalf("status = %d, want 201 — the order was genuinely received (body: %s)", rec.Code, rec.Body.String())
-		}
-		body := decodeOrder(t, rec)
-		if body.Status != string(order.StatusReceived) {
-			t.Fatalf("status = %q, want %q — allocation never got past the first line", body.Status, order.StatusReceived)
-		}
-	})
+func testPostOrdersHardAllocationFailureStillReceived(t *testing.T) {
+	e := newTestEnv(t)
+	e.inventory.reserveErr = ports.ErrDownstreamNotConfigured
 
-	t.Run("error: no lines", func(t *testing.T) {
-		e := newTestEnv(t)
-		rec := e.do(t, http.MethodPost, "/orders", `{"lines":[]}`)
-		p := assertProblem(t, rec, http.StatusBadRequest)
-		if !strings.HasSuffix(p.Type, "order-without-lines") {
-			t.Fatalf("problem.type = %q", p.Type)
-		}
-	})
+	rec := e.do(t, http.MethodPost, "/orders", `{"lines":[{"sku":"SKU-1","quantity":1}]}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 — the order was genuinely received (body: %s)", rec.Code, rec.Body.String())
+	}
+	body := decodeOrder(t, rec)
+	if body.Status != string(order.StatusReceived) {
+		t.Fatalf("status = %q, want %q — allocation never got past the first line", body.Status, order.StatusReceived)
+	}
+}
 
-	t.Run("error: empty sku", func(t *testing.T) {
-		e := newTestEnv(t)
-		rec := e.do(t, http.MethodPost, "/orders", `{"lines":[{"sku":"","quantity":1}]}`)
-		p := assertProblem(t, rec, http.StatusBadRequest)
-		if !strings.HasSuffix(p.Type, "empty-sku") {
-			t.Fatalf("problem.type = %q", p.Type)
-		}
-	})
+func testPostOrdersNoLinesProblem(t *testing.T) {
+	e := newTestEnv(t)
+	rec := e.do(t, http.MethodPost, "/orders", `{"lines":[]}`)
+	p := assertProblem(t, rec, http.StatusBadRequest)
+	if !strings.HasSuffix(p.Type, "order-without-lines") {
+		t.Fatalf("problem.type = %q", p.Type)
+	}
+}
 
-	t.Run("error: non-positive quantity", func(t *testing.T) {
-		e := newTestEnv(t)
-		rec := e.do(t, http.MethodPost, "/orders", `{"lines":[{"sku":"SKU-1","quantity":0}]}`)
-		p := assertProblem(t, rec, http.StatusUnprocessableEntity)
-		if !strings.HasSuffix(p.Type, "non-positive-quantity") {
-			t.Fatalf("problem.type = %q", p.Type)
-		}
-	})
+func testPostOrdersEmptySKUProblem(t *testing.T) {
+	e := newTestEnv(t)
+	rec := e.do(t, http.MethodPost, "/orders", `{"lines":[{"sku":"","quantity":1}]}`)
+	p := assertProblem(t, rec, http.StatusBadRequest)
+	if !strings.HasSuffix(p.Type, "empty-sku") {
+		t.Fatalf("problem.type = %q", p.Type)
+	}
+}
 
-	t.Run("error: malformed body", func(t *testing.T) {
-		e := newTestEnv(t)
-		rec := e.do(t, http.MethodPost, "/orders", `{"lines":`)
-		p := assertProblem(t, rec, http.StatusBadRequest)
-		if !strings.HasSuffix(p.Type, "malformed-request-body") {
-			t.Fatalf("problem.type = %q", p.Type)
-		}
-	})
+func testPostOrdersNonPositiveQuantityProblem(t *testing.T) {
+	e := newTestEnv(t)
+	rec := e.do(t, http.MethodPost, "/orders", `{"lines":[{"sku":"SKU-1","quantity":0}]}`)
+	p := assertProblem(t, rec, http.StatusUnprocessableEntity)
+	if !strings.HasSuffix(p.Type, "non-positive-quantity") {
+		t.Fatalf("problem.type = %q", p.Type)
+	}
+}
 
-	t.Run("error: null on an order-level typed field is rejected, not coerced to its zero value", func(t *testing.T) {
-		// apis/openapi.yaml declares allowPartialShipment as a boolean,
-		// not a nullable one: a null must not be silently decoded into
-		// `false` and accepted (the property-based contract suite found
-		// exactly that drift).
-		e := newTestEnv(t)
-		rec := e.do(t, http.MethodPost, "/orders", `{"lines":[{"sku":"SKU-1","quantity":1}],"allowPartialShipment":null}`)
-		p := assertProblem(t, rec, http.StatusBadRequest)
-		if !strings.HasSuffix(p.Type, "malformed-request-body") {
-			t.Fatalf("problem.type = %q", p.Type)
-		}
-	})
+func testPostOrdersMalformedBodyProblem(t *testing.T) {
+	e := newTestEnv(t)
+	rec := e.do(t, http.MethodPost, "/orders", `{"lines":`)
+	p := assertProblem(t, rec, http.StatusBadRequest)
+	if !strings.HasSuffix(p.Type, "malformed-request-body") {
+		t.Fatalf("problem.type = %q", p.Type)
+	}
+}
 
-	t.Run("error: null on a line-level typed field is rejected, not coerced to its zero value", func(t *testing.T) {
-		e := newTestEnv(t)
-		rec := e.do(t, http.MethodPost, "/orders", `{"lines":[{"sku":"SKU-1","quantity":1,"giftWrap":null}]}`)
-		p := assertProblem(t, rec, http.StatusBadRequest)
-		if !strings.HasSuffix(p.Type, "malformed-request-body") {
-			t.Fatalf("problem.type = %q", p.Type)
-		}
-	})
+func testPostOrdersNullOrderFieldProblem(t *testing.T) {
+	// apis/openapi.yaml declares allowPartialShipment as a boolean,
+	// not a nullable one: a null must not be silently decoded into
+	// `false` and accepted (the property-based contract suite found
+	// exactly that drift).
+	e := newTestEnv(t)
+	rec := e.do(t, http.MethodPost, "/orders", `{"lines":[{"sku":"SKU-1","quantity":1}],"allowPartialShipment":null}`)
+	p := assertProblem(t, rec, http.StatusBadRequest)
+	if !strings.HasSuffix(p.Type, "malformed-request-body") {
+		t.Fatalf("problem.type = %q", p.Type)
+	}
+}
 
-	t.Run("error: null releaseOnAllocation is rejected rather than read as the default true", func(t *testing.T) {
-		e := newTestEnv(t)
-		rec := e.do(t, http.MethodPost, "/orders", `{"lines":[{"sku":"SKU-1","quantity":1}],"releaseOnAllocation":null}`)
-		p := assertProblem(t, rec, http.StatusBadRequest)
-		if !strings.HasSuffix(p.Type, "malformed-request-body") {
-			t.Fatalf("problem.type = %q", p.Type)
-		}
-	})
+func testPostOrdersNullLineFieldProblem(t *testing.T) {
+	e := newTestEnv(t)
+	rec := e.do(t, http.MethodPost, "/orders", `{"lines":[{"sku":"SKU-1","quantity":1,"giftWrap":null}]}`)
+	p := assertProblem(t, rec, http.StatusBadRequest)
+	if !strings.HasSuffix(p.Type, "malformed-request-body") {
+		t.Fatalf("problem.type = %q", p.Type)
+	}
+}
 
-	t.Run("success: a null-valued UNKNOWN field is ignored, not rejected", func(t *testing.T) {
-		// additionalProperties is at its default (allowed), so a caller
-		// sending junk extra properties — even null-valued ones — must
-		// not fail decoding. This pins the boundary the null rejection
-		// deliberately stops at.
-		e := newTestEnv(t)
-		rec := e.do(t, http.MethodPost, "/orders", `{"totally-unknown":null,"lines":[{"sku":"SKU-1","quantity":1}]}`)
-		if rec.Code != http.StatusCreated {
-			t.Fatalf("status = %d, want 201 (body: %s)", rec.Code, rec.Body.String())
-		}
-	})
+func testPostOrdersNullReleaseOnAllocationProblem(t *testing.T) {
+	e := newTestEnv(t)
+	rec := e.do(t, http.MethodPost, "/orders", `{"lines":[{"sku":"SKU-1","quantity":1}],"releaseOnAllocation":null}`)
+	p := assertProblem(t, rec, http.StatusBadRequest)
+	if !strings.HasSuffix(p.Type, "malformed-request-body") {
+		t.Fatalf("problem.type = %q", p.Type)
+	}
+}
+
+func testPostOrdersUnknownNullFieldIgnored(t *testing.T) {
+	// additionalProperties is at its default (allowed), so a caller
+	// sending junk extra properties — even null-valued ones — must
+	// not fail decoding. This pins the boundary the null rejection
+	// deliberately stops at.
+	e := newTestEnv(t)
+	rec := e.do(t, http.MethodPost, "/orders", `{"totally-unknown":null,"lines":[{"sku":"SKU-1","quantity":1}]}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (body: %s)", rec.Code, rec.Body.String())
+	}
 }
 
 func TestGetOrder(t *testing.T) {
