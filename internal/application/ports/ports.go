@@ -116,10 +116,32 @@ type OrderMetrics interface {
 // ReservationRequest is this context's request shape for
 // inventory-storage's POST /reservations. DemandRef carries the OrderId —
 // which is precisely the identity this bounded context was created to own.
+//
+// LineNo and Attempt exist ONLY so an InventoryReservationClient
+// implementation can derive a stable, deterministic Idempotency-Key for
+// inventory-storage's POST /reservations (see its own idempotency.go /
+// ADR mirrored from this repo's ADR 0023): inventory-storage requires
+// that header and replays the cached response for a key it has already
+// seen, so a caller MUST send the SAME key on every retry of the SAME
+// logical reservation attempt and a genuinely DIFFERENT key on a new
+// attempt. LineNo scopes the key to one line within the order (two
+// lines of the same order must never collide); Attempt is the calling
+// use case's order.Order.Version() at the moment this line's Reserve
+// call is issued — inert optimistic-concurrency metadata already on the
+// aggregate (ADR 0024) that is guaranteed to stay constant across every
+// Reserve call within ONE allocation pass (nothing bumps it until that
+// pass's Save commits) and to have moved on by the time a genuinely
+// later, independent pass re-attempts the same line — exactly the
+// "same across a retry of this attempt, different for a new attempt"
+// shape the header contract requires. Neither field is meaningful to
+// inventory-storage's own request body; they are transport-adapter
+// concerns of the OUTBOUND client only.
 type ReservationRequest struct {
 	SKU       shared.SKU
 	Quantity  int
 	DemandRef shared.OrderId
+	LineNo    int
+	Attempt   int
 }
 
 // ReservationResult carries back the only piece of inventory-storage's
