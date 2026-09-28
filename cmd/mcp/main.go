@@ -69,9 +69,16 @@ func run() error {
 
 	httpAddr := getenv("MCP_ADDR", ":8090")
 	databaseURL := os.Getenv("DATABASE_URL")
+	// See cmd/order/main.go's identical fallback and buildRepoAdapters'
+	// doc comment for the full "why" (session-scoped pg_advisory_lock vs
+	// PgBouncer transaction-pooling incompatibility, ADR
+	// 0029-migrations-direct-postgres-connection.md). This binary also
+	// runs migrations on start (buildAdapters below), so it needs the
+	// same direct-connection split.
+	migrationsDatabaseURL := getenv("MIGRATIONS_DATABASE_URL", databaseURL)
 	migrationsPath := getenv("MIGRATIONS_PATH", "migrations")
 
-	orders, closeAdapters, err := buildAdapters(context.Background(), databaseURL, migrationsPath, logger)
+	orders, closeAdapters, err := buildAdapters(context.Background(), databaseURL, migrationsDatabaseURL, migrationsPath, logger)
 	if err != nil {
 		return err
 	}
@@ -122,6 +129,12 @@ func run() error {
 // (minus the event publisher, which only the write-side OLTP binary
 // needs).
 //
+// migrationsDatabaseURL is used ONLY for the golang-migrate step below,
+// mirroring cmd/order/main.go's buildRepoAdapters exactly — see its doc
+// comment for the full "why" a direct, non-pooled connection is needed
+// here even though the pgxpool opened just after (databaseURL) stays on
+// PgBouncer.
+//
 // Both the migration run and the post-open ping are RETRIED with
 // exponential backoff (mirroring cmd/order/main.go and
 // network-fulfillment PR #7): in this cluster every injected pod's first
@@ -132,7 +145,7 @@ func run() error {
 // NOT weaken the fail-closed rule: after the ~31s budget is exhausted
 // this still returns the real underlying error and the caller still
 // refuses to boot.
-func buildAdapters(ctx context.Context, databaseURL, migrationsPath string, logger *slog.Logger) (ports.OrderRepo, func(), error) {
+func buildAdapters(ctx context.Context, databaseURL, migrationsDatabaseURL, migrationsPath string, logger *slog.Logger) (ports.OrderRepo, func(), error) {
 	noop := func() {}
 
 	if databaseURL == "" {
@@ -141,7 +154,7 @@ func buildAdapters(ctx context.Context, databaseURL, migrationsPath string, logg
 	}
 
 	if err := bootretry.Retry(ctx, logger, "run migrations", func() error {
-		return postgres.RunMigrations(databaseURL, migrationsPath)
+		return postgres.RunMigrations(migrationsDatabaseURL, migrationsPath)
 	}); err != nil {
 		return nil, noop, err
 	}
