@@ -78,6 +78,20 @@ spec:
                 secretKeyRef:
                   name: {{ include "order-management.databaseSecretName" . }}
                   key: {{ .Values.database.existingSecretKey }}
+            {{- if .Values.database.migrationsExistingSecretKey }}
+            # See values.yaml's database.migrationsExistingSecretKey comment
+            # and ADR-0029: a direct (non-pooled) connection used only for
+            # the migration step below, never for the runtime pgxpool.
+            # `optional: true` so a secret without this key yet (predates
+            # this chart version) still starts the pod -- the binary falls
+            # back to DATABASE_URL itself when this env var is unset.
+            - name: MIGRATIONS_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "order-management.databaseSecretName" . }}
+                  key: {{ .Values.database.migrationsExistingSecretKey }}
+                  optional: true
+            {{- end }}
             {{- end }}
             {{- range .Values.extraEnv }}
             - {{ toYaml . | nindent 14 | trim }}

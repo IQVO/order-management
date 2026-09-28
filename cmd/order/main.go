@@ -74,9 +74,25 @@ func run() error {
 
 	httpAddr := getenv("HTTP_ADDR", ":8080")
 	databaseURL := os.Getenv("DATABASE_URL")
+	// MIGRATIONS_DATABASE_URL, when set, is a DIRECT (non-pooled,
+	// session-mode) Postgres connection string used ONLY for the
+	// golang-migrate startup step below — everything else (the pgxpool
+	// this process serves requests through) keeps using databaseURL
+	// unchanged. See buildRepoAdapters' doc comment for the full "why":
+	// golang-migrate's postgres driver takes a session-scoped
+	// `SELECT pg_advisory_lock($1)` to serialize concurrent migration
+	// runs, which PgBouncer's transaction-pooling mode does not support
+	// (warehouse-infra's PgBouncer rollout, PR #43; this fallback closes
+	// the fleet-wide bug that rollout introduced — see ADR
+	// 0029-migrations-direct-postgres-connection.md). Falls back to
+	// databaseURL when unset, which is every environment that doesn't
+	// provision the split (local dev, CI integration tests, and any
+	// cluster whose Terraform predates this fix) — byte-identical to
+	// this service's behavior before this change in that case.
+	migrationsDatabaseURL := getenv("MIGRATIONS_DATABASE_URL", databaseURL)
 	migrationsPath := getenv("MIGRATIONS_PATH", "migrations")
 
-	orders, publisher, dbPool, uow, relay, closeAdapters, err := buildRepoAdapters(ctx, databaseURL, migrationsPath, getenv("EVENT_PUBLISHER", "log"), logger)
+	orders, publisher, dbPool, uow, relay, closeAdapters, err := buildRepoAdapters(ctx, databaseURL, migrationsDatabaseURL, migrationsPath, getenv("EVENT_PUBLISHER", "log"), logger)
 	if err != nil {
 		return err
 	}
@@ -452,6 +468,26 @@ func newLogger(level string) *slog.Logger {
 // nil for the in-memory case; buildRepromiseProcessedEvents reuses it
 // rather than opening a second pool against the same database.
 //
+// migrationsDatabaseURL is used ONLY for the golang-migrate step below —
+// the pgxpool opened just after it (and used for every subsequent
+// request) always uses databaseURL. They are deliberately different
+// connection strings in a PgBouncer-fronted environment: golang-migrate's
+// postgres driver takes a session-scoped `SELECT pg_advisory_lock($1)` to
+// serialize concurrent migration runs across replicas starting at the
+// same time, and PgBouncer's transaction-pooling mode (this fleet's
+// pool_mode for every OLTP DATABASE_URL, warehouse-infra PR #43) does not
+// support session-scoped state — each statement in one logical client
+// session can land on a different physical backend connection, so the
+// advisory lock never behaves as a real mutex. Losing replicas crash-loop
+// with `pq: unnamed prepared statement does not exist` / `pq: canceling
+// statement due to statement timeout` until one wins the race. See ADR
+// 0029-migrations-direct-postgres-connection.md for the full incident and
+// fix. Callers pass MIGRATIONS_DATABASE_URL when set (warehouse-infra now
+// provisions it as a direct, non-pooled DSN alongside DATABASE_URL) or
+// fall back to databaseURL itself for any environment that doesn't
+// provision the split (local dev, CI integration tests) — byte-identical
+// to this function's behavior before this parameter existed in that case.
+//
 // Both the migration run and the post-open ping are RETRIED with
 // exponential backoff (mirroring network-fulfillment PR #7): in this
 // cluster every injected pod's first outbound TCP dial is reset ~10s
@@ -463,7 +499,7 @@ func newLogger(level string) *slog.Logger {
 // NOT weaken the fail-closed rule: after the ~31s budget is exhausted
 // this still returns the real underlying error and the caller still
 // refuses to boot.
-func buildRepoAdapters(ctx context.Context, databaseURL, migrationsPath, eventPublisher string, logger *slog.Logger) (
+func buildRepoAdapters(ctx context.Context, databaseURL, migrationsDatabaseURL, migrationsPath, eventPublisher string, logger *slog.Logger) (
 	ports.OrderRepo, ports.EventPublisher, *pgxpool.Pool, ports.UnitOfWork, *postgres.OutboxRelay, func(), error,
 ) {
 	noop := func() {}
@@ -479,7 +515,7 @@ func buildRepoAdapters(ctx context.Context, databaseURL, migrationsPath, eventPu
 		orders = memory.NewOrderRepo()
 	} else {
 		if err := bootretry.Retry(ctx, logger, "run migrations", func() error {
-			return postgres.RunMigrations(databaseURL, migrationsPath)
+			return postgres.RunMigrations(migrationsDatabaseURL, migrationsPath)
 		}); err != nil {
 			return nil, nil, nil, nil, nil, noop, err
 		}
