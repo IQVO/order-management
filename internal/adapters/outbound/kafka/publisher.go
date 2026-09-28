@@ -165,11 +165,21 @@ func NewWriter(brokers ...string) *kafkago.Writer {
 // Production code should use NewWriter, which pins the published integration
 // topic. This variant lets integration tests exercise the identical writer
 // configuration against an isolated, per-test topic.
+//
+// Balancer is kafkago.Hash (FNV-1a over Message.Key), not LeastBytes: this
+// package's kafka-go dependency does NOT replicate Kafka's own key-hashing
+// default partitioner automatically just because a Message carries a
+// non-nil Key — the Balancer alone decides partition placement, and
+// LeastBytes routes purely by cumulative byte volume, ignoring Key
+// entirely. Hash is the balancer that actually gives "same Key always maps
+// to the same partition", which is the whole point of stamping OrderId
+// onto every message (see encodeEnvelope) after the Phase 3 1->8
+// partition scaleup exposed the missing per-order ordering guarantee.
 func NewWriterForTopic(topic string, brokers ...string) *kafkago.Writer {
 	return &kafkago.Writer{
 		Addr:                   kafkago.TCP(brokers...),
 		Topic:                  topic,
-		Balancer:               &kafkago.LeastBytes{},
+		Balancer:               &kafkago.Hash{},
 		AllowAutoTopicCreation: true,
 	}
 }
@@ -196,16 +206,25 @@ func toReleasedLineData(lines []shared.ReleasedLine) []releasedLineData {
 }
 
 // encodeEnvelope maps event onto its integration envelope and marshals it,
-// without touching tracing or the broker. ok is false for a domain event
-// outside this publisher's published contract (see the package doc
-// comment) — the caller (Publish, Encode) treats that as "nothing to do",
-// matching this publisher's pre-outbox behaviour of silently skipping
-// such events.
-func encodeEnvelope(event shared.DomainEvent) (env envelope, msg []byte, ok bool, err error) {
+// without touching tracing or the broker. key is the Kafka partition key —
+// always the event's Order aggregate id (shared.OrderId), matching the
+// analytics publisher's own key choice (see AnalyticsPublisher.marshalData)
+// — so every integration event for the SAME order lands on the SAME
+// partition regardless of partition count (Kafka's default partitioner
+// hashes a non-nil Key deterministically), preserving per-aggregate
+// ordering (OrderAllocated -> OrderPartiallyAllocated -> OrderRepromised
+// for one order can never be observed out of relative order by a consumer,
+// even with topic partitions > 1). ok is false for a domain event outside
+// this publisher's published contract (see the package doc comment) — the
+// caller (Publish, Encode) treats that as "nothing to do", matching this
+// publisher's pre-outbox behaviour of silently skipping such events.
+func encodeEnvelope(event shared.DomainEvent) (env envelope, msg []byte, key []byte, ok bool, err error) {
 	var data any
+	var orderID shared.OrderId
 
 	switch e := event.(type) {
 	case shared.OrderAllocated:
+		orderID = e.OrderID
 		data = allocationData{
 			OrderID:      e.OrderID.String(),
 			PromiseDate:  e.PromiseDate.UTC().Format(time.RFC3339),
@@ -214,6 +233,7 @@ func encodeEnvelope(event shared.DomainEvent) (env envelope, msg []byte, ok bool
 			Lines:        toReleasedLineData(e.Lines),
 		}
 	case shared.OrderPartiallyAllocated:
+		orderID = e.OrderID
 		data = allocationData{
 			OrderID:      e.OrderID.String(),
 			PromiseDate:  e.PromiseDate.UTC().Format(time.RFC3339),
@@ -222,6 +242,7 @@ func encodeEnvelope(event shared.DomainEvent) (env envelope, msg []byte, ok bool
 			Lines:        toReleasedLineData(e.Lines),
 		}
 	case shared.OrderRepromised:
+		orderID = e.OrderID
 		data = repromisedData{
 			OrderID:  e.OrderID.String(),
 			CptIdOld: e.CptIdOld,
@@ -229,12 +250,12 @@ func encodeEnvelope(event shared.DomainEvent) (env envelope, msg []byte, ok bool
 			Reason:   e.Reason,
 		}
 	default:
-		return envelope{}, nil, false, nil
+		return envelope{}, nil, nil, false, nil
 	}
 
 	payload, err := json.Marshal(data)
 	if err != nil {
-		return envelope{}, nil, false, err
+		return envelope{}, nil, nil, false, err
 	}
 
 	env = envelope{
@@ -247,9 +268,9 @@ func encodeEnvelope(event shared.DomainEvent) (env envelope, msg []byte, ok bool
 
 	msg, err = json.Marshal(env)
 	if err != nil {
-		return envelope{}, nil, false, err
+		return envelope{}, nil, nil, false, err
 	}
-	return env, msg, true, nil
+	return env, msg, []byte(orderID.String()), true, nil
 }
 
 // Encode implements Encoder: it builds the wire-ready integration message
@@ -259,13 +280,13 @@ func encodeEnvelope(event shared.DomainEvent) (env envelope, msg []byte, ok bool
 // consumer parent onto the REQUEST that enqueued the row rather than a
 // later, unrelated relay pass).
 func (p *Publisher) Encode(ctx context.Context, event shared.DomainEvent) (Encoded, bool, error) {
-	env, msg, ok, err := encodeEnvelope(event)
+	env, msg, key, ok, err := encodeEnvelope(event)
 	if err != nil || !ok {
 		return Encoded{}, ok, err
 	}
 	headers := []kafkago.Header{}
 	otel.GetTextMapPropagator().Inject(ctx, headerCarrier{headers: &headers})
-	return Encoded{Topic: Topic, EventType: env.EventType, Value: msg, Headers: headers}, true, nil
+	return Encoded{Topic: Topic, EventType: env.EventType, Key: key, Value: msg, Headers: headers}, true, nil
 }
 
 // Publish forwards event onto Kafka directly (no outbox) — used when the
@@ -275,7 +296,7 @@ func (p *Publisher) Encode(ctx context.Context, event shared.DomainEvent) (Encod
 // producer span per call, header injection from that span's context, and
 // the call's error recorded on the span before it is returned.
 func (p *Publisher) Publish(ctx context.Context, event shared.DomainEvent) error {
-	_, msg, ok, err := encodeEnvelope(event)
+	_, msg, key, ok, err := encodeEnvelope(event)
 	if err != nil {
 		return err
 	}
@@ -309,7 +330,7 @@ func (p *Publisher) Publish(ctx context.Context, event shared.DomainEvent) error
 	headers := []kafkago.Header{}
 	otel.GetTextMapPropagator().Inject(ctx, headerCarrier{headers: &headers})
 
-	if err := p.writer.WriteMessages(ctx, kafkago.Message{Value: msg, Headers: headers}); err != nil {
+	if err := p.writer.WriteMessages(ctx, kafkago.Message{Key: key, Value: msg, Headers: headers}); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return err

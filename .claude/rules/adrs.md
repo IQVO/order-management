@@ -228,6 +228,33 @@ Read the ADR before touching `charts/order-management/values.yaml`'s
 `autoscaling:` block, any `*-deployment.yaml`/`hpa.yaml` template,
 or `postgres/pool.go`/`analyticsstore/pool.go`.
 
+**0027 — ACCEPTED: partition key (OrderId) on the integration
+publisher's Kafka messages, closing the Phase 3 partition-scaleup
+ordering gap.** `internal/adapters/outbound/kafka/publisher.go`'s
+`Publisher` (forwards `OrderAllocated`/`OrderPartiallyAllocated`/
+`OrderRepromised` to `warehouse.order-management.events`) never set
+`kafkago.Message.Key`, which was accidentally safe at 1 partition
+(total order) but breaks per-order event ordering once
+warehouse-infra's PR #42 scaled every business topic to 8 partitions.
+Fix: `encodeEnvelope` now returns the event's `shared.OrderId.String()`
+as the key (mirroring `AnalyticsPublisher.marshalData`'s existing
+choice) for both the direct-publish and outbox-`Encode` paths. Also
+found and fixed a second, non-obvious bug: every writer in this
+package used `&kafkago.LeastBytes{}`, a balancer that ignores
+`Message.Key` entirely for partition routing (it balances purely by
+cumulative byte volume) — so `AnalyticsPublisher`'s own pre-existing
+`Key` was ALSO not actually achieving partition affinity against a
+real broker until this ADR switched every writer's `Balancer` to
+`&kafkago.Hash{}` (FNV-1a over `Key`). Verified via a real-Kafka
+Testcontainers integration test (8-partition topic, 3 events for one
+order + 1 for another) that failed under `LeastBytes` even with `Key`
+populated, and passed only after the `Hash` balancer switch — a fake-
+writer unit test alone would not have caught this. Read the ADR before
+touching `publisher.go`'s `encodeEnvelope`/`Encode`/`Publish`,
+`analytics_publisher.go`'s `NewAnalyticsPublisher`, or `relay_sink.go`'s
+`NewRelaySink` — all three writer constructors must keep matching
+`Balancer` choices.
+
 Other ADR-adjacent facts worth knowing without opening every file:
 
 - **0021 — ACCEPTED: multi-path attribute-driven routing, closing ADR-0013's

@@ -456,6 +456,105 @@ func TestPublisher_NoTraceContextWithoutASpan(t *testing.T) {
 	}
 }
 
+// TestPublisher_KafkaMessageKey_MatchesOrderID_AcrossEventTypes covers the
+// partition-scaleup fix (ADR-0027 / warehouse-infra PR #42's 1->8
+// partition change): the Kafka message Key must be the Order's aggregate
+// id for every published integration event type, and — critically — must
+// be IDENTICAL across OrderAllocated, OrderPartiallyAllocated, and
+// OrderRepromised for the SAME order, since Kafka's default partitioner
+// only guarantees same-partition routing when the key bytes are equal.
+// Before this fix Key was always nil (round-robin), which silently broke
+// per-order event ordering the moment the topic gained more than one
+// partition.
+func TestPublisher_KafkaMessageKey_MatchesOrderID_AcrossEventTypes(t *testing.T) {
+	writer := &fakeWriter{}
+	pub := kafka.NewPublisher(writer)
+
+	occurredAt := time.Date(2026, 9, 27, 9, 0, 0, 0, time.UTC)
+	const orderID = "ord-partition-key-42"
+
+	events := []shared.DomainEvent{
+		shared.NewOrderAllocated(occurredAt, orderID, occurredAt.Add(24*time.Hour), nil),
+		shared.NewOrderPartiallyAllocated(occurredAt, orderID, 1, 1, occurredAt.Add(6*time.Hour), nil),
+		shared.NewOrderRepromised(occurredAt, orderID, "sp1-1200", "sp1-1800", "TaskCPTMissed"),
+	}
+	for _, event := range events {
+		if err := pub.Publish(context.Background(), event); err != nil {
+			t.Fatalf("Publish returned error: %v", err)
+		}
+	}
+
+	if len(writer.messages) != len(events) {
+		t.Fatalf("expected %d messages, got %d", len(events), len(writer.messages))
+	}
+
+	for i, msg := range writer.messages {
+		if msg.Key == nil {
+			t.Fatalf("messages[%d].Key is nil, want %q — every message must carry a partition key", i, orderID)
+		}
+		if string(msg.Key) != orderID {
+			t.Errorf("messages[%d].Key = %q, want %q", i, msg.Key, orderID)
+		}
+	}
+	// Every message for this order must carry the exact same key bytes —
+	// this is what Kafka's default partitioner needs to route them all
+	// onto the same partition regardless of partition count.
+	for i := 1; i < len(writer.messages); i++ {
+		if string(writer.messages[i].Key) != string(writer.messages[0].Key) {
+			t.Errorf("messages[%d].Key = %q, want identical to messages[0].Key = %q", i, writer.messages[i].Key, writer.messages[0].Key)
+		}
+	}
+}
+
+// TestPublisher_KafkaMessageKey_DiffersAcrossOrders proves the key is
+// actually derived from the event's own OrderID rather than some fixed or
+// accidental constant — two different orders must get two different keys.
+func TestPublisher_KafkaMessageKey_DiffersAcrossOrders(t *testing.T) {
+	writer := &fakeWriter{}
+	pub := kafka.NewPublisher(writer)
+
+	event1 := shared.NewOrderAllocated(time.Now(), "ord-A", time.Now(), nil)
+	event2 := shared.NewOrderAllocated(time.Now(), "ord-B", time.Now(), nil)
+
+	if err := pub.Publish(context.Background(), event1); err != nil {
+		t.Fatalf("Publish returned error: %v", err)
+	}
+	if err := pub.Publish(context.Background(), event2); err != nil {
+		t.Fatalf("Publish returned error: %v", err)
+	}
+
+	if len(writer.messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(writer.messages))
+	}
+	if string(writer.messages[0].Key) != "ord-A" {
+		t.Errorf("messages[0].Key = %q, want ord-A", writer.messages[0].Key)
+	}
+	if string(writer.messages[1].Key) != "ord-B" {
+		t.Errorf("messages[1].Key = %q, want ord-B", writer.messages[1].Key)
+	}
+}
+
+// TestPublisher_Encode_SetsKafkaMessageKey covers the outbox path
+// (Publisher.Encode, what postgres.OutboxPublisher calls inside the use
+// case's transaction) — it must stamp the same OrderID-derived Key onto
+// the Encoded row as the direct Publish path, so a message relayed later
+// by postgres.OutboxRelay still routes deterministically by order.
+func TestPublisher_Encode_SetsKafkaMessageKey(t *testing.T) {
+	pub := kafka.NewPublisher(&fakeWriter{})
+
+	event := shared.NewOrderAllocated(time.Now(), "ord-encode-1", time.Now(), nil)
+	enc, ok, err := pub.Encode(context.Background(), event)
+	if err != nil {
+		t.Fatalf("Encode returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("Encode: ok = false, want true for OrderAllocated")
+	}
+	if string(enc.Key) != "ord-encode-1" {
+		t.Errorf("Encode Key = %q, want ord-encode-1", enc.Key)
+	}
+}
+
 func TestPublisher_MarshalErrorPropagates(t *testing.T) {
 	writer := &fakeWriter{err: errWriterBoom}
 	pub := kafka.NewPublisher(writer)
