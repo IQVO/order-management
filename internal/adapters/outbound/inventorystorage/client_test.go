@@ -17,10 +17,11 @@ import (
 // request shape can be asserted against inventory-storage's published
 // contract rather than assumed.
 type captured struct {
-	method string
-	path   string
-	body   map[string]any
-	auth   string
+	method         string
+	path           string
+	body           map[string]any
+	auth           string
+	idempotencyKey string
 }
 
 func newServer(t *testing.T, status int, responseBody string, got *captured) *httptest.Server {
@@ -29,6 +30,7 @@ func newServer(t *testing.T, status int, responseBody string, got *captured) *ht
 		got.method = r.Method
 		got.path = r.URL.Path
 		got.auth = r.Header.Get("Authorization")
+		got.idempotencyKey = r.Header.Get(inventorystorage.IdempotencyKeyHeader)
 		if raw, err := io.ReadAll(r.Body); err == nil && len(raw) > 0 {
 			_ = json.Unmarshal(raw, &got.body)
 		}
@@ -48,7 +50,7 @@ func TestReserveSendsInventoryStoragesPublishedRequestShape(t *testing.T) {
 
 	client := inventorystorage.NewClient(srv.URL+"/", nil)
 	result, err := client.Reserve(context.Background(), ports.ReservationRequest{
-		SKU: "SKU-1", Quantity: 3, DemandRef: "ord-7",
+		SKU: "SKU-1", Quantity: 3, DemandRef: "ord-7", LineNo: 1, Attempt: 1,
 	})
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
@@ -67,6 +69,66 @@ func TestReserveSendsInventoryStoragesPublishedRequestShape(t *testing.T) {
 	// REST/MCP static-bearer auth layer has been removed.
 	if got.auth != "" {
 		t.Fatalf("Authorization = %q, want none (auth layer removed)", got.auth)
+	}
+	// inventory-storage's POST /reservations requires this header (PR
+	// #98) -- a request without it fails outright with 400
+	// idempotency-key-required, which is exactly the production
+	// incident this test guards against regressing.
+	if got.idempotencyKey == "" {
+		t.Fatal("Idempotency-Key header was not sent -- inventory-storage's POST /reservations requires it")
+	}
+}
+
+// TestReserveIdempotencyKeyIsStableAcrossRetryButDiffersAcrossLineOrAttempt
+// is the core regression test for the production incident: inventory-
+// storage's Idempotency-Key middleware replays the cached response for a
+// key it has already seen (same key + same body = no new reservation),
+// and rejects a reused key with a DIFFERENT body (422). This client's
+// derived key must therefore be:
+//   - IDENTICAL on a genuine retry of the exact same (order, line,
+//     attempt) -- so a retried Reserve call replays instead of
+//     double-reserving,
+//   - DIFFERENT for a different line of the SAME order (two lines must
+//     never collide on the same key),
+//   - DIFFERENT for a different order,
+//   - DIFFERENT for a genuinely new attempt (a later allocation pass,
+//     e.g. after RetryAllocation) of the SAME line.
+func TestReserveIdempotencyKeyIsStableAcrossRetryButDiffersAcrossLineOrAttempt(t *testing.T) {
+	keyFor := func(t *testing.T, req ports.ReservationRequest) string {
+		t.Helper()
+		var got captured
+		srv := newServer(t, http.StatusCreated, `{"id":"res-1"}`, &got)
+		client := inventorystorage.NewClient(srv.URL, nil)
+		if _, err := client.Reserve(context.Background(), req); err != nil {
+			t.Fatalf("Reserve: %v", err)
+		}
+		return got.idempotencyKey
+	}
+
+	base := ports.ReservationRequest{SKU: "SKU-1", Quantity: 3, DemandRef: "ord-7", LineNo: 1, Attempt: 1}
+
+	firstCall := keyFor(t, base)
+	retryOfSameAttempt := keyFor(t, base) // a genuine retry: identical request
+	if firstCall != retryOfSameAttempt {
+		t.Fatalf("key changed across a retry of the SAME attempt: %q != %q", firstCall, retryOfSameAttempt)
+	}
+
+	differentLine := base
+	differentLine.LineNo = 2
+	if k := keyFor(t, differentLine); k == firstCall {
+		t.Fatalf("line 2 of the same order got the SAME key as line 1: %q", k)
+	}
+
+	differentOrder := base
+	differentOrder.DemandRef = "ord-8"
+	if k := keyFor(t, differentOrder); k == firstCall {
+		t.Fatalf("a different order got the SAME key: %q", k)
+	}
+
+	newAttempt := base
+	newAttempt.Attempt = 2
+	if k := keyFor(t, newAttempt); k == firstCall {
+		t.Fatalf("a new attempt (retry-allocation pass) got the SAME key as the original attempt: %q", k)
 	}
 }
 

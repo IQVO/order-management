@@ -72,6 +72,16 @@ func allocateLines(
 			SKU:       line.SKU(),
 			Quantity:  line.Quantity(),
 			DemandRef: o.ID(),
+			LineNo:    line.LineNo(),
+			// Attempt is the aggregate's own optimistic-concurrency
+			// version (ADR 0024) at the START of this allocation pass —
+			// see ports.ReservationRequest's doc comment for why this is
+			// exactly the "same attempt vs. new attempt" signal
+			// inventory-storage's Idempotency-Key contract needs: it
+			// cannot change again until this pass's Save commits, and
+			// a genuinely later, independent pass always observes a
+			// strictly greater value.
+			Attempt: o.Version(),
 		})
 
 		switch {

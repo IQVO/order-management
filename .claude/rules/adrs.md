@@ -257,6 +257,25 @@ touching `publisher.go`'s `encodeEnvelope`/`Encode`/`Publish`,
 
 Other ADR-adjacent facts worth knowing without opening every file:
 
+- **0028 — ACCEPTED: send `Idempotency-Key` on `POST /reservations`,
+  restoring the inventory-storage contract PR #98 changed.**
+  Production-blocking bug found in Phase 4 live-cluster validation:
+  inventory-storage's PR #98 required a caller-supplied `Idempotency-Key`
+  on `POST /reservations` (mirroring this repo's own ADR 0023 verbatim),
+  but `Client.Reserve` was never updated to send one — every real
+  allocation attempt failed `400 idempotency-key-required` with zero
+  fault injection, leaving every line `Pending` and tripping the circuit
+  breaker permanently open. Fix: `ports.ReservationRequest` gains
+  `LineNo`/`Attempt` (the latter is `Order.Version()`, reused from ADR
+  0024, not a new counter); `Client.Reserve` derives
+  `res-<orderId>-line-<lineNo>-att-<version>` and sends it as
+  `Idempotency-Key` — stable across a retry of the same attempt,
+  different for a genuinely new one. `RevokeReservation` needs no
+  header: inventory-storage's `DELETE /reservations/{id}` route is
+  confirmed not idempotency-gated. Read the ADR before touching
+  `Client.Reserve`, `ports.ReservationRequest`, or `allocateLines`'
+  `inventory.Reserve` call site.
+
 - **0021 — ACCEPTED: multi-path attribute-driven routing, closing ADR-0013's
   original deferral and ADR-0016 §4's named limitation.** `ports.ProcessPathCatalogue`
   gains `ListActive() []shared.ActivePathCandidate`; `kafkacatalog.Consumer`
