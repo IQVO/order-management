@@ -7,7 +7,9 @@ metadata:
     {{- include "order-management.labels" . | nindent 4 }}
     app.kubernetes.io/component: analytics-projector
 spec:
+  {{- if not .Values.autoscaling.projector.enabled }}
   replicas: {{ .Values.analytics.projector.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "order-management.selectorLabels" . | nindent 6 }}
