@@ -198,6 +198,36 @@
     `network-fulfillment` (`internal/adapters/outbound/ordermanagement`:
     `POST /orders`, `POST /orders/{id}/release`, `DELETE /orders/{id}`).
 
+**0026 — ACCEPTED: per-workload HorizontalPodAutoscaler and pgxpool
+MaxConns/statement_timeout tuning (Phase 3 scalability).** An
+`autoscaling/v2` HPA per independently-assessed Deployment: `api`
+(min 1/max 4/70% CPU — stateless, `RepromiseConsumer`'s stable
+shared Kafka group is scale-safe), `analytics-projector` (min
+1/max **2**, not 4 — `kafka.AnalyticsConsumerGroup` is also a
+stable shared group so N replicas share partitions safely, but
+capped low since OrderId-keyed partitioning + idempotent upserts
+don't need wide fan-out), `analytics-reports` (min 1/max 3 —
+stateless reader, same treatment as `api`), `frontend` (min 1/max
+3 — pure static assets). `mcp` gets **NO** `autoscaling.mcp` block
+at all — deliberately excluded, not disabled: the MCP Go SDK's
+`StreamableHTTPHandler` keeps in-memory session state keyed by
+`Mcp-Session-Id` with no sticky routing in `mcp-service.yaml`, so
+>1 replica can misroute a mid-session request. Every block defaults
+`enabled: false`; each Deployment template guards its `replicas:`
+field with `{{- if not .Values.autoscaling.<x>.enabled }}` so a
+hardcoded replica count never fights an active HPA (verified via
+`helm template` with every combination). Also sets explicit
+`pgxpool.Config.MaxConns` (OLTP pool: 10, shared by `cmd/order`/
+`cmd/mcp`; analytics writer: 5; analytics reader: 5) and
+`statement_timeout` (OLTP: 5s, analytics writer: 10s, analytics
+reader: 15s) via `AfterConnect`, sized against the shared Postgres
+instance's REAL `max_connections=100` (confirmed live, an
+unmodified Bitnami default — verified this service shares ONE
+Postgres instance with up to 9 siblings, not a dedicated one).
+Read the ADR before touching `charts/order-management/values.yaml`'s
+`autoscaling:` block, any `*-deployment.yaml`/`hpa.yaml` template,
+or `postgres/pool.go`/`analyticsstore/pool.go`.
+
 Other ADR-adjacent facts worth knowing without opening every file:
 
 - **0021 — ACCEPTED: multi-path attribute-driven routing, closing ADR-0013's

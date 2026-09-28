@@ -7,7 +7,9 @@ metadata:
     {{- include "order-management.labels" . | nindent 4 }}
     app.kubernetes.io/component: analytics-reports
 spec:
+  {{- if not .Values.autoscaling.reports.enabled }}
   replicas: {{ .Values.analytics.reports.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "order-management.selectorLabels" . | nindent 6 }}
