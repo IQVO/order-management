@@ -59,6 +59,50 @@ type allocationData struct {
 	Lines       []releasedLineData `json:"lines"`
 }
 
+// publishOne publishes event through pub over writer and asserts
+// exactly one message was written, returning it.
+func publishOne(t *testing.T, writer *fakeWriter, pub *kafka.Publisher, event shared.DomainEvent) kafkago.Message {
+	t.Helper()
+	if err := pub.Publish(context.Background(), event); err != nil {
+		t.Fatalf("Publish returned error: %v", err)
+	}
+	if len(writer.messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(writer.messages))
+	}
+	return writer.messages[0]
+}
+
+// decodeEnvelope unmarshals a published message value into the shared
+// envelope shape.
+func decodeEnvelope(t *testing.T, msg kafkago.Message) envelope {
+	t.Helper()
+	var env envelope
+	if err := json.Unmarshal(msg.Value, &env); err != nil {
+		t.Fatalf("failed to unmarshal envelope: %v", err)
+	}
+	return env
+}
+
+// decodeAllocationData unmarshals an envelope's data payload into the
+// typed allocation shape.
+func decodeAllocationData(t *testing.T, env envelope) allocationData {
+	t.Helper()
+	var data allocationData
+	if err := json.Unmarshal(env.Data, &data); err != nil {
+		t.Fatalf("failed to unmarshal data: %v", err)
+	}
+	return data
+}
+
+// assertReleasedLine pins one decoded released-line entry against its
+// expected wire shape.
+func assertReleasedLine(t *testing.T, got, want releasedLineData) {
+	t.Helper()
+	if got != want {
+		t.Errorf("released line = %+v, want %+v", got, want)
+	}
+}
+
 func TestPublisher_OrderAllocated_EnvelopeShape(t *testing.T) {
 	writer := &fakeWriter{}
 	pub := kafka.NewPublisher(writer)
@@ -71,19 +115,21 @@ func TestPublisher_OrderAllocated_EnvelopeShape(t *testing.T) {
 	}
 	event := shared.NewOrderAllocated(occurredAt, "ord-42", promiseDate, lines)
 
-	if err := pub.Publish(context.Background(), event); err != nil {
-		t.Fatalf("Publish returned error: %v", err)
-	}
+	env := decodeEnvelope(t, publishOne(t, writer, pub, event))
 
-	if len(writer.messages) != 1 {
-		t.Fatalf("expected 1 message, got %d", len(writer.messages))
-	}
+	t.Run("envelope", func(t *testing.T) {
+		assertAllocatedEnvelopeHeader(t, env, occurredAt)
+	})
 
-	var env envelope
-	if err := json.Unmarshal(writer.messages[0].Value, &env); err != nil {
-		t.Fatalf("failed to unmarshal envelope: %v", err)
-	}
+	t.Run("data", func(t *testing.T) {
+		assertAllocatedEnvelopeData(t, decodeAllocationData(t, env), promiseDate)
+	})
+}
 
+// assertAllocatedEnvelopeHeader pins the envelope-level fields of a
+// published OrderAllocated event.
+func assertAllocatedEnvelopeHeader(t *testing.T, env envelope, occurredAt time.Time) {
+	t.Helper()
 	if env.EventType != "OrderAllocated" {
 		t.Errorf("EventType = %q, want OrderAllocated", env.EventType)
 	}
@@ -96,11 +142,12 @@ func TestPublisher_OrderAllocated_EnvelopeShape(t *testing.T) {
 	if env.EventID == "" {
 		t.Error("EventID must not be empty")
 	}
+}
 
-	var data allocationData
-	if err := json.Unmarshal(env.Data, &data); err != nil {
-		t.Fatalf("failed to unmarshal data: %v", err)
-	}
+// assertAllocatedEnvelopeData pins the payload-level fields of a
+// published OrderAllocated event carrying two released lines.
+func assertAllocatedEnvelopeData(t *testing.T, data allocationData, promiseDate time.Time) {
+	t.Helper()
 	if data.OrderID != "ord-42" {
 		t.Errorf("data.order_id = %q, want ord-42", data.OrderID)
 	}
@@ -110,12 +157,8 @@ func TestPublisher_OrderAllocated_EnvelopeShape(t *testing.T) {
 	if len(data.Lines) != 2 {
 		t.Fatalf("data.lines = %v, want 2 entries", data.Lines)
 	}
-	if data.Lines[0].LineNo != 1 || data.Lines[0].SKU != "SKU-1" || data.Lines[0].PathID != "pick" || !data.Lines[0].GiftWrap || data.Lines[0].FulfillmentClass != "MULTI_LINE_MULTI" {
-		t.Errorf("data.lines[0] = %+v, want {1 SKU-1 pick true MULTI_LINE_MULTI}", data.Lines[0])
-	}
-	if data.Lines[1].LineNo != 2 || data.Lines[1].SKU != "SKU-2" || data.Lines[1].PathID != "singles" || data.Lines[1].GiftWrap || data.Lines[1].FulfillmentClass != "MULTI_LINE_MULTI" {
-		t.Errorf("data.lines[1] = %+v, want {2 SKU-2 singles false MULTI_LINE_MULTI}", data.Lines[1])
-	}
+	assertReleasedLine(t, data.Lines[0], releasedLineData{LineNo: 1, SKU: "SKU-1", PathID: "pick", GiftWrap: true, FulfillmentClass: "MULTI_LINE_MULTI"})
+	assertReleasedLine(t, data.Lines[1], releasedLineData{LineNo: 2, SKU: "SKU-2", PathID: "singles", FulfillmentClass: "MULTI_LINE_MULTI"})
 }
 
 func TestPublisher_OrderPartiallyAllocated_EnvelopeShape(t *testing.T) {
@@ -295,15 +338,7 @@ func TestPublisher_InjectsTraceContextIntoHeaders(t *testing.T) {
 		t.Fatalf("expected 1 message, got %d", len(writer.messages))
 	}
 
-	var traceparent string
-	for _, h := range writer.messages[0].Headers {
-		if h.Key == "traceparent" {
-			traceparent = string(h.Value)
-		}
-	}
-	if traceparent == "" {
-		t.Fatalf("no traceparent header on the published message: %+v", writer.messages[0].Headers)
-	}
+	traceparent := traceparentHeader(t, writer.messages[0])
 
 	spans := recorder.Ended()
 	if len(spans) != 1 {
@@ -311,21 +346,61 @@ func TestPublisher_InjectsTraceContextIntoHeaders(t *testing.T) {
 	}
 	published := spans[0]
 
+	t.Run("span", func(t *testing.T) {
+		assertPublishSpan(t, published, spanID)
+	})
+
+	t.Run("traceparent", func(t *testing.T) {
+		assertTraceparentHeader(t, traceparent, traceID, published)
+	})
+
+	t.Run("messaging attributes", func(t *testing.T) {
+		assertPublishSpanAttributes(t, published)
+	})
+}
+
+// traceparentHeader returns the traceparent header value carried by a
+// published message, failing the test when the header is absent.
+func traceparentHeader(t *testing.T, msg kafkago.Message) string {
+	t.Helper()
+	for _, h := range msg.Headers {
+		if h.Key == "traceparent" {
+			return string(h.Value)
+		}
+	}
+	t.Fatalf("no traceparent header on the published message: %+v", msg.Headers)
+	return ""
+}
+
+// assertPublishSpan pins the publish span's name, kind and parent — the
+// fleet-wide convention the other services follow.
+func assertPublishSpan(t *testing.T, published sdktrace.ReadOnlySpan, parentSpanID trace.SpanID) {
+	t.Helper()
 	if published.Name() != "kafka.publish "+kafka.Topic {
 		t.Errorf("span name = %q, want %q", published.Name(), "kafka.publish "+kafka.Topic)
 	}
 	if published.SpanKind() != trace.SpanKindProducer {
 		t.Errorf("span kind = %v, want producer", published.SpanKind())
 	}
-	if published.Parent().SpanID() != spanID {
-		t.Errorf("publish span parent = %s, want the caller's span %s", published.Parent().SpanID(), spanID)
+	if published.Parent().SpanID() != parentSpanID {
+		t.Errorf("publish span parent = %s, want the caller's span %s", published.Parent().SpanID(), parentSpanID)
 	}
+}
 
+// assertTraceparentHeader pins the W3C traceparent the published message
+// carries for the publish span.
+func assertTraceparentHeader(t *testing.T, traceparent string, traceID trace.TraceID, published sdktrace.ReadOnlySpan) {
+	t.Helper()
 	want := "00-" + traceID.String() + "-" + published.SpanContext().SpanID().String() + "-01"
 	if traceparent != want {
 		t.Errorf("traceparent = %q, want %q", traceparent, want)
 	}
+}
 
+// assertPublishSpanAttributes pins the publish span's messaging
+// attributes.
+func assertPublishSpanAttributes(t *testing.T, published sdktrace.ReadOnlySpan) {
+	t.Helper()
 	attrs := map[string]string{}
 	for _, attr := range published.Attributes() {
 		attrs[string(attr.Key)] = attr.Value.AsString()
@@ -381,6 +456,105 @@ func TestPublisher_NoTraceContextWithoutASpan(t *testing.T) {
 	}
 }
 
+// TestPublisher_KafkaMessageKey_MatchesOrderID_AcrossEventTypes covers the
+// partition-scaleup fix (ADR-0027 / warehouse-infra PR #42's 1->8
+// partition change): the Kafka message Key must be the Order's aggregate
+// id for every published integration event type, and — critically — must
+// be IDENTICAL across OrderAllocated, OrderPartiallyAllocated, and
+// OrderRepromised for the SAME order, since Kafka's default partitioner
+// only guarantees same-partition routing when the key bytes are equal.
+// Before this fix Key was always nil (round-robin), which silently broke
+// per-order event ordering the moment the topic gained more than one
+// partition.
+func TestPublisher_KafkaMessageKey_MatchesOrderID_AcrossEventTypes(t *testing.T) {
+	writer := &fakeWriter{}
+	pub := kafka.NewPublisher(writer)
+
+	occurredAt := time.Date(2026, 9, 27, 9, 0, 0, 0, time.UTC)
+	const orderID = "ord-partition-key-42"
+
+	events := []shared.DomainEvent{
+		shared.NewOrderAllocated(occurredAt, orderID, occurredAt.Add(24*time.Hour), nil),
+		shared.NewOrderPartiallyAllocated(occurredAt, orderID, 1, 1, occurredAt.Add(6*time.Hour), nil),
+		shared.NewOrderRepromised(occurredAt, orderID, "sp1-1200", "sp1-1800", "TaskCPTMissed"),
+	}
+	for _, event := range events {
+		if err := pub.Publish(context.Background(), event); err != nil {
+			t.Fatalf("Publish returned error: %v", err)
+		}
+	}
+
+	if len(writer.messages) != len(events) {
+		t.Fatalf("expected %d messages, got %d", len(events), len(writer.messages))
+	}
+
+	for i, msg := range writer.messages {
+		if msg.Key == nil {
+			t.Fatalf("messages[%d].Key is nil, want %q — every message must carry a partition key", i, orderID)
+		}
+		if string(msg.Key) != orderID {
+			t.Errorf("messages[%d].Key = %q, want %q", i, msg.Key, orderID)
+		}
+	}
+	// Every message for this order must carry the exact same key bytes —
+	// this is what Kafka's default partitioner needs to route them all
+	// onto the same partition regardless of partition count.
+	for i := 1; i < len(writer.messages); i++ {
+		if string(writer.messages[i].Key) != string(writer.messages[0].Key) {
+			t.Errorf("messages[%d].Key = %q, want identical to messages[0].Key = %q", i, writer.messages[i].Key, writer.messages[0].Key)
+		}
+	}
+}
+
+// TestPublisher_KafkaMessageKey_DiffersAcrossOrders proves the key is
+// actually derived from the event's own OrderID rather than some fixed or
+// accidental constant — two different orders must get two different keys.
+func TestPublisher_KafkaMessageKey_DiffersAcrossOrders(t *testing.T) {
+	writer := &fakeWriter{}
+	pub := kafka.NewPublisher(writer)
+
+	event1 := shared.NewOrderAllocated(time.Now(), "ord-A", time.Now(), nil)
+	event2 := shared.NewOrderAllocated(time.Now(), "ord-B", time.Now(), nil)
+
+	if err := pub.Publish(context.Background(), event1); err != nil {
+		t.Fatalf("Publish returned error: %v", err)
+	}
+	if err := pub.Publish(context.Background(), event2); err != nil {
+		t.Fatalf("Publish returned error: %v", err)
+	}
+
+	if len(writer.messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(writer.messages))
+	}
+	if string(writer.messages[0].Key) != "ord-A" {
+		t.Errorf("messages[0].Key = %q, want ord-A", writer.messages[0].Key)
+	}
+	if string(writer.messages[1].Key) != "ord-B" {
+		t.Errorf("messages[1].Key = %q, want ord-B", writer.messages[1].Key)
+	}
+}
+
+// TestPublisher_Encode_SetsKafkaMessageKey covers the outbox path
+// (Publisher.Encode, what postgres.OutboxPublisher calls inside the use
+// case's transaction) — it must stamp the same OrderID-derived Key onto
+// the Encoded row as the direct Publish path, so a message relayed later
+// by postgres.OutboxRelay still routes deterministically by order.
+func TestPublisher_Encode_SetsKafkaMessageKey(t *testing.T) {
+	pub := kafka.NewPublisher(&fakeWriter{})
+
+	event := shared.NewOrderAllocated(time.Now(), "ord-encode-1", time.Now(), nil)
+	enc, ok, err := pub.Encode(context.Background(), event)
+	if err != nil {
+		t.Fatalf("Encode returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("Encode: ok = false, want true for OrderAllocated")
+	}
+	if string(enc.Key) != "ord-encode-1" {
+		t.Errorf("Encode Key = %q, want ord-encode-1", enc.Key)
+	}
+}
+
 func TestPublisher_MarshalErrorPropagates(t *testing.T) {
 	writer := &fakeWriter{err: errWriterBoom}
 	pub := kafka.NewPublisher(writer)
@@ -429,18 +603,25 @@ func TestPublisher_PerLinePromiseFields_ADR0017(t *testing.T) {
 	}
 	event := shared.NewOrderAllocatedWithPromise(occurredAt, "ord-77", lateCutoff, lateCpt, leadTimeBasis, lines)
 
-	if err := pub.Publish(context.Background(), event); err != nil {
-		t.Fatalf("Publish returned error: %v", err)
-	}
-
-	var env envelope
-	if err := json.Unmarshal(writer.messages[0].Value, &env); err != nil {
-		t.Fatalf("failed to unmarshal envelope: %v", err)
-	}
+	env := decodeEnvelope(t, publishOne(t, writer, pub, event))
 
 	// Assert against the raw JSON too, not just the typed struct, so an
 	// accidental "present but empty string" regression (which the typed
 	// struct's omitempty tag would silently absorb on decode) is caught.
+	t.Run("absent promise fields stay entirely off the wire (omitempty)", func(t *testing.T) {
+		assertRawLineOmitsPromiseFields(t, env)
+	})
+
+	t.Run("present promise fields decode per line", func(t *testing.T) {
+		assertPerLinePromiseDecode(t, decodeAllocationData(t, env), earlyCutoff, earlyCpt, lateCpt, capabilityBasis)
+	})
+}
+
+// assertRawLineOmitsPromiseFields checks the raw JSON lines[] entry for
+// a line with no group breakdown: every promise key must be entirely
+// absent (omitempty), not present-and-empty.
+func assertRawLineOmitsPromiseFields(t *testing.T, env envelope) {
+	t.Helper()
 	var raw map[string]any
 	if err := json.Unmarshal(env.Data, &raw); err != nil {
 		t.Fatalf("failed to unmarshal raw data: %v", err)
@@ -458,11 +639,12 @@ func TestPublisher_PerLinePromiseFields_ADR0017(t *testing.T) {
 			t.Errorf("raw lines[2] has key %q, want it entirely absent (omitempty) when no group applies", key)
 		}
 	}
+}
 
-	var data allocationData
-	if err := json.Unmarshal(env.Data, &data); err != nil {
-		t.Fatalf("failed to unmarshal data: %v", err)
-	}
+// assertPerLinePromiseDecode checks the typed decode of the per-line
+// promise fields: present and correct on lines 1 and 2, empty on line 3.
+func assertPerLinePromiseDecode(t *testing.T, data allocationData, earlyCutoff time.Time, earlyCpt, lateCpt, capabilityBasis string) {
+	t.Helper()
 	if len(data.Lines) != 3 {
 		t.Fatalf("data.Lines = %d entries, want 3", len(data.Lines))
 	}

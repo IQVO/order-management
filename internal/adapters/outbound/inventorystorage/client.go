@@ -18,6 +18,37 @@ import (
 // hanging Supplier does not stall AllocateOrder indefinitely.
 const DefaultTimeout = 5 * time.Second
 
+// IdempotencyKeyHeader is the header inventory-storage's own
+// RequireIdempotencyKey middleware (mirrored from this repo's ADR 0023)
+// requires on POST /reservations — see idempotencyKeyFor's doc comment
+// for how this client derives a value that satisfies its exact replay
+// contract.
+const IdempotencyKeyHeader = "Idempotency-Key"
+
+// idempotencyKeyFor derives the Idempotency-Key this client sends on
+// POST /reservations, from req.DemandRef (the OrderId), req.LineNo, and
+// req.Attempt — see ports.ReservationRequest's doc comment for what each
+// of those means and why they compose into exactly the "same key for a
+// retry of THIS attempt, different key for a genuinely new attempt"
+// shape inventory-storage's middleware expects (read against its own
+// idempotency.go / idempotency_integration_test.go: a replayed key +
+// identical body returns the cached response with no second
+// reservation; the same key with a DIFFERENT body is 422
+// idempotency-key-reused). Deterministic and side-effect-free — calling
+// it twice with the same ReservationRequest always yields the same
+// string, by construction, with no random/UUID component: this client
+// must reproduce the SAME key across an actual network retry of the
+// same outbound call (e.g. a transport-level retry that never reaches
+// this method a second time anyway, since the header is set once on the
+// same *http.Request) as well as across two genuinely independent Go
+// calls to Reserve for the same (order, line, attempt) — which only
+// happens today if a caller retries Reserve directly rather than going
+// through allocateLines' one-call-per-line loop, but the derivation is
+// safe for that case too, by construction.
+func idempotencyKeyFor(req ports.ReservationRequest) string {
+	return fmt.Sprintf("res-%s-line-%d-att-%d", req.DemandRef.String(), req.LineNo, req.Attempt)
+}
+
 // ErrUnexpectedStatus wraps an inventory-storage response status this
 // client has no specific handling for. It is deliberately NOT
 // ports.ErrInsufficientStock: only a 409 means "no usable stock", and
@@ -92,6 +123,7 @@ func (c *Client) Reserve(ctx context.Context, req ports.ReservationRequest) (por
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set(IdempotencyKeyHeader, idempotencyKeyFor(req))
 
 	resp, err := c.doer.Do(httpReq)
 	if err != nil {
@@ -117,6 +149,16 @@ func (c *Client) Reserve(ctx context.Context, req ports.ReservationRequest) (por
 }
 
 // RevokeReservation calls DELETE /reservations/{id}.
+//
+// No Idempotency-Key header is sent here: inventory-storage's
+// RequireIdempotencyKey middleware is wired ONLY onto POST /stock/receive
+// and POST /reservations (confirmed by reading that service's own
+// server.go route table — DELETE /reservations/{id} is registered plain,
+// with no r.With(RequireIdempotencyKey(...)) wrapper). DELETE is already
+// idempotent by ordinary HTTP semantics on this specific route, which is
+// exactly why inventory-storage never gated it: deleting an
+// already-deleted (or never-existing) reservation id has no
+// double-creation risk to protect against, unlike POST.
 //
 // A 404 is treated as success: the reservation this context wanted gone is
 // gone. That is idempotence, not fail-open — the desired end state holds

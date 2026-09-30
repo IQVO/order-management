@@ -65,11 +65,81 @@ resources:
     cpu: 100m
     memory: 128Mi
 
+# HorizontalPodAutoscaler (autoscaling/v2) per independently-scalable
+# workload type (plan 3.3 / the HPA + pgxpool-tuning ADR). Every block
+# below defaults `enabled: false` so this PR cannot silently change
+# production replica behaviour on merge — the fleet turns these on
+# deliberately later, after this PR proves the shape is correct. When a
+# component's autoscaling.<x>.enabled=true, that Deployment's own
+# replicaCount / analytics.<x>.replicaCount value is OMITTED from the
+# rendered manifest (see each deployment template's `{{- if not
+# .Values.autoscaling.<x>.enabled }}` guard) so the HPA controller is the
+# SOLE owner of .spec.replicas — a hardcoded `replicas:` field competing
+# with the HPA would otherwise fight it on every reconcile.
+#
+# mcp deliberately has NO block here (skipped, not just disabled): its
+# StreamableHTTPHandler (github.com/modelcontextprotocol/go-sdk/mcp)
+# keeps a per-process, in-memory `sessions map[string]*sessionInfo`
+# keyed by the MCP protocol's own Mcp-Session-Id header (see that
+# package's streamable.go) — a real session, not just a TCP/HTTP
+# connection. charts/order-management/templates/mcp-service.yaml is a
+# plain ClusterIP Service with no sessionAffinity configured, so a
+# second request carrying the same Mcp-Session-Id (a multi-call MCP
+# session, e.g. initialize then a later tools/call) could be routed by
+# kube-proxy to a DIFFERENT pod than the one that created the session,
+# which has never heard of that session id and would reject it. This is
+# genuine in-memory-only per-replica state, not the OLTP api
+# Deployment's read-only/rebuild-from-Kafka kind — mcp is NOT safely
+# horizontally scalable as currently built. Making it so would require
+# either sessionAffinity: ClientIP (a partial mitigation, not a fix — it
+# breaks the moment a client's IP changes, e.g. behind an LB) or a
+# shared/external EventStore (mcp.StreamableHTTPOptions.EventStore) for
+# session state, which is a real code change out of scope for this
+# chart-and-pgxpool-tuning PR. mcp.replicaCount therefore stays a plain,
+# un-autoscaled value (see mcp: below); revisit if/when the SDK wiring
+# adopts Stateless mode or an external session store.
 autoscaling:
-  enabled: false
-  minReplicas: 1
-  maxReplicas: 5
-  targetCPUUtilizationPercentage: 80
+  # cmd/order (this Deployment): stateless OLTP HTTP service, no
+  # in-memory session state (its only per-process cache -- the
+  # PATH_CATALOGUE_SOURCE=kafka local caches -- is read-only and
+  # rebuilt from Kafka on start, safe to run N independent copies of).
+  # Its RepromiseConsumer inbound Kafka consumer uses a STABLE shared
+  # consumer group (kafka.RepromiseConsumerGroup ==
+  # "order-management-repromise", ADR-0018) -- the fleet's
+  # correctly-scalable pattern (N replicas share partitions via normal
+  # Kafka group rebalancing), never a per-process-unique group -- so
+  # running multiple api replicas cannot cause the wes-work-planning/
+  # e2e-tests consumer-group-collision class of bug. max 4 / target 70%
+  # CPU per the plan.
+  api:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70
+  # cmd/order-projector: see analytics.projector's own comment below for
+  # why max is capped at 2, not 4 -- it is a Kafka consumer under a
+  # stable shared group, not a plain stateless HTTP server.
+  projector:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 2
+    targetCPUUtilizationPercentage: 70
+  # cmd/order-reports: stateless read-only REST reader, same treatment
+  # as api.
+  reports:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 70
+  # frontend (web/, nginx-unprivileged serving the built SPA bundle):
+  # pure static-asset serving, no server-side session or per-request
+  # state whatsoever -- the most trivially horizontally scalable
+  # workload in this chart.
+  frontend:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 70
 
 config:
   httpAddr: ":8080"
@@ -79,6 +149,18 @@ database:
   url: ""
   existingSecret: ""
   existingSecretKey: "DATABASE_URL"
+  # Key, in the same existingSecret, of a DIRECT (non-pooled, session-mode)
+  # Postgres connection string used ONLY for the golang-migrate startup
+  # step (cmd/order/main.go, cmd/mcp/main.go) -- never for the runtime
+  # pgxpool, which always uses existingSecretKey/DATABASE_URL above,
+  # unchanged. `optional: true` below so a secret that predates this key
+  # (local dev, an environment whose Terraform hasn't been rolled yet)
+  # still starts the pod: the Go binary's own
+  # getenv("MIGRATIONS_DATABASE_URL", databaseURL) fallback then makes
+  # migrations run against DATABASE_URL, exactly as before this key
+  # existed. See ADR-0029 for the PgBouncer/pg_advisory_lock
+  # incompatibility this key exists to route migrations around.
+  migrationsExistingSecretKey: "MIGRATIONS_DATABASE_URL"
 
 # KAFKA_BROKERS is only rendered when config.eventPublisher is "kafka".
 # Unlike fulfillment-execution, order-management has no inbound Kafka
@@ -196,6 +278,24 @@ analytics:
   projector:
     replicaCount: 1
     adminAddr: ":8091"
+    # HPA min 1 / max 2, NOT 3: kafka.AnalyticsConsumerGroup
+    # ("order-management-analytics") is a STABLE, shared consumer-group
+    # name with no per-instance uniqueness -- the fleet's correctly-
+    # scalable convention (same shape as the OLTP RepromiseConsumer's
+    # group, see the top-level autoscaling.api comment) -- so N
+    # replicas legitimately share the analytics topic's 8 partitions via
+    # normal Kafka rebalancing, not a collision risk. It is capped at 2,
+    # not left at api's 4, because: (a) the analytics topic is keyed by
+    # OrderId (kafka.AnalyticsPublisher.marshalData), so ordering is
+    # only guaranteed per-order/per-partition, and a wider fan-out buys
+    # little extra throughput for what is a lightweight
+    # ON CONFLICT-upsert workload; (b) it is a single logical writer of
+    # the analytical database (ADR-0006) -- correctness does not depend
+    # on staying at 1 (every write is idempotent on event_id via
+    # ConsumedEventsRepo.MarkProcessed, so 2 replicas processing
+    # concurrently is still exactly-once at the projection layer), but
+    # there is no throughput case yet that justifies more than 2. See
+    # the top-level autoscaling.projector block.
     resources:
       limits:
         cpu: 500m
@@ -210,6 +310,11 @@ analytics:
       type: ClusterIP
       port: 80
       targetPort: 8092
+    # Stateless read-only REST reader over the analytical database (its
+    # own read-only pgxpool, analyticsstore.NewReadOnlyPool) -- no
+    # in-memory state, safe to run N independent copies of. max 3 /
+    # target 70% CPU, same treatment as the OLTP api Deployment per the
+    # plan. See the top-level autoscaling.reports block.
     resources:
       limits:
         cpu: 500m
@@ -217,6 +322,7 @@ analytics:
       requests:
         cpu: 100m
         memory: 128Mi
+
 
 # --- frontend (order_mgmt_mfe Module Federation remote) ---
 # The operator SPA remote, built from web/ and served by its own
@@ -264,6 +370,14 @@ frontend:
 # the same GetOrder read use case over the same OLTP database as the HTTP
 # service, served over Streamable HTTP. Disabled by default so existing
 # releases are unaffected; set mcp.enabled=true to deploy it.
+#
+# Deliberately NOT HPA-scalable (no autoscaling.mcp block exists in this
+# chart) — see the top-level autoscaling: block's comment for the full
+# reasoning: the SDK's StreamableHTTPHandler keeps in-memory,
+# per-process MCP session state keyed by Mcp-Session-Id, and this
+# chart's mcp-service.yaml has no session affinity, so a second replica
+# could receive a mid-session request its own process never created.
+# replicaCount therefore stays a plain, manually-set value.
 mcp:
   enabled: false
   replicaCount: 1

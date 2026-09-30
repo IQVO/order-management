@@ -8,14 +8,14 @@ import (
 )
 
 // RelaySink is the outbox relay's Sink: it wraps a *kafkago.Writer with NO
-// fixed topic (AllowAutoTopicCreation, LeastBytes balancer — same
-// defaults every other writer in this package uses) and sets each
-// message's Topic from its own Encoded.Topic before writing. kafka-go
-// rejects a message that sets Topic when the Writer ALSO has one
-// configured, and vice versa — which is exactly why Publisher's and
-// AnalyticsPublisher's own writers keep their fixed topic and never set
-// kafkago.Message.Topic themselves: only this relay-only writer routes
-// per message.
+// fixed topic (AllowAutoTopicCreation, Hash balancer — same defaults every
+// other writer in this package uses, see Publisher.NewWriterForTopic's doc
+// comment on why Hash and not LeastBytes) and sets each message's Topic
+// from its own Encoded.Topic before writing. kafka-go rejects a message
+// that sets Topic when the Writer ALSO has one configured, and vice
+// versa — which is exactly why Publisher's and AnalyticsPublisher's own
+// writers keep their fixed topic and never set kafkago.Message.Topic
+// themselves: only this relay-only writer routes per message.
 type RelaySink struct {
 	writer *kafkago.Writer
 }
@@ -25,7 +25,7 @@ type RelaySink struct {
 func NewRelaySink(brokers ...string) *RelaySink {
 	return &RelaySink{writer: &kafkago.Writer{
 		Addr:                   kafkago.TCP(brokers...),
-		Balancer:               &kafkago.LeastBytes{},
+		Balancer:               &kafkago.Hash{},
 		AllowAutoTopicCreation: true,
 	}}
 }

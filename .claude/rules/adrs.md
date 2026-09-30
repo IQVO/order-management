@@ -198,7 +198,83 @@
     `network-fulfillment` (`internal/adapters/outbound/ordermanagement`:
     `POST /orders`, `POST /orders/{id}/release`, `DELETE /orders/{id}`).
 
+**0026 — ACCEPTED: per-workload HorizontalPodAutoscaler and pgxpool
+MaxConns/statement_timeout tuning (Phase 3 scalability).** An
+`autoscaling/v2` HPA per independently-assessed Deployment: `api`
+(min 1/max 4/70% CPU — stateless, `RepromiseConsumer`'s stable
+shared Kafka group is scale-safe), `analytics-projector` (min
+1/max **2**, not 4 — `kafka.AnalyticsConsumerGroup` is also a
+stable shared group so N replicas share partitions safely, but
+capped low since OrderId-keyed partitioning + idempotent upserts
+don't need wide fan-out), `analytics-reports` (min 1/max 3 —
+stateless reader, same treatment as `api`), `frontend` (min 1/max
+3 — pure static assets). `mcp` gets **NO** `autoscaling.mcp` block
+at all — deliberately excluded, not disabled: the MCP Go SDK's
+`StreamableHTTPHandler` keeps in-memory session state keyed by
+`Mcp-Session-Id` with no sticky routing in `mcp-service.yaml`, so
+>1 replica can misroute a mid-session request. Every block defaults
+`enabled: false`; each Deployment template guards its `replicas:`
+field with `{{- if not .Values.autoscaling.<x>.enabled }}` so a
+hardcoded replica count never fights an active HPA (verified via
+`helm template` with every combination). Also sets explicit
+`pgxpool.Config.MaxConns` (OLTP pool: 10, shared by `cmd/order`/
+`cmd/mcp`; analytics writer: 5; analytics reader: 5) and
+`statement_timeout` (OLTP: 5s, analytics writer: 10s, analytics
+reader: 15s) via `AfterConnect`, sized against the shared Postgres
+instance's REAL `max_connections=100` (confirmed live, an
+unmodified Bitnami default — verified this service shares ONE
+Postgres instance with up to 9 siblings, not a dedicated one).
+Read the ADR before touching `charts/order-management/values.yaml`'s
+`autoscaling:` block, any `*-deployment.yaml`/`hpa.yaml` template,
+or `postgres/pool.go`/`analyticsstore/pool.go`.
+
+**0027 — ACCEPTED: partition key (OrderId) on the integration
+publisher's Kafka messages, closing the Phase 3 partition-scaleup
+ordering gap.** `internal/adapters/outbound/kafka/publisher.go`'s
+`Publisher` (forwards `OrderAllocated`/`OrderPartiallyAllocated`/
+`OrderRepromised` to `warehouse.order-management.events`) never set
+`kafkago.Message.Key`, which was accidentally safe at 1 partition
+(total order) but breaks per-order event ordering once
+warehouse-infra's PR #42 scaled every business topic to 8 partitions.
+Fix: `encodeEnvelope` now returns the event's `shared.OrderId.String()`
+as the key (mirroring `AnalyticsPublisher.marshalData`'s existing
+choice) for both the direct-publish and outbox-`Encode` paths. Also
+found and fixed a second, non-obvious bug: every writer in this
+package used `&kafkago.LeastBytes{}`, a balancer that ignores
+`Message.Key` entirely for partition routing (it balances purely by
+cumulative byte volume) — so `AnalyticsPublisher`'s own pre-existing
+`Key` was ALSO not actually achieving partition affinity against a
+real broker until this ADR switched every writer's `Balancer` to
+`&kafkago.Hash{}` (FNV-1a over `Key`). Verified via a real-Kafka
+Testcontainers integration test (8-partition topic, 3 events for one
+order + 1 for another) that failed under `LeastBytes` even with `Key`
+populated, and passed only after the `Hash` balancer switch — a fake-
+writer unit test alone would not have caught this. Read the ADR before
+touching `publisher.go`'s `encodeEnvelope`/`Encode`/`Publish`,
+`analytics_publisher.go`'s `NewAnalyticsPublisher`, or `relay_sink.go`'s
+`NewRelaySink` — all three writer constructors must keep matching
+`Balancer` choices.
+
 Other ADR-adjacent facts worth knowing without opening every file:
+
+- **0028 — ACCEPTED: send `Idempotency-Key` on `POST /reservations`,
+  restoring the inventory-storage contract PR #98 changed.**
+  Production-blocking bug found in Phase 4 live-cluster validation:
+  inventory-storage's PR #98 required a caller-supplied `Idempotency-Key`
+  on `POST /reservations` (mirroring this repo's own ADR 0023 verbatim),
+  but `Client.Reserve` was never updated to send one — every real
+  allocation attempt failed `400 idempotency-key-required` with zero
+  fault injection, leaving every line `Pending` and tripping the circuit
+  breaker permanently open. Fix: `ports.ReservationRequest` gains
+  `LineNo`/`Attempt` (the latter is `Order.Version()`, reused from ADR
+  0024, not a new counter); `Client.Reserve` derives
+  `res-<orderId>-line-<lineNo>-att-<version>` and sends it as
+  `Idempotency-Key` — stable across a retry of the same attempt,
+  different for a genuinely new one. `RevokeReservation` needs no
+  header: inventory-storage's `DELETE /reservations/{id}` route is
+  confirmed not idempotency-gated. Read the ADR before touching
+  `Client.Reserve`, `ports.ReservationRequest`, or `allocateLines`'
+  `inventory.Reserve` call site.
 
 - **0021 — ACCEPTED: multi-path attribute-driven routing, closing ADR-0013's
   original deferral and ADR-0016 §4's named limitation.** `ports.ProcessPathCatalogue`

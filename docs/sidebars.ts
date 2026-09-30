@@ -87,6 +87,7 @@ const sidebars: SidebarsConfig = {
         'adr/0022-transactional-outbox',
         'adr/0023-idempotency-key-middleware',
         'adr/0024-optimistic-concurrency-version-column',
+        'adr/0027-kafka-integration-publisher-partition-key',
       ],
     },
   ],

@@ -42,32 +42,40 @@ func TestNewOrderLineInvariants(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			line, err := order.NewOrderLine(1, tt.sku, tt.quantity, tt.pathID, tt.giftWrap)
-			if !errors.Is(err, tt.wantErr) {
-				t.Fatalf("err = %v, want %v", err, tt.wantErr)
-			}
-			if tt.wantErr != nil {
-				if line != nil {
-					t.Fatalf("expected no line on error, got %+v", line)
-				}
-				return
-			}
-			if line.PathID() != tt.wantPathID {
-				t.Fatalf("PathID() = %q, want %q", line.PathID(), tt.wantPathID)
-			}
-			if line.Status() != order.LinePending {
-				t.Fatalf("Status() = %q, want %q", line.Status(), order.LinePending)
-			}
-			if line.SKU() != tt.sku || line.Quantity() != tt.quantity || line.GiftWrap() != tt.giftWrap {
-				t.Fatalf("line lost detail: %+v", line)
-			}
-			if line.LineNo() != 1 {
-				t.Fatalf("LineNo() = %d, want 1", line.LineNo())
-			}
-			if line.ReservationID() != nil {
-				t.Fatalf("a fresh line must have no reservation id, got %v", *line.ReservationID())
-			}
+			assertNewOrderLineOutcome(t, tt.sku, tt.quantity, tt.pathID, tt.wantPathID, tt.giftWrap, tt.wantErr)
 		})
+	}
+}
+
+// assertNewOrderLineOutcome pins one NewOrderLine case: the exact
+// validation error (and no line) for rejected input, or the defaulted,
+// Pending, detail-preserving shape for valid input.
+func assertNewOrderLineOutcome(t *testing.T, sku shared.SKU, quantity int, pathID, wantPathID shared.PathId, giftWrap bool, wantErr error) {
+	t.Helper()
+	line, err := order.NewOrderLine(1, sku, quantity, pathID, giftWrap)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+	if wantErr != nil {
+		if line != nil {
+			t.Fatalf("expected no line on error, got %+v", line)
+		}
+		return
+	}
+	if line.PathID() != wantPathID {
+		t.Fatalf("PathID() = %q, want %q", line.PathID(), wantPathID)
+	}
+	if line.Status() != order.LinePending {
+		t.Fatalf("Status() = %q, want %q", line.Status(), order.LinePending)
+	}
+	if line.SKU() != sku || line.Quantity() != quantity || line.GiftWrap() != giftWrap {
+		t.Fatalf("line lost detail: %+v", line)
+	}
+	if line.LineNo() != 1 {
+		t.Fatalf("LineNo() = %d, want 1", line.LineNo())
+	}
+	if line.ReservationID() != nil {
+		t.Fatalf("a fresh line must have no reservation id, got %v", *line.ReservationID())
 	}
 }
 

@@ -155,35 +155,10 @@ func (uc *ReceiveOrder) ExecuteWithDeadline(ctx context.Context, lines []NewLine
 		uc.recordRejected(ctx)
 		return nil, err
 	}
-	domainLines := make([]*order.OrderLine, 0, len(lines))
-	for i, l := range lines {
-		pathID := l.PathID
-		if pathID == "" {
-			resolved, ok := uc.PathPolicy.Select(l.SKU, l.Quantity, l.GiftWrap, uc.productAttributes(ctx, l.SKU), uc.Catalogue)
-			if !ok {
-				uc.recordRejected(ctx)
-				return nil, shared.ErrLineIneligibleForResolvedPath
-			}
-			pathID = resolved
-		}
-		line, err := order.NewOrderLine(i+1, l.SKU, l.Quantity, pathID, l.GiftWrap)
-		if err != nil {
-			uc.recordRejected(ctx)
-			return nil, err
-		}
-		// The catalogue check runs only once the line itself is
-		// well-formed (SKU/quantity errors above take priority — an
-		// invalid line is rejected for being invalid, not for having
-		// an unreachable path). A resolved path that isn't currently
-		// active in process-path-management's real catalogue is a
-		// caller-facing input error, not a downstream infra failure:
-		// reject it here, before Save/OrderReceived, rather than
-		// letting wes-work-planning discover it one saga step later.
-		if uc.Catalogue != nil && !uc.Catalogue.IsActive(line.PathID()) {
-			uc.recordRejected(ctx)
-			return nil, shared.ErrUnknownProcessPath
-		}
-		domainLines = append(domainLines, line)
+	domainLines, err := uc.buildDomainLines(ctx, lines)
+	if err != nil {
+		uc.recordRejected(ctx)
+		return nil, err
 	}
 
 	id, err := uc.Orders.NextID(ctx)
@@ -225,30 +200,71 @@ func (uc *ReceiveOrder) ExecuteWithDeadline(ctx context.Context, lines []NewLine
 	// silent swallow — just never surfaced as a ReceiveOrder failure.
 	deps := allocationDeps{Orders: uc.Orders, Inventory: uc.Inventory, Events: uc.Events, Clock: uc.Clock, Promise: uc.Promise, UnitOfWork: uc.UnitOfWork}
 	if _, err := allocateAndRelease(ctx, deps, o, o.LinesWithStatus(order.LinePending), false, releaseOnAllocation); err != nil {
-		// allocateAndRelease may have mutated o in memory (e.g. marked a
-		// line Backordered) without persisting that mutation — it only
-		// saves when at least one line was genuinely allocated before the
-		// hard failure. Re-read the persisted order so what ReceiveOrder
-		// returns to its caller never diverges from what is actually
-		// stored: the caller must see reality, not an in-memory state
-		// that a crash right now would lose.
-		stored, findErr := uc.Orders.FindByID(ctx, o.ID())
-		if findErr != nil {
-			// The order was definitely persisted moments ago (the Save
-			// above succeeded); a failure to read it back is itself a
-			// genuine infrastructure problem worth surfacing rather than
-			// silently returning a possibly-stale in-memory object.
-			return nil, findErr
-		}
-		if stored == nil {
-			// Unreachable in practice (the Save above just succeeded),
-			// but fall back to the in-memory object rather than return a
-			// broken (nil, nil) result.
-			return o, nil
-		}
-		return stored, nil
+		return uc.orderAfterAllocationFailure(ctx, o)
 	}
 	return o, nil
+}
+
+// buildDomainLines validates each requested line and resolves its
+// process path, turning application-level NewLines into validated
+// domain OrderLines. A line without an explicit PathID is routed by
+// PathPolicy against the catalogue's active candidates and the line's
+// derived product attributes (ADR-0013 / ADR-0016 / ADR-0021). The
+// catalogue check runs only once the line itself is well-formed
+// (SKU/quantity errors take priority — an invalid line is rejected for
+// being invalid, not for having an unreachable path); a resolved path
+// that isn't currently active in process-path-management's real
+// catalogue is a caller-facing input error, rejected here, before
+// Save/OrderReceived, rather than letting wes-work-planning discover it
+// one saga step later. Every error this method returns is such a
+// caller-facing input rejection.
+func (uc *ReceiveOrder) buildDomainLines(ctx context.Context, lines []NewLine) ([]*order.OrderLine, error) {
+	domainLines := make([]*order.OrderLine, 0, len(lines))
+	for i, l := range lines {
+		pathID := l.PathID
+		if pathID == "" {
+			resolved, ok := uc.PathPolicy.Select(l.SKU, l.Quantity, l.GiftWrap, uc.productAttributes(ctx, l.SKU), uc.Catalogue)
+			if !ok {
+				return nil, shared.ErrLineIneligibleForResolvedPath
+			}
+			pathID = resolved
+		}
+		line, err := order.NewOrderLine(i+1, l.SKU, l.Quantity, pathID, l.GiftWrap)
+		if err != nil {
+			return nil, err
+		}
+		if uc.Catalogue != nil && !uc.Catalogue.IsActive(line.PathID()) {
+			return nil, shared.ErrUnknownProcessPath
+		}
+		domainLines = append(domainLines, line)
+	}
+	return domainLines, nil
+}
+
+// orderAfterAllocationFailure re-reads the persisted order after the
+// implicit best-effort allocation pass hard-failed, so what
+// ReceiveOrder returns to its caller never diverges from what is
+// actually stored: allocateAndRelease may have mutated o in memory
+// (e.g. marked a line Backordered) without persisting that mutation —
+// it only saves when at least one line was genuinely allocated before
+// the hard failure. The caller must see reality, not an in-memory state
+// that a crash right now would lose.
+func (uc *ReceiveOrder) orderAfterAllocationFailure(ctx context.Context, o *order.Order) (*order.Order, error) {
+	stored, findErr := uc.Orders.FindByID(ctx, o.ID())
+	if findErr != nil {
+		// The order was definitely persisted moments ago (the Save
+		// above succeeded); a failure to read it back is itself a
+		// genuine infrastructure problem worth surfacing rather than
+		// silently returning a possibly-stale in-memory object.
+		return nil, findErr
+	}
+	if stored == nil {
+		// Unreachable in practice (the Save above just succeeded),
+		// but fall back to the in-memory object rather than return a
+		// broken (nil, nil) result.
+		return o, nil
+	}
+	return stored, nil
 }
 
 func (uc *ReceiveOrder) recordAccepted(ctx context.Context) {
