@@ -24,7 +24,7 @@ import (
 // alwaysFailingProcessedEventsFor wraps a real
 // ports.RepromiseProcessedEvents so MarkProcessed fails with a genuine
 // (non-ErrConcurrentModification) infrastructure error for exactly
-// poisonEventID, on EVERY call, while every other event_id is delegated
+// poisonEventID, on EVERY call, while every other CloudEvents id is delegated
 // unchanged -- letting one poison message coexist in the SAME test with
 // a normal, successfully-processed message on the SAME partition. This
 // is deliberately the FIRST thing RepromiseOrder.Execute calls (see
@@ -79,7 +79,7 @@ func TestRepromiseConsumer_PoisonMessage_GoesToDeadLetterTopicWithoutBlockingPar
 
 	// Seed ONE real, healthy order the "well-formed message published
 	// right after" will target. The poison message targets a
-	// poisonOrderID/poisonEventID pair whose event_id is
+	// poisonOrderID/poisonEventID pair whose CloudEvents id is
 	// unconditionally failed by alwaysFailingProcessedEventsFor below,
 	// so the failure is guaranteed deterministic across every retry
 	// regardless of what a real repo would have said about the order.
@@ -168,8 +168,8 @@ func TestRepromiseConsumer_PoisonMessage_GoesToDeadLetterTopicWithoutBlockingPar
 	if err := json.Unmarshal(dlqMsg.Value, &dlqPayload); err != nil {
 		t.Fatalf("DLQ message value is not the raw original JSON payload: %v", err)
 	}
-	if dlqPayload["event_id"] != poisonEventID {
-		t.Errorf("DLQ payload event_id = %v, want %q -- payload must be byte-identical to the original for manual replay", dlqPayload["event_id"], poisonEventID)
+	if dlqPayload["id"] != poisonEventID {
+		t.Errorf("DLQ payload id = %v, want %q -- payload must be byte-identical to the original for manual replay", dlqPayload["id"], poisonEventID)
 	}
 	assertHeader(t, dlqMsg.Headers, "x-dlq-source-topic", topic)
 	if h := headerValue(dlqMsg.Headers, "x-dlq-error"); h == "" {
@@ -225,35 +225,6 @@ func TestRepromiseConsumer_PoisonMessage_GoesToDeadLetterTopicWithoutBlockingPar
 	}
 }
 
-// mustTaskCPTMissedEnvelopeJSONWithEventID is
-// mustTaskCPTMissedEnvelopeJSON with an explicit event_id, so the DLQ
-// assertions can match the dead-lettered payload back to the exact
-// message that was published.
-func mustTaskCPTMissedEnvelopeJSONWithEventID(t *testing.T, eventID, orderRef string) []byte {
-	t.Helper()
-	data, err := json.Marshal(map[string]any{
-		"task_id":   "task-dlq-itest-1",
-		"order_ref": orderRef,
-		"task_type": "PICK",
-		"cpt":       time.Now().UTC().Format(time.RFC3339),
-	})
-	if err != nil {
-		t.Fatalf("marshal data: %v", err)
-	}
-	env := map[string]any{
-		"event_id":    eventID,
-		"event_type":  "TaskCPTMissed",
-		"occurred_at": time.Now().UTC().Format(time.RFC3339),
-		"source":      "fulfillment-execution",
-		"data":        json.RawMessage(data),
-	}
-	b, err := json.Marshal(env)
-	if err != nil {
-		t.Fatalf("marshal envelope: %v", err)
-	}
-	return b
-}
-
 func assertHeader(t *testing.T, headers []kafkago.Header, key, want string) {
 	t.Helper()
 	got := headerValue(headers, key)
@@ -269,4 +240,107 @@ func headerValue(headers []kafkago.Header, key string) string {
 		}
 	}
 	return ""
+}
+
+// TestRepromiseConsumer_LegacyFlatMessage_DeadLetteredWithoutRetry proves
+// against a real broker that a retired flat-envelope message is a
+// deterministic poison message: it is dead-lettered byte-for-byte, never
+// parsed or retried, and the CloudEvents message behind it on the same
+// partition is still processed.
+func TestRepromiseConsumer_LegacyFlatMessage_DeadLetteredWithoutRetry(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	container, err := tckafka.Run(ctx, "confluentinc/confluent-local:7.6.1",
+		tckafka.WithClusterID(fmt.Sprintf("om-repromise-legacy-itest-%d", time.Now().UnixNano())))
+	if err != nil {
+		t.Fatalf("start Kafka container: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := testcontainers.TerminateContainer(container); err != nil {
+			t.Errorf("terminate Kafka container: %v", err)
+		}
+	})
+	brokers, err := container.Brokers(ctx)
+	if err != nil {
+		t.Fatalf("resolve Kafka brokers: %v", err)
+	}
+	topic := fmt.Sprintf("warehouse.fulfillment.events.legacy-itest-%d", time.Now().UnixNano())
+	dlqTopic := topic + ".dlq"
+	createRepromiseTopic(t, ctx, brokers, topic)
+	createRepromiseTopic(t, ctx, brokers, dlqTopic)
+
+	orders := memory.NewOrderRepo()
+	line, err := order.NewOrderLine(1, "SKU-1", 1, "pick", false)
+	if err != nil {
+		t.Fatalf("NewOrderLine: %v", err)
+	}
+	orderID := shared.OrderId(fmt.Sprintf("ord-legacy-%d", time.Now().UnixNano()))
+	o, err := order.New(orderID, []*order.OrderLine{line}, false)
+	if err != nil {
+		t.Fatalf("order.New: %v", err)
+	}
+	if err := o.Allocate(1, "res-1"); err != nil {
+		t.Fatalf("Allocate: %v", err)
+	}
+	if err := o.Release(1); err != nil {
+		t.Fatalf("Release: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	originalCutoff := now.Add(24 * time.Hour)
+	o.SetPromiseGroups([]order.PromiseGroup{
+		{LineNos: []int{1}, Promise: order.Promise{CutoffAt: originalCutoff, Basis: order.BasisLeadTime}},
+	})
+	if err := orders.Save(ctx, o); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	events := &capturingPublisher{}
+	repromiseOrder := &usecases.RepromiseOrder{
+		Orders: orders, Promise: order.PromisePolicy{Fallback: order.NewLeadTimePolicy(6*time.Hour, nil)},
+		Events: events, Clock: memory.NewFixedClock(now), Processed: memory.NewRepromiseProcessedEventsRepo(),
+	}
+	consumer := inboundkafka.NewRepromiseConsumerForTopic(brokers,
+		fmt.Sprintf("order-management-repromise-legacy-itest-%d", time.Now().UnixNano()), topic, repromiseOrder, nil)
+	defer func() { _ = consumer.Close() }()
+	consumeCtx, consumeCancel := context.WithCancel(ctx)
+	defer consumeCancel()
+	go func() { _ = consumer.Run(consumeCtx) }()
+
+	dlqReader := kafkago.NewReader(kafkago.ReaderConfig{
+		Brokers: brokers, Topic: dlqTopic,
+		GroupID:     fmt.Sprintf("dlq-legacy-reader-%d", time.Now().UnixNano()),
+		StartOffset: kafkago.FirstOffset,
+	})
+	defer func() { _ = dlqReader.Close() }()
+
+	orderRef := usecases.WorkUnitID(orderID, 1)
+	legacy := []byte(fmt.Sprintf(`{"event_id":"legacy-1","event_type":"TaskCPTMissed","occurred_at":"2026-09-01T00:00:00Z","source":"fulfillment-execution","data":{"task_id":"t1","order_ref":%q}}`, orderRef))
+	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic}
+	defer func() { _ = writer.Close() }()
+	if err := writer.WriteMessages(ctx,
+		kafkago.Message{Key: []byte("legacy-1"), Value: legacy},
+		kafkago.Message{Key: []byte("ce-1"), Value: mustTaskCPTMissedEnvelopeJSON(t, orderRef)},
+	); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	dlqCtx, dlqCancel := context.WithTimeout(ctx, 60*time.Second)
+	defer dlqCancel()
+	dlqMsg, err := dlqReader.ReadMessage(dlqCtx)
+	if err != nil {
+		t.Fatalf("read DLQ message: %v", err)
+	}
+	if string(dlqMsg.Value) != string(legacy) {
+		t.Errorf("DLQ value = %s, want the raw legacy message byte-for-byte", dlqMsg.Value)
+	}
+	assertHeader(t, dlqMsg.Headers, "x-dlq-source-topic", topic)
+
+	// The CloudEvents message behind it drives exactly one repromise; the
+	// legacy message drove none (it was never parsed).
+	waitForRepromise(t, ctx, orders, orderID, originalCutoff)
+	time.Sleep(2 * time.Second)
+	if len(events.events) != 1 {
+		t.Fatalf("published events = %d, want exactly 1 (only the CloudEvents message)", len(events.events))
+	}
 }

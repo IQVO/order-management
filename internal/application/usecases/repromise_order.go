@@ -59,9 +59,9 @@ type RepromiseOrderRequest struct {
 	SourceEventId string
 	OrderId       shared.OrderId
 	LineNo        int
-	// Reason names the fulfillment-execution event_type that triggered
-	// this recompute ("TaskCPTMissed" or "PackageManifested",
-	// verbatim) — carried straight onto OrderRepromised.Reason when the
+	// Reason names the fulfillment-execution event that triggered this
+	// recompute ("TaskCPTMissed" or "PackageManifested" — the event
+	// name, i.e. the last segment of its CloudEvents type) — carried straight onto OrderRepromised.Reason when the
 	// promise moves.
 	Reason string
 }

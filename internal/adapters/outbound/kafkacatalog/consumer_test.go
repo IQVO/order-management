@@ -3,10 +3,16 @@ package kafkacatalog
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
 	"testing"
 	"time"
 
+	ce "github.com/cloudevents/sdk-go/v2/event"
 	kafkago "github.com/segmentio/kafka-go"
+
+	"github.com/claudioed/order-management/internal/adapters/kafka/cloudevents"
 
 	"github.com/claudioed/order-management/internal/domain/processpath"
 	"github.com/claudioed/order-management/internal/domain/shared"
@@ -36,18 +42,40 @@ func (r *fakeReader) Close() error {
 	return nil
 }
 
-func envelopeMsg(t *testing.T, partition int, offset int64, eventType string, data any) kafkago.Message {
+func envelopeMsg(t *testing.T, partition int, offset int64, ceType string, data any) kafkago.Message {
+	t.Helper()
+	e := ce.New(ce.CloudEventsVersionV1)
+	e.SetID(fmt.Sprintf("evt-%d-%d", partition, offset))
+	e.SetSource("/warehouse/process-path-management")
+	e.SetType(ceType)
+	e.SetSubject("subject-1")
+	e.SetTime(time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC))
+	if err := e.SetData("application/json", data); err != nil {
+		t.Fatalf("SetData: %v", err)
+	}
+	raw, err := json.Marshal(e)
+	if err != nil {
+		t.Fatalf("marshal CloudEvent: %v", err)
+	}
+	return kafkago.Message{Partition: partition, Offset: offset, Value: raw}
+}
+
+// legacyFlatMsg is the retired pre-CloudEvents flat envelope; the consumer
+// must reject it (never parse it) and keep going.
+func legacyFlatMsg(t *testing.T, partition int, offset int64, eventType string, data any) kafkago.Message {
 	t.Helper()
 	rawData, err := json.Marshal(data)
 	if err != nil {
 		t.Fatalf("marshal data: %v", err)
 	}
-	env := envelope{EventType: eventType, Data: rawData}
-	rawEnv, err := json.Marshal(env)
+	raw, err := json.Marshal(map[string]any{
+		"event_id": "legacy", "event_type": eventType, "occurred_at": time.Now(),
+		"source": "legacy", "data": json.RawMessage(rawData),
+	})
 	if err != nil {
-		t.Fatalf("marshal envelope: %v", err)
+		t.Fatalf("marshal flat: %v", err)
 	}
-	return kafkago.Message{Partition: partition, Offset: offset, Value: rawEnv}
+	return kafkago.Message{Partition: partition, Offset: offset, Value: raw}
 }
 
 func newTestConsumer(reader Reader, target targetOffsets) *Consumer {
@@ -73,8 +101,8 @@ func TestConsumer_NoTargetOffsets_IsReadyImmediately(t *testing.T) {
 func TestConsumer_Run_BecomesReadyAfterCatchingUpSinglePartition(t *testing.T) {
 	reader := &fakeReader{
 		messages: []kafkago.Message{
-			envelopeMsg(t, 0, 0, eventTypeCreated, pathData{PathId: "PICK", MatchPrefix: "pick"}),
-			envelopeMsg(t, 0, 1, eventTypeCreated, pathData{PathId: "PACK", MatchPrefix: "pack"}),
+			envelopeMsg(t, 0, 0, ceTypeCreated, pathData{PathId: "PICK", MatchPrefix: "pick"}),
+			envelopeMsg(t, 0, 1, ceTypeCreated, pathData{PathId: "PACK", MatchPrefix: "pack"}),
 		},
 	}
 	// target[0] = 2 means "caught up once offset 1 has been processed"
@@ -110,7 +138,7 @@ func TestConsumer_Run_BecomesReadyAfterCatchingUpSinglePartition(t *testing.T) {
 func TestConsumer_MultiPartition_ReadyOnlyAfterBothCaughtUp(t *testing.T) {
 	reader := &fakeReader{
 		messages: []kafkago.Message{
-			envelopeMsg(t, 0, 0, eventTypeCreated, pathData{PathId: "PICK", MatchPrefix: "pick"}),
+			envelopeMsg(t, 0, 0, ceTypeCreated, pathData{PathId: "PICK", MatchPrefix: "pick"}),
 			// Partition 1 not yet caught up (target[1]=1, need offset 0).
 		},
 	}
@@ -128,8 +156,8 @@ func TestConsumer_MultiPartition_ReadyOnlyAfterBothCaughtUp(t *testing.T) {
 func TestConsumer_Deactivated_RemovesPathFromCache(t *testing.T) {
 	reader := &fakeReader{
 		messages: []kafkago.Message{
-			envelopeMsg(t, 0, 0, eventTypeCreated, pathData{PathId: "PICK", MatchPrefix: "pick"}),
-			envelopeMsg(t, 0, 1, eventTypeDeactivated, pathData{PathId: "PICK"}),
+			envelopeMsg(t, 0, 0, ceTypeCreated, pathData{PathId: "PICK", MatchPrefix: "pick"}),
+			envelopeMsg(t, 0, 1, ceTypeDeactivated, pathData{PathId: "PICK"}),
 		},
 	}
 	c := newTestConsumer(reader, targetOffsets{0: 2})
@@ -150,8 +178,8 @@ func TestConsumer_Deactivated_RemovesPathFromCache(t *testing.T) {
 func TestConsumer_Revised_UpdatesMatchPrefix(t *testing.T) {
 	reader := &fakeReader{
 		messages: []kafkago.Message{
-			envelopeMsg(t, 0, 0, eventTypeCreated, pathData{PathId: "PICK", MatchPrefix: "pick"}),
-			envelopeMsg(t, 0, 1, eventTypeUpdated, pathData{PathId: "PICK", MatchPrefix: "pick-zone-a"}),
+			envelopeMsg(t, 0, 0, ceTypeCreated, pathData{PathId: "PICK", MatchPrefix: "pick"}),
+			envelopeMsg(t, 0, 1, ceTypeUpdated, pathData{PathId: "PICK", MatchPrefix: "pick-zone-a"}),
 		},
 	}
 	c := newTestConsumer(reader, targetOffsets{0: 2})
@@ -187,7 +215,7 @@ func TestConsumer_DestinationLocationRole_DecodesFromRealPublishedPayloadShape(t
 	// contract rather than any shared Go type.
 	reader := &fakeReader{
 		messages: []kafkago.Message{
-			envelopeMsg(t, 0, 0, eventTypeCreated, map[string]any{
+			envelopeMsg(t, 0, 0, ceTypeCreated, map[string]any{
 				"path_id":                   "PACK",
 				"match_prefix":              "pack",
 				"cycle_time_p95":            "2h0m0s",
@@ -221,7 +249,7 @@ func TestConsumer_DestinationLocationRole_OmittedOnWire_DecodesAsUnset(t *testin
 	// panic, and must not be confused with "unknown path".
 	reader := &fakeReader{
 		messages: []kafkago.Message{
-			envelopeMsg(t, 0, 0, eventTypeCreated, map[string]any{
+			envelopeMsg(t, 0, 0, ceTypeCreated, map[string]any{
 				"path_id":      "PICK",
 				"match_prefix": "pick",
 			}),
@@ -249,7 +277,7 @@ func TestConsumer_DestinationLocationRole_OmittedOnWire_DecodesAsUnset(t *testin
 func TestConsumer_UnknownEventType_IsIgnored(t *testing.T) {
 	reader := &fakeReader{
 		messages: []kafkago.Message{
-			envelopeMsg(t, 0, 0, "SomeFutureEventType", map[string]any{}),
+			envelopeMsg(t, 0, 0, "com.warehouse.wes.process-path-management.processpath.SomeFutureEvent", map[string]any{}),
 		},
 	}
 	c := newTestConsumer(reader, targetOffsets{0: 1})
@@ -288,13 +316,13 @@ func TestConsumer_ListActive_EmptyCache_ReturnsEmptySlice(t *testing.T) {
 func TestConsumer_ListActive_ReturnsEveryUpsertedPath(t *testing.T) {
 	c := newTestConsumer(&fakeReader{}, targetOffsets{})
 
-	if err := c.handle(envelopeMsg(t, 0, 0, eventTypeCreated, pathData{
+	if err := c.handle(envelopeMsg(t, 0, 0, ceTypeCreated, pathData{
 		PathId: "PICK", MatchPrefix: "pick", CycleTimeP95: "30m0s",
 		Eligibility: &eligibilityData{},
 	})); err != nil {
 		t.Fatalf("handle PICK: %v", err)
 	}
-	if err := c.handle(envelopeMsg(t, 0, 1, eventTypeCreated, pathData{
+	if err := c.handle(envelopeMsg(t, 0, 1, ceTypeCreated, pathData{
 		PathId: "SINGLES", MatchPrefix: "singles", CycleTimeP95: "10m0s",
 		Eligibility: &eligibilityData{},
 	})); err != nil {
@@ -325,17 +353,56 @@ func TestConsumer_ListActive_ReturnsEveryUpsertedPath(t *testing.T) {
 func TestConsumer_ListActive_DeactivatedPath_IsExcluded(t *testing.T) {
 	c := newTestConsumer(&fakeReader{}, targetOffsets{})
 
-	if err := c.handle(envelopeMsg(t, 0, 0, eventTypeCreated, pathData{
+	if err := c.handle(envelopeMsg(t, 0, 0, ceTypeCreated, pathData{
 		PathId: "PICK", MatchPrefix: "pick", CycleTimeP95: "30m0s",
 		Eligibility: &eligibilityData{},
 	})); err != nil {
 		t.Fatalf("handle create: %v", err)
 	}
-	if err := c.handle(envelopeMsg(t, 0, 1, eventTypeDeactivated, pathData{PathId: "PICK"})); err != nil {
+	if err := c.handle(envelopeMsg(t, 0, 1, ceTypeDeactivated, pathData{PathId: "PICK"})); err != nil {
 		t.Fatalf("handle deactivate: %v", err)
 	}
 
 	if got := c.ListActive(); len(got) != 0 {
 		t.Fatalf("ListActive() = %v, want empty after deactivation", got)
+	}
+}
+
+func TestConsumer_LegacyFlatEnvelope_RejectedAndSkipped(t *testing.T) {
+	c := newTestConsumer(&fakeReader{}, targetOffsets{})
+	err := c.handle(legacyFlatMsg(t, 0, 0, "ProcessPathCreated", pathData{PathId: "PICK", MatchPrefix: "pick"}))
+	if !errors.Is(err, cloudevents.ErrNotCloudEvent) {
+		t.Fatalf("err = %v, want ErrNotCloudEvent", err)
+	}
+	if c.IsActive(shared.PathId("pick-1")) {
+		t.Fatal("legacy flat message must not populate the catalogue")
+	}
+
+	// A legacy message in the stream is skipped and the consumer still
+	// catches up and applies the CloudEvents message behind it.
+	reader := &fakeReader{messages: []kafkago.Message{
+		legacyFlatMsg(t, 0, 0, "ProcessPathCreated", pathData{PathId: "PICK", MatchPrefix: "pick"}),
+		envelopeMsg(t, 0, 1, ceTypeCreated, pathData{PathId: "PACK", MatchPrefix: "pack"}),
+	}}
+	c = newTestConsumer(reader, targetOffsets{0: 2})
+	c.Logger = slog.Default()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go func() { _ = c.Run(ctx) }()
+	if err := c.WaitReady(ctx); err != nil {
+		t.Fatalf("WaitReady: %v", err)
+	}
+	if !c.IsActive(shared.PathId("pack-1")) || c.IsActive(shared.PathId("pick-1")) {
+		t.Fatal("expected only the CloudEvents path to be applied")
+	}
+}
+
+func TestConsumer_ShortTypeName_NotDispatched(t *testing.T) {
+	c := newTestConsumer(&fakeReader{}, targetOffsets{})
+	if err := c.handle(envelopeMsg(t, 0, 0, "ProcessPathCreated", pathData{PathId: "PICK", MatchPrefix: "pick"})); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if c.IsActive(shared.PathId("pick-1")) {
+		t.Fatal("a bare short type must not be dispatched")
 	}
 }

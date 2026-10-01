@@ -15,7 +15,7 @@
 // in-memory read model by replaying a topic from FirstOffset under a
 // PER-PROCESS-UNIQUE consumer group), this is a normal at-least-once
 // "process each new message once, commit as you go" consumer: it drives
-// a real use case (RepromiseOrder) exactly once per event_id via that
+// a real use case (RepromiseOrder) exactly once per CloudEvents id via that
 // use case's own idempotency gate, and commits its own offset as it
 // goes. That is a DIFFERENT correctness shape than the local-cache
 // pattern — see the fleet skill's explicit distinction — so this
@@ -30,21 +30,20 @@ package kafka
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
+	ce "github.com/cloudevents/sdk-go/v2/event"
 	kafkago "github.com/segmentio/kafka-go"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/claudioed/order-management/internal/adapters/kafka/cloudevents"
 	"github.com/claudioed/order-management/internal/application/ports"
 	"github.com/claudioed/order-management/internal/application/usecases"
 )
@@ -80,115 +79,23 @@ const (
 // repromiseTracerName scopes the consume spans this adapter emits.
 const repromiseTracerName = "github.com/claudioed/order-management/internal/adapters/inbound/kafka"
 
+const repromiseConsumeSpanNameFmt = "kafka.consume %s"
+
+// Full CloudEvents `type` strings this consumer dispatches on, byte-for-byte
+// as fulfillment-execution publishes them (fleet standard §4 cross-service
+// table). Dispatch is on the FULL string — never a short name or suffix.
 const (
-	eventTypeTaskCPTMissed      = "TaskCPTMissed"
-	eventTypePackageManifested  = "PackageManifested"
-	repromiseConsumeSpanNameFmt = "kafka.consume %s"
+	ceTypeTaskCPTMissed     = "com.warehouse.wes.fulfillment-execution.task.TaskCPTMissed"
+	ceTypePackageManifested = "com.warehouse.wes.fulfillment-execution.package.PackageManifested"
 )
 
-// fulfillmentEnvelope is the inbound decode shape of the fleet envelope
-// on warehouse.fulfillment.events, as verified against
-// fulfillment-execution's real, merged, shipped publisher (ADR 0025).
-// Declared independently here — order-management NEVER imports another
-// service's Go packages (see .claude/rules/bounded-context-boundary.md)
-// — this is this repo's own copy of the same wire shape, not a shared
-// type.
-type fulfillmentEnvelope struct {
-	EventID    string          `json:"event_id"`
-	EventType  string          `json:"event_type"`
-	OccurredAt time.Time       `json:"occurred_at"`
-	Source     string          `json:"source"`
-	Data       json.RawMessage `json:"data"`
-}
-
-// fulfillmentSpecversionProbe is a minimal decode used purely to
-// discriminate today's flat envelope from a CloudEvents 1.0 structured
-// envelope (ADR-0027 / ADR-0021 dual-read migration, Phase 2 Task 2e):
-// a CloudEvents message carries a non-empty `specversion` key the flat
-// envelope never has. This is a DIFFERENT probe/type from
-// kafkapathcapacity's own — see this file's package doc comment for why
-// the two consumers are kept independently updated.
-type fulfillmentSpecversionProbe struct {
-	Specversion string `json:"specversion"`
-}
-
-// fulfillmentCloudEventsEnvelope is the CloudEvents 1.0 structured
-// envelope shape fulfillment-execution's asyncapi.yaml documents for
-// this topic. `type` is the reverse-DNS event type string; `data` is
-// byte-identical to the flat envelope's `data`.
-type fulfillmentCloudEventsEnvelope struct {
-	Specversion string          `json:"specversion"`
-	ID          string          `json:"id"`
-	Type        string          `json:"type"`
-	Source      string          `json:"source"`
-	Time        time.Time       `json:"time"`
-	Data        json.RawMessage `json:"data"`
-}
-
-// cloudEventsTypeTaskCPTMissed and cloudEventsTypePackageManifested are
-// the exact reverse-DNS `type` strings fulfillment-execution's
-// asyncapi.yaml specifies for these two events (ADR-0025, ADR-0027 dual-
-// read migration). Read directly from apis/asyncapi.yaml — do not
-// re-derive the middle segments.
+// Repromise reasons recorded on OrderRepromised — the upstream domain event
+// name that triggered the repromise (the OrderRepromised payload's `reason`
+// field is unchanged by the CloudEvents migration).
 const (
-	cloudEventsTypeTaskCPTMissed     = "com.warehouse.wes.fulfillment-execution.task.TaskCPTMissed"
-	cloudEventsTypePackageManifested = "com.warehouse.wes.fulfillment-execution.package.PackageManifested"
+	reasonTaskCPTMissed     = "TaskCPTMissed"
+	reasonPackageManifested = "PackageManifested"
 )
-
-// fulfillmentBareEventType strips a CloudEvents reverse-DNS type string
-// back to the bare event name the existing switch/case logic in
-// handleFulfillmentEvent keys on (e.g.
-// "com.warehouse.wes.fulfillment-execution.task.TaskCPTMissed" ->
-// "TaskCPTMissed"). Returns the input unchanged if it contains no dot,
-// so a malformed/unexpected type string fails soft downstream (falls
-// into handleFulfillmentEvent's "unrecognized event type" default
-// branch) rather than panicking here.
-func fulfillmentBareEventType(ceType string) string {
-	if idx := strings.LastIndex(ceType, "."); idx >= 0 && idx+1 < len(ceType) {
-		return ceType[idx+1:]
-	}
-	return ceType
-}
-
-// decodeFulfillmentEnvelope normalizes either wire shape (today's flat
-// envelope, or a CloudEvents 1.0 structured envelope, per ADR-0027 /
-// ADR-0021 Phase 2 Task 2e) into this consumer's existing internal
-// fulfillmentEnvelope representation, so handleMessage/
-// handleFulfillmentEvent never need to know which shape arrived on the
-// wire. specversion's presence is the sole discriminator (see the ADR's
-// decision section) — never inferred from any other field.
-func decodeFulfillmentEnvelope(raw []byte) (fulfillmentEnvelope, error) {
-	var probe fulfillmentSpecversionProbe
-	if err := json.Unmarshal(raw, &probe); err != nil {
-		return fulfillmentEnvelope{}, fmt.Errorf("repromise: probe specversion: %w", err)
-	}
-	if probe.Specversion == "" {
-		// Flat envelope path (today's shape, unchanged).
-		var flat fulfillmentEnvelope
-		if err := json.Unmarshal(raw, &flat); err != nil {
-			return fulfillmentEnvelope{}, fmt.Errorf("repromise: unmarshal envelope: %w", err)
-		}
-		return flat, nil
-	}
-	if probe.Specversion != "1.0" {
-		// Malformed/unrecognized specversion: fail soft, mirroring
-		// this consumer's existing malformed-message handling
-		// posture (handleMessage logs and commits/skips rather than
-		// wedging the Run loop).
-		return fulfillmentEnvelope{}, fmt.Errorf("repromise: unrecognized CloudEvents specversion %q", probe.Specversion)
-	}
-	var ce fulfillmentCloudEventsEnvelope
-	if err := json.Unmarshal(raw, &ce); err != nil {
-		return fulfillmentEnvelope{}, fmt.Errorf("repromise: unmarshal CloudEvents envelope: %w", err)
-	}
-	return fulfillmentEnvelope{
-		EventID:    ce.ID,
-		EventType:  fulfillmentBareEventType(ce.Type),
-		OccurredAt: ce.Time,
-		Source:     ce.Source,
-		Data:       ce.Data,
-	}, nil
-}
 
 // taskCPTMissedData is fulfillment-execution's real TaskCPTMissed
 // payload (its own internal/adapters/outbound/kafka/publisher.go,
@@ -288,9 +195,12 @@ func (c *RepromiseConsumer) Run(ctx context.Context) error {
 // handleMessage processes one fetched message inside a
 // "kafka.consume <topic>" span whose parent is the producing service's
 // publish span, recovered from the message's W3C trace-context headers.
-// A malformed or unhandleable message (bad JSON, an order_ref that does
-// not parse as a WorkUnitId, or a RepromiseOrder fail-soft outcome) is
-// logged and committed rather than redelivered forever — mirroring
+// A message that is not a valid CloudEvents 1.0 event (bad JSON, the
+// retired flat envelope) is a deterministic poison message: it goes
+// straight to the dead-letter topic and is committed. An unhandleable but
+// valid event (an order_ref that does not parse as a WorkUnitId, or a
+// RepromiseOrder fail-soft outcome) is logged and committed rather than
+// redelivered forever — mirroring
 // labor-performance's own consumer and this fleet's other Kafka
 // consumers' commit-and-skip-on-error convention.
 //
@@ -333,20 +243,29 @@ func (c *RepromiseConsumer) handleMessage(ctx context.Context, msg kafkago.Messa
 	msgCtx, span := c.startConsumeSpan(ctx, topic, msg)
 	defer span.End()
 
-	env, decodeErr := decodeFulfillmentEnvelope(msg.Value)
+	e, decodeErr := cloudevents.Decode(msg.Value)
 	if decodeErr != nil {
+		// Not a valid CloudEvents 1.0 event (bad JSON, the retired flat
+		// envelope, ...): a deterministic poison message. Dead-letter it
+		// unmodified and commit past it — never retry, never parse any
+		// other shape, never block the partition.
 		recordSpanError(span, decodeErr)
-		c.log(msgCtx, "skipping unparseable kafka message", "topic", topic, "error", decodeErr)
+		c.log(msgCtx, "repromise: non-CloudEvents message, sending to dead-letter topic",
+			"topic", topic, "partition", msg.Partition, "offset", msg.Offset,
+			"dlq_topic", topic+dlqTopicSuffix, "error", decodeErr)
+		if dlqErr := c.dlqPublish(ctx, msg, decodeErr); dlqErr != nil {
+			return fmt.Errorf("repromise: publish to dead-letter topic: %w", dlqErr)
+		}
 		return c.commit(ctx, msg)
 	}
 
 	span.SetAttributes(
-		attribute.String("messaging.message.event_id", env.EventID),
-		attribute.String("messaging.message.event_type", env.EventType),
-		attribute.String("messaging.message.source", env.Source),
+		semconv.MessagingMessageID(e.ID()),
+		semconv.CloudEventsEventType(e.Type()),
+		semconv.CloudEventsEventSource(e.Source()),
 	)
 
-	err := c.handleWithRetry(msgCtx, env)
+	err := c.handleWithRetry(msgCtx, e)
 	if err == nil {
 		return c.commit(ctx, msg)
 	}
@@ -354,13 +273,13 @@ func (c *RepromiseConsumer) handleMessage(ctx context.Context, msg kafkago.Messa
 	recordSpanError(span, err)
 	if errors.Is(err, ports.ErrConcurrentModification) {
 		c.log(msgCtx, "repromise: version conflict, leaving message uncommitted for safe redelivery",
-			"topic", topic, "event_id", env.EventID, "event_type", env.EventType, "error", err)
+			"topic", topic, "ce_id", e.ID(), "ce_type", e.Type(), "error", err)
 		return nil
 	}
 
 	c.log(msgCtx, "repromise: exhausted retries, sending to dead-letter topic",
 		"topic", topic, "dlq_topic", topic+dlqTopicSuffix,
-		"event_id", env.EventID, "event_type", env.EventType, "attempts", maxHandlerAttempts, "error", err)
+		"ce_id", e.ID(), "ce_type", e.Type(), "attempts", maxHandlerAttempts, "error", err)
 	if dlqErr := c.dlqPublish(ctx, msg, err); dlqErr != nil {
 		return fmt.Errorf("repromise: publish to dead-letter topic: %w", dlqErr)
 	}
@@ -374,7 +293,7 @@ func (c *RepromiseConsumer) handleMessage(ctx context.Context, msg kafkago.Messa
 // handles it (leaving the message uncommitted for redelivery), so
 // retrying it in this loop too would just waste the retry budget on an
 // outcome this loop cannot fix.
-func (c *RepromiseConsumer) handleWithRetry(ctx context.Context, env fulfillmentEnvelope) error {
+func (c *RepromiseConsumer) handleWithRetry(ctx context.Context, e ce.Event) error {
 	policy := backoff.NewExponentialBackOff(
 		backoff.WithInitialInterval(retryInitialInterval),
 		backoff.WithMaxInterval(retryMaxInterval),
@@ -382,7 +301,7 @@ func (c *RepromiseConsumer) handleWithRetry(ctx context.Context, env fulfillment
 	bounded := backoff.WithContext(backoff.WithMaxRetries(policy, maxHandlerAttempts-1), ctx)
 
 	return backoff.Retry(func() error {
-		err := c.handleFulfillmentEvent(ctx, env)
+		err := c.handleFulfillmentEvent(ctx, e)
 		if err == nil || errors.Is(err, ports.ErrConcurrentModification) {
 			return backoff.Permanent(err)
 		}
@@ -413,30 +332,31 @@ func (c *RepromiseConsumer) dlqPublish(ctx context.Context, msg kafkago.Message,
 	})
 }
 
-// handleFulfillmentEvent filters for TaskCPTMissed/PackageManifested and
-// drives RepromiseOrder. Every other event type on this shared topic is
-// silently skipped, not an error — the same shared-topic convention
-// labor-performance's own consumer already established for this exact
-// topic. A returned error here means a genuine infrastructure failure
-// from RepromiseOrder.Execute (Processed/Orders/Events erroring); every
-// other condition (unparseable order_ref, no matching line, no promise
-// movement) is RepromiseOrder's own fail-soft path and returns nil.
-func (c *RepromiseConsumer) handleFulfillmentEvent(ctx context.Context, env fulfillmentEnvelope) error {
+// handleFulfillmentEvent dispatches on the event's FULL CloudEvents type,
+// acting only on TaskCPTMissed/PackageManifested and driving
+// RepromiseOrder. Every other type on this shared topic is silently
+// skipped, not an error (forward compatibility). The CloudEvents `id` is
+// the idempotency key handed to RepromiseOrder. A returned error here
+// means a genuine infrastructure failure from RepromiseOrder.Execute (or
+// an undecodable `data` payload); every other condition (unparseable
+// order_ref, no matching line, no promise movement) is RepromiseOrder's
+// own fail-soft path and returns nil.
+func (c *RepromiseConsumer) handleFulfillmentEvent(ctx context.Context, e ce.Event) error {
 	var orderRef, reason string
 
-	switch env.EventType {
-	case eventTypeTaskCPTMissed:
+	switch e.Type() {
+	case ceTypeTaskCPTMissed:
 		var data taskCPTMissedData
-		if err := json.Unmarshal(env.Data, &data); err != nil {
-			return fmt.Errorf("repromise: decode %s data: %w", env.EventType, err)
+		if err := e.DataAs(&data); err != nil {
+			return fmt.Errorf("repromise: decode %s data: %w", e.Type(), err)
 		}
-		orderRef, reason = data.OrderRef, eventTypeTaskCPTMissed
-	case eventTypePackageManifested:
+		orderRef, reason = data.OrderRef, reasonTaskCPTMissed
+	case ceTypePackageManifested:
 		var data packageManifestedData
-		if err := json.Unmarshal(env.Data, &data); err != nil {
-			return fmt.Errorf("repromise: decode %s data: %w", env.EventType, err)
+		if err := e.DataAs(&data); err != nil {
+			return fmt.Errorf("repromise: decode %s data: %w", e.Type(), err)
 		}
-		orderRef, reason = data.OrderRef, eventTypePackageManifested
+		orderRef, reason = data.OrderRef, reasonPackageManifested
 	default:
 		return nil
 	}
@@ -444,12 +364,12 @@ func (c *RepromiseConsumer) handleFulfillmentEvent(ctx context.Context, env fulf
 	orderID, lineNo, ok := usecases.ParseWorkUnitID(orderRef)
 	if !ok {
 		c.log(ctx, "repromise: order_ref does not parse as a WorkUnitId, skipping",
-			"event_id", env.EventID, "event_type", env.EventType, "order_ref", orderRef)
+			"ce_id", e.ID(), "ce_type", e.Type(), "order_ref", orderRef)
 		return nil
 	}
 
 	return c.repromiseOrder.Execute(ctx, usecases.RepromiseOrderRequest{
-		SourceEventId: env.EventID,
+		SourceEventId: e.ID(),
 		OrderId:       orderID,
 		LineNo:        lineNo,
 		Reason:        reason,

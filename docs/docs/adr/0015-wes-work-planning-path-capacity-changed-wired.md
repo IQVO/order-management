@@ -10,6 +10,11 @@ description: "ADR 0015 — replace UnknownPathCapacity as the production PathCap
 
 ## Status
 
+> **Superseded by ADR-0030** (the flat-envelope `event_type == "PathCapacityChanged"` dispatch shown here; the consumer now dispatches on the full CloudEvents type `com.warehouse.wes.work-planning.workpool.PathCapacityChanged`). Every Kafka message is now a
+> CloudEvents 1.0 event — see
+> [ADR 0030](./0030-cloudevents-mandatory-event-envelope.md). The rest of
+> this record stands.
+
 Accepted. Closes the gap ADR 0014 explicitly deferred (its rollout step
 3): "This service, step A" shipped `ports.PathCapacity` with exactly one
 implementation, `UnknownPathCapacity`, documented as "filled in a later

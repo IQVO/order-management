@@ -140,7 +140,7 @@ analytics topic when `EVENT_PUBLISHER=kafka` (see `api-contracts.md`).
 6. **`RepromiseOrder`** (ADR-0018) → driven by the inbound Kafka consumer,
    not HTTP: recomputes the affected line's shipment-group promise and
    publishes `OrderRepromised` if it moved; idempotent on the inbound
-   `event_id` (`ports.RepromiseProcessedEvents`).
+   CloudEvents `id` (`ports.RepromiseProcessedEvents`).
 
 `AllocateOrder` and `ReleaseOrder` no longer exist as public use case
 types — their pure domain-transition logic (`Order.Allocate`,

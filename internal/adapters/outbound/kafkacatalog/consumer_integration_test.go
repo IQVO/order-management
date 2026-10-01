@@ -4,6 +4,7 @@ package kafkacatalog
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -40,7 +41,7 @@ func TestNewConsumer_TwoInstancesInARow_BothReplayFully(t *testing.T) {
 
 	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false}
 	if err := writer.WriteMessages(ctx, kafkago.Message{
-		Value: []byte(`{"event_type":"ProcessPathCreated","data":{"path_id":"ITEST2","match_prefix":"itest2"}}`),
+		Value: envelopeMsg(t, 0, 0, "com.warehouse.wes.process-path-management.processpath.ProcessPathCreated", json.RawMessage(`{"path_id":"ITEST2","match_prefix":"itest2"}`)).Value,
 	}); err != nil {
 		t.Fatalf("seed publish: %v", err)
 	}
@@ -102,7 +103,7 @@ func TestNewConsumer_AlreadyCaughtUpGroup_ReadyImmediately(t *testing.T) {
 
 	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false}
 	if err := writer.WriteMessages(ctx, kafkago.Message{
-		Value: []byte(`{"event_type":"ProcessPathCreated","data":{"path_id":"ITEST3","match_prefix":"itest3"}}`),
+		Value: envelopeMsg(t, 0, 0, "com.warehouse.wes.process-path-management.processpath.ProcessPathCreated", json.RawMessage(`{"path_id":"ITEST3","match_prefix":"itest3"}`)).Value,
 	}); err != nil {
 		t.Fatalf("seed publish: %v", err)
 	}
