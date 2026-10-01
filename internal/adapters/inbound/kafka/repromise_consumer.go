@@ -338,7 +338,7 @@ func (c *RepromiseConsumer) dlqPublish(ctx context.Context, msg kafkago.Message,
 		kafkago.Header{Key: "x-dlq-error", Value: []byte(cause.Error())},
 		kafkago.Header{Key: "x-dlq-failed-at", Value: []byte(time.Now().UTC().Format(time.RFC3339))},
 	)
-	return c.dlqWriter.WriteMessages(ctx, kafkago.Message{
+	return writeDLQ(ctx, c.dlqWriter, kafkago.Message{
 		Key:     msg.Key,
 		Value:   msg.Value,
 		Headers: headers,
@@ -423,4 +423,52 @@ func (c *RepromiseConsumer) log(ctx context.Context, msg string, args ...any) {
 	if c.logger != nil {
 		c.logger.WarnContext(ctx, msg, args...)
 	}
+}
+
+// dlqTopicReadyAttempts / dlqTopicReadyBackoff bound how long a DLQ publish
+// waits for an auto-created "<topic>.dlq" to become writable.
+const (
+	dlqTopicReadyAttempts = 40
+	dlqTopicReadyBackoff  = 250 * time.Millisecond
+)
+
+// dlqMessageWriter is the slice of *kafkago.Writer writeDLQ needs.
+type dlqMessageWriter interface {
+	WriteMessages(ctx context.Context, msgs ...kafkago.Message) error
+}
+
+// writeDLQ publishes msg to the dead-letter topic, retrying (bounded) while
+// the topic is still being auto-created. AllowAutoTopicCreation alone is not
+// enough: the first write races partition leader election and the broker
+// answers UnknownTopicOrPartition / LeaderNotAvailable for a few hundred
+// milliseconds. Any other error -- or exhausting the budget -- is returned,
+// so the caller still refuses to commit the offset (no message loss).
+func writeDLQ(ctx context.Context, w dlqMessageWriter, msg kafkago.Message) error {
+	var err error
+	for attempt := 0; attempt < dlqTopicReadyAttempts; attempt++ {
+		if err = w.WriteMessages(ctx, msg); err == nil || !isTopicNotReady(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(err, ctx.Err())
+		case <-time.After(dlqTopicReadyBackoff):
+		}
+	}
+	return err
+}
+
+// isTopicNotReady reports whether err only means the (auto-created) topic
+// has no leader yet.
+func isTopicNotReady(err error) bool {
+	var werrs kafkago.WriteErrors
+	if errors.As(err, &werrs) {
+		for _, e := range werrs {
+			if e != nil && !isTopicNotReady(e) {
+				return false
+			}
+		}
+		return werrs.Count() > 0
+	}
+	return errors.Is(err, kafkago.UnknownTopicOrPartition) || errors.Is(err, kafkago.LeaderNotAvailable)
 }
