@@ -66,6 +66,28 @@ const RepromiseConsumerGroup = "order-management-repromise"
 // topic/group without touching production names.
 const dlqTopicSuffix = ".dlq"
 
+// newDLQWriter builds the dead-letter writer for topic. It MUST set
+// AllowAutoTopicCreation: the fleet creates every business topic on
+// first write (warehouse-infra kafka.tf, num.partitions=8) and a fresh
+// broker has no "<topic>.dlq" yet. Without the flag the first poison
+// message fails its DLQ publish with "[3] Unknown Topic Or Partition",
+// the offset is (correctly) not committed, and the consumer stops for
+// good -- observed live in wes-work-planning, where it halted the
+// whole order-to-work-unit flow.
+func newDLQWriter(brokers []string, topic string) *kafkago.Writer {
+	return &kafkago.Writer{
+		Addr:                   kafkago.TCP(brokers...),
+		Topic:                  topic + dlqTopicSuffix,
+		AllowAutoTopicCreation: true,
+		// BatchTimeout: a DLQ write is a synchronous single message; with
+		// kafka-go's 1s default the writer holds every write for a full second
+		// waiting to fill a batch, capping dead-lettering at ~1 msg/s/partition
+		// (observed live: a backlog of legacy messages took hours to drain while
+		// the consumer processed nothing else).
+		BatchTimeout: dlqBatchTimeout,
+	}
+}
+
 // maxHandlerAttempts bounds RepromiseOrder.Execute's in-process retry
 // (ADR-0025 §DLQ) before a message is dead-lettered: 1 initial attempt
 // plus up to 2 retries, matching the plan's "up to 3" bound.
@@ -159,10 +181,7 @@ func NewRepromiseConsumerForTopic(brokers []string, groupID, topic string, repro
 		}),
 		repromiseOrder: repromiseOrder,
 		logger:         logger,
-		dlqWriter: &kafkago.Writer{
-			Addr:  kafkago.TCP(brokers...),
-			Topic: topic + dlqTopicSuffix,
-		},
+		dlqWriter:      newDLQWriter(brokers, topic),
 	}
 }
 
@@ -325,7 +344,7 @@ func (c *RepromiseConsumer) dlqPublish(ctx context.Context, msg kafkago.Message,
 		kafkago.Header{Key: "x-dlq-error", Value: []byte(cause.Error())},
 		kafkago.Header{Key: "x-dlq-failed-at", Value: []byte(time.Now().UTC().Format(time.RFC3339))},
 	)
-	return c.dlqWriter.WriteMessages(ctx, kafkago.Message{
+	return writeDLQ(ctx, c.dlqWriter, kafkago.Message{
 		Key:     msg.Key,
 		Value:   msg.Value,
 		Headers: headers,
@@ -411,3 +430,54 @@ func (c *RepromiseConsumer) log(ctx context.Context, msg string, args ...any) {
 		c.logger.WarnContext(ctx, msg, args...)
 	}
 }
+
+// dlqTopicReadyAttempts / dlqTopicReadyBackoff bound how long a DLQ publish
+// waits for an auto-created "<topic>.dlq" to become writable.
+const (
+	dlqTopicReadyAttempts = 40
+	dlqTopicReadyBackoff  = 250 * time.Millisecond
+)
+
+// dlqMessageWriter is the slice of *kafkago.Writer writeDLQ needs.
+type dlqMessageWriter interface {
+	WriteMessages(ctx context.Context, msgs ...kafkago.Message) error
+}
+
+// writeDLQ publishes msg to the dead-letter topic, retrying (bounded) while
+// the topic is still being auto-created. AllowAutoTopicCreation alone is not
+// enough: the first write races partition leader election and the broker
+// answers UnknownTopicOrPartition / LeaderNotAvailable for a few hundred
+// milliseconds. Any other error -- or exhausting the budget -- is returned,
+// so the caller still refuses to commit the offset (no message loss).
+func writeDLQ(ctx context.Context, w dlqMessageWriter, msg kafkago.Message) error {
+	var err error
+	for attempt := 0; attempt < dlqTopicReadyAttempts; attempt++ {
+		if err = w.WriteMessages(ctx, msg); err == nil || !isTopicNotReady(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(err, ctx.Err())
+		case <-time.After(dlqTopicReadyBackoff):
+		}
+	}
+	return err
+}
+
+// isTopicNotReady reports whether err only means the (auto-created) topic
+// has no leader yet.
+func isTopicNotReady(err error) bool {
+	var werrs kafkago.WriteErrors
+	if errors.As(err, &werrs) {
+		for _, e := range werrs {
+			if e != nil && !isTopicNotReady(e) {
+				return false
+			}
+		}
+		return werrs.Count() > 0
+	}
+	return errors.Is(err, kafkago.UnknownTopicOrPartition) || errors.Is(err, kafkago.LeaderNotAvailable)
+}
+
+// dlqBatchTimeout flushes a dead-letter write almost immediately.
+const dlqBatchTimeout = 10 * time.Millisecond
