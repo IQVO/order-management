@@ -125,12 +125,7 @@ func NewConsumerForTopic(ctx context.Context, brokers []string, topic string, lo
 		return nil, fmt.Errorf("kafkacptschedule: determine readiness target: %w", err)
 	}
 
-	reader := kafkago.NewReader(kafkago.ReaderConfig{
-		Brokers:     brokers,
-		Topic:       topic,
-		GroupID:     uniqueConsumerGroup(),
-		StartOffset: kafkago.FirstOffset,
-	})
+	reader := kafkago.NewReader(readerConfig(brokers, topic, uniqueConsumerGroup()))
 
 	c := &Consumer{
 		Reader:    reader,
@@ -143,6 +138,41 @@ func NewConsumerForTopic(ctx context.Context, brokers []string, topic string, lo
 		c.markReady()
 	}
 	return c, nil
+}
+
+// replayCommitInterval makes the replay reader commit offsets
+// periodically and asynchronously instead of after every message.
+//
+// With a GroupID set and CommitInterval left at zero, kafka-go's
+// Reader.ReadMessage performs a SYNCHRONOUS CommitMessages broker round
+// trip after EVERY message, which turns boot replay into
+// O(history) x RTT. Against the real cluster broker that capped the replay
+// at ~126 msg/s (2,000 messages in 15.8s) versus ~3,200 msg/s (10,000
+// messages in 3.1s) with a 1s interval — slow enough that order-management
+// could not replay warehouse.work-planning.events (~10,600 messages)
+// inside WaitReadyTimeout and was killed in a CrashLoopBackOff.
+//
+// Async commits are safe here, and only here: the consumer group is unique
+// to this process instance (uniqueConsumerGroup), its committed offsets are
+// never resumed by any other process, and a restart replays from
+// FirstOffset under a NEW group. Commit durability is therefore irrelevant
+// to correctness — losing the last interval's commits on a crash changes
+// nothing — so the per-message synchronous commit is pure overhead. Do NOT
+// copy this to a consumer on a fixed, shared group that commits after
+// handling (at-least-once): there the synchronous commit is deliberate.
+const replayCommitInterval = time.Second
+
+// readerConfig builds the kafka-go ReaderConfig for the full-replay cache
+// reader: a process-unique group starting at the earliest offset, with
+// periodic asynchronous commits (see replayCommitInterval).
+func readerConfig(brokers []string, topic, group string) kafkago.ReaderConfig {
+	return kafkago.ReaderConfig{
+		Brokers:        brokers,
+		Topic:          topic,
+		GroupID:        group,
+		StartOffset:    kafkago.FirstOffset,
+		CommitInterval: replayCommitInterval,
+	}
 }
 
 // uniqueConsumerGroup builds a group id unique to this process instance
