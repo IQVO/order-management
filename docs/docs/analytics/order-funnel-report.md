@@ -117,21 +117,28 @@ applied event. Zero when the read model is empty.
 
 Liveness for the reports reader: `{"status":"ok"}`.
 
-## Envelope v1
+## Event envelope: CloudEvents 1.0
 
 Every analytics event is published on `warehouse.order-management.analytics`
-under the shared Envelope v1 wrapper, keyed by `order_id`:
+as a CloudEvents 1.0 event in structured content mode
+([ADR 0030](/docs/adr/0030-cloudevents-mandatory-event-envelope)), keyed by
+`order_id`, with Kafka header
+`content-type: application/cloudevents+json; charset=UTF-8`:
 
 ```json
 {
-  "event_id": "…",
-  "event_type": "OrderReleased",
-  "occurred_at": "2026-06-01T14:03:12Z",
-  "source": "order-management",
-  "schema_version": 1,
-  "data": { "order_id": "…", "path_id": "pick" }
+  "specversion": "1.0",
+  "id": "…",
+  "source": "/warehouse/order-management",
+  "type": "com.warehouse.wes.order-management.order.OrderReleased",
+  "subject": "ord-…",
+  "time": "2026-06-01T14:03:12Z",
+  "datacontenttype": "application/json",
+  "dataschema": "urn:warehouse:order-management:analytics:OrderReleased:v1",
+  "data": { "order_id": "ord-…", "path_id": "pick" }
 }
 ```
 
-The projector dedupes on `event_id` (idempotent, at-least-once) and ignores
-unknown `event_type`s.
+The projector dispatches on the full `type`, dedupes on `id` (idempotent,
+at-least-once), ignores unknown types, and logs-and-skips any message that
+is not a valid CloudEvent.

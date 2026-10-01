@@ -24,7 +24,7 @@ package kafkacptschedule
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -33,14 +33,15 @@ import (
 
 	kafkago "github.com/segmentio/kafka-go"
 
+	"github.com/claudioed/order-management/internal/adapters/kafka/cloudevents"
 	"github.com/claudioed/order-management/internal/domain/order"
 )
 
 // Topic is process-path-management's publish topic — the same topic
 // kafkacatalog consumes. See that package's doc comment for why this
 // service has no business knowing anything else about
-// process-path-management beyond this topic name and the envelope/
-// payload shapes it decodes.
+// process-path-management beyond this topic name and the CloudEvents
+// type/payload shapes it decodes.
 const Topic = "warehouse.process-path-management.events"
 
 // consumerGroupPrefix names this service's dedicated, PER-PROCESS
@@ -50,20 +51,15 @@ const Topic = "warehouse.process-path-management.events"
 // its own full history for its own event type.
 const consumerGroupPrefix = "order-management-cpt-schedule"
 
-// eventTypeChanged is the one event type this consumer acts on.
-const eventTypeChanged = "CPTScheduleChanged"
+// ceTypeChanged is the one full CloudEvents `type` this consumer acts on,
+// byte-for-byte as process-path-management publishes it (fleet standard
+// §4 cross-service table).
+const ceTypeChanged = "com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged"
 
 // cptSearchHorizonDays bounds how far into the future NextCutoffs walks
 // looking for concrete occurrences of a recurring cutoff rule, so a
 // misconfigured or genuinely empty schedule cannot spin forever.
 const cptSearchHorizonDays = 14
-
-// envelope is the CloudEvents-like wrapper shared across every
-// warehouse-systems publisher.
-type envelope struct {
-	EventType string          `json:"event_type"`
-	Data      json.RawMessage `json:"data"`
-}
 
 // scheduleData is the wire payload shape for CPTScheduleChanged, decoded
 // verbatim from process-path-management's publisher.
@@ -251,8 +247,15 @@ func (c *Consumer) Run(ctx context.Context) error {
 			return err
 		}
 		if err := c.handle(msg); err != nil {
-			c.Logger.ErrorContext(ctx, "CPT schedule message handling failed",
-				"topic", msg.Topic, "offset", msg.Offset, "partition", msg.Partition, "error", err)
+			if errors.Is(err, cloudevents.ErrNotCloudEvent) {
+				// Not a CloudEvents 1.0 event (e.g. the retired flat
+				// envelope): skip past it, never parse another shape.
+				c.Logger.WarnContext(ctx, "skipping non-CloudEvents message",
+					"topic", msg.Topic, "offset", msg.Offset, "partition", msg.Partition, "error", err)
+			} else {
+				c.Logger.ErrorContext(ctx, "CPT schedule message handling failed",
+					"topic", msg.Topic, "offset", msg.Offset, "partition", msg.Partition, "error", err)
+			}
 		}
 		c.checkReady(msg)
 	}
@@ -280,20 +283,25 @@ func (c *Consumer) checkReady(msg kafkago.Message) {
 	}
 }
 
+// handle decodes msg as a CloudEvents 1.0 event and applies it. A
+// non-CloudEvents message returns an error wrapping
+// cloudevents.ErrNotCloudEvent (Run logs it at WARN and moves on). Each
+// CPTScheduleChanged is a full per-site snapshot, so re-applying the same
+// event is idempotent and no id dedupe is needed.
 func (c *Consumer) handle(msg kafkago.Message) error {
-	var env envelope
-	if err := json.Unmarshal(msg.Value, &env); err != nil {
-		return fmt.Errorf("kafkacptschedule: unmarshal envelope: %w", err)
+	e, err := cloudevents.Decode(msg.Value)
+	if err != nil {
+		return fmt.Errorf("kafkacptschedule: %w", err)
 	}
 
-	switch env.EventType {
-	case eventTypeChanged:
+	switch e.Type() {
+	case ceTypeChanged:
 		var data scheduleData
-		if err := json.Unmarshal(env.Data, &data); err != nil {
-			return fmt.Errorf("kafkacptschedule: unmarshal %s data: %w", env.EventType, err)
+		if err := e.DataAs(&data); err != nil {
+			return fmt.Errorf("kafkacptschedule: unmarshal %s data: %w", e.Type(), err)
 		}
 		if data.SiteId == "" {
-			return fmt.Errorf("kafkacptschedule: %s missing site_id", env.EventType)
+			return fmt.Errorf("kafkacptschedule: %s missing site_id", e.Type())
 		}
 		c.mu.Lock()
 		c.schedules[data.SiteId] = data

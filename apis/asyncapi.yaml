@@ -11,22 +11,36 @@ info:
     choreographed release of allocated work (announced to
     wes-work-planning as facts on Kafka — see ADR 0005).
 
-    ## Message format
+    ## Message format: CloudEvents 1.0 (mandatory)
 
-    Every message on these channels is a JSON document using the
-    warehouse-systems fleet envelope — NOT CloudEvents (unlike
-    wes-work-planning's stream). Two envelope variants exist:
+    Every message on every channel below — produced AND consumed,
+    integration AND analytics — is a **CloudEvents 1.0** event in Kafka
+    structured content mode (ADR 0030, the fleet-wide standard). There is
+    no flat envelope, no dual-write/dual-read, and no envelope toggle.
 
-    * the **integration envelope** on `warehouse.order-management.events`:
-      `{event_id, event_type, occurred_at, source, data}` with
-      `source` always `"order-management"`
-    * the **analytics envelope** on `warehouse.order-management.analytics`,
-      which adds `schema_version: 1`
+    * Kafka message value: the CloudEvents JSON event format
+      (`application/cloudevents+json`); Kafka header
+      `content-type: application/cloudevents+json; charset=UTF-8`.
+    * Required attributes: `specversion` (`1.0`), `id` (UUID, minted once
+      and persisted with the outbox row), `source`
+      (`/warehouse/order-management` for everything this service
+      publishes), `type`
+      (`com.warehouse.wes.order-management.order.<EventName>`), `subject`
+      (the order id), `time` (occurred-at, UTC), `datacontenttype`
+      (`application/json`), `dataschema`
+      (`urn:warehouse:order-management:<events|analytics>:<EventName>:v1`).
+    * The same `type` names an occurrence on both topics; `dataschema`
+      distinguishes the integration payload from the analytics payload.
+    * `data` is the event payload, unchanged by the envelope migration.
+    * Messages on both topics are keyed by the `OrderId` (Hash balancer),
+      preserving per-order ordering. W3C trace context stays in the
+      `traceparent`/`tracestate` headers.
 
-    Messages are keyed by the `OrderId` on the analytics topic; the
-    integration topic is unkeyed. Delivery is at-least-once: consumers must
-    be idempotent, de-duplicating on `event_id` (the projector does exactly
-    that via its `analytics_processed_events` table).
+    Delivery is at-least-once: consumers dispatch on the FULL `type`,
+    ignore unknown types, and de-duplicate on `id` (the projector does
+    exactly that via its `analytics_processed_events` table). A message
+    that is not a valid CloudEvent is dead-lettered (repromise consumer)
+    or logged at WARN and skipped (local-cache consumers, projector).
 
     ## Integration contract (frozen for OrderAllocated/OrderPartiallyAllocated;
     additive for OrderRepromised)
@@ -74,7 +88,7 @@ servers:
       context. Locally, a broker is available at localhost:9092 via this
       repo's docker-compose.kafka.yml.
 
-defaultContentType: application/json
+defaultContentType: application/cloudevents+json
 
 channels:
   warehouse.order-management.events:
@@ -99,8 +113,8 @@ channels:
         fulfillment-execution fact (a missed CPT or a SLAM pass) — the
         fleet's "your delivery is delayed" trigger. `data.lines[]` on the
         first two carries exactly the lines released in this pass.
-        Consumers must be idempotent and should ignore `event_type`
-        values they do not recognise.
+        Consumers must be idempotent (dedupe on `id`) and should ignore
+        CloudEvents `type` values they do not recognise.
       tags:
         - name: order-management
       message:
@@ -136,6 +150,51 @@ channels:
           - $ref: "#/components/messages/TaskCPTMissedInbound"
           - $ref: "#/components/messages/PackageManifestedInbound"
 
+  warehouse.process-path-management.events:
+    description: >-
+      process-path-management's integration topic. Replayed from
+      FirstOffset under per-process-unique consumer groups by two local
+      caches: the process-path catalogue (ProcessPath*) and the CPT
+      schedule cache (CPTScheduleChanged). Every other CloudEvents `type`
+      is ignored; a non-CloudEvents message is logged at WARN and skipped.
+    subscribe:
+      operationId: consumeProcessPathEvents
+      summary: Maintain the local process-path catalogue and CPT schedule caches.
+      description: >-
+        Dispatch is on the FULL CloudEvents type:
+        com.warehouse.wes.process-path-management.processpath.ProcessPathCreated/Updated/Deactivated
+        feed the catalogue (ADR 0013/0016), and
+        com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged
+        feeds the CPT schedule cache (ADR 0014). Each event is a
+        last-write-wins snapshot, so re-applying one is idempotent.
+      tags:
+        - name: order-management
+      message:
+        oneOf:
+          - $ref: "#/components/messages/ProcessPathCreatedInbound"
+          - $ref: "#/components/messages/ProcessPathUpdatedInbound"
+          - $ref: "#/components/messages/ProcessPathDeactivatedInbound"
+          - $ref: "#/components/messages/CPTScheduleChangedInbound"
+
+  warehouse.work-planning.events:
+    description: >-
+      wes-work-planning's integration topic. Replayed from FirstOffset by
+      the path-capacity local cache (ADR 0015), which acts only on
+      PathCapacityChanged; every other CloudEvents `type` is ignored and a
+      non-CloudEvents message is logged at WARN and skipped.
+    subscribe:
+      operationId: consumeWorkPlanningEvents
+      summary: Maintain the local remaining-capacity cache.
+      description: >-
+        Dispatch is on the FULL CloudEvents type
+        com.warehouse.wes.work-planning.workpool.PathCapacityChanged; the
+        cache is keyed by (path_id, cutoff_at) and each event is a
+        last-write-wins observation.
+      tags:
+        - name: order-management
+      message:
+        $ref: "#/components/messages/PathCapacityChangedInbound"
+
   warehouse.order-management.analytics:
     description: >-
       The analytics fan-out topic (`kafka.AnalyticsTopic` in the code),
@@ -149,8 +208,9 @@ channels:
       summary: Fan out order domain events for the analytics data product.
       description: >-
         order-management publishes each domain event (enriched with its
-        process path via an OrderRepo lookup) as an analytics envelope with
-        schema_version 1. Unrecognised event types are skipped by the
+        process path via an OrderRepo lookup) as a CloudEvents 1.0 event
+        whose dataschema is
+        urn:warehouse:order-management:analytics:<EventName>:v1. Unrecognised event types are skipped by the
         publisher, so this channel only ever carries the ten types listed
         under subscribe below. Since ADR 0019, OrderAllocated/
         OrderPartiallyAllocated additionally carry promise_basis/
@@ -166,7 +226,7 @@ channels:
       description: >-
         cmd/order-projector consumes this topic from FirstOffset and is the
         ONLY writer of the analytical Postgres. It is idempotent on
-        event_id; a redelivery is always a no-op. The report keyed per
+        the CloudEvents id; a redelivery is always a no-op. The report keyed per
         path x hour (Order Funnel & Allocation Health) reads what this
         projection writes; since ADR 0019 it also derives promise basis
         distribution, re-promise rate, split-shipment rate, and
@@ -200,16 +260,30 @@ components:
         `{order_id}-line-{line_no}`.
       tags:
         - name: order
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
       payload:
-        $ref: "#/components/schemas/AllocationEvent"
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/order-management }
+              type: { const: com.warehouse.wes.order-management.order.OrderAllocated }
+              dataschema: { const: "urn:warehouse:order-management:events:OrderAllocated:v1" }
+              data:
+                $ref: "#/components/schemas/AllocationData"
       examples:
         - name: orderAllocated
           summary: A two-line ship-complete order allocated and released.
           payload:
-            event_id: 4f1c2a7e-9d31-4a6b-8f0e-6b2c1d5e7a90
-            event_type: OrderAllocated
-            occurred_at: "2026-09-07T10:01:00Z"
-            source: order-management
+            specversion: "1.0"
+            id: 4f1c2a7e-9d31-4a6b-8f0e-6b2c1d5e7a90
+            source: /warehouse/order-management
+            type: com.warehouse.wes.order-management.order.OrderAllocated
+            subject: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
+            time: "2026-09-07T10:01:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:order-management:events:OrderAllocated:v1"
             data:
               order_id: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
               promise_date: "2026-09-09T10:01:00Z"
@@ -237,16 +311,30 @@ components:
         status stays Backordered until RetryAllocation succeeds.
       tags:
         - name: order
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
       payload:
-        $ref: "#/components/schemas/AllocationEvent"
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/order-management }
+              type: { const: com.warehouse.wes.order-management.order.OrderPartiallyAllocated }
+              dataschema: { const: "urn:warehouse:order-management:events:OrderPartiallyAllocated:v1" }
+              data:
+                $ref: "#/components/schemas/AllocationData"
       examples:
         - name: orderPartiallyAllocated
           summary: One line released, one line backordered.
           payload:
-            event_id: 8a3d6c11-52b7-4f0d-9c14-3e7a5b8d2f46
-            event_type: OrderPartiallyAllocated
-            occurred_at: "2026-09-07T10:02:00Z"
-            source: order-management
+            specversion: "1.0"
+            id: 8a3d6c11-52b7-4f0d-9c14-3e7a5b8d2f46
+            source: /warehouse/order-management
+            type: com.warehouse.wes.order-management.order.OrderPartiallyAllocated
+            subject: ord-1b2f1e0a-5f4f-4a67-9c1e-6e2f3a4b5c6d
+            time: "2026-09-07T10:02:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:order-management:events:OrderPartiallyAllocated:v1"
             data:
               order_id: ord-1b2f1e0a-5f4f-4a67-9c1e-6e2f3a4b5c6d
               promise_date: "2026-09-09T10:02:00Z"
@@ -275,16 +363,30 @@ components:
         the notification.
       tags:
         - name: order
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
       payload:
-        $ref: "#/components/schemas/RepromisedEvent"
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/order-management }
+              type: { const: com.warehouse.wes.order-management.order.OrderRepromised }
+              dataschema: { const: "urn:warehouse:order-management:events:OrderRepromised:v1" }
+              data:
+                $ref: "#/components/schemas/RepromisedData"
       examples:
         - name: orderRepromised
           summary: A missed CPT pushed the promise to a later cutoff.
           payload:
-            event_id: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
-            event_type: OrderRepromised
-            occurred_at: "2026-09-14T12:00:00Z"
-            source: order-management
+            specversion: "1.0"
+            id: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+            source: /warehouse/order-management
+            type: com.warehouse.wes.order-management.order.OrderRepromised
+            subject: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
+            time: "2026-09-14T12:00:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:order-management:events:OrderRepromised:v1"
             data:
               order_id: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
               cpt_id_old: sp1-1200
@@ -299,21 +401,35 @@ components:
         Consumed from warehouse.fulfillment.events (ADR 0018). Re-fires on
         every sweep pass fulfillment-execution runs, for as long as the
         task stays overdue (that service's own ADR 0025 §4) — this
-        context's own event_id-keyed idempotency gate is what makes that
+        context's own CloudEvents-id-keyed idempotency gate is what makes that
         safe to consume. order_ref is a WorkUnitId-shaped reference
         (`{orderId}-line-{lineNo}`), not a bare OrderId.
       tags:
         - name: order-management
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
       payload:
-        $ref: "#/components/schemas/TaskCPTMissedEvent"
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/fulfillment-execution }
+              type: { const: com.warehouse.wes.fulfillment-execution.task.TaskCPTMissed }
+              dataschema: { const: "urn:warehouse:fulfillment-execution:events:TaskCPTMissed:v1" }
+              data:
+                $ref: "#/components/schemas/TaskCPTMissedData"
       examples:
         - name: taskCPTMissed
           summary: A PICK task for order line 2 is still open past its CPT.
           payload:
-            event_id: 2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e
-            event_type: TaskCPTMissed
-            occurred_at: "2026-09-14T11:59:00Z"
-            source: fulfillment-execution
+            specversion: "1.0"
+            id: 2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e
+            source: /warehouse/fulfillment-execution
+            type: com.warehouse.wes.fulfillment-execution.task.TaskCPTMissed
+            subject: task-42
+            time: "2026-09-14T11:59:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:fulfillment-execution:events:TaskCPTMissed:v1"
             data:
               task_id: task-42
               order_ref: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2-line-2
@@ -331,16 +447,30 @@ components:
         not a bare OrderId.
       tags:
         - name: order-management
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
       payload:
-        $ref: "#/components/schemas/PackageManifestedEvent"
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/fulfillment-execution }
+              type: { const: com.warehouse.wes.fulfillment-execution.package.PackageManifested }
+              dataschema: { const: "urn:warehouse:fulfillment-execution:events:PackageManifested:v1" }
+              data:
+                $ref: "#/components/schemas/PackageManifestedData"
       examples:
         - name: packageManifested
           summary: A package for order line 1 passed SLAM.
           payload:
-            event_id: 3c4d5e6f-7a8b-4c9d-0e1f-2a3b4c5d6e7f
-            event_type: PackageManifested
-            occurred_at: "2026-09-14T12:01:00Z"
-            source: fulfillment-execution
+            specversion: "1.0"
+            id: 3c4d5e6f-7a8b-4c9d-0e1f-2a3b4c5d6e7f
+            source: /warehouse/fulfillment-execution
+            type: com.warehouse.wes.fulfillment-execution.package.PackageManifested
+            subject: pkg-99
+            time: "2026-09-14T12:01:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:fulfillment-execution:events:PackageManifested:v1"
             data:
               package_id: pkg-99
               order_ref: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2-line-1
@@ -354,17 +484,30 @@ components:
         allocation is ever attempted.
       tags:
         - name: order
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
       payload:
-        $ref: "#/components/schemas/OrderReceivedAnalyticsEvent"
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/order-management }
+              type: { const: com.warehouse.wes.order-management.order.OrderReceived }
+              dataschema: { const: "urn:warehouse:order-management:analytics:OrderReceived:v1" }
+              data:
+                $ref: "#/components/schemas/OrderReceivedAnalyticsData"
       examples:
         - name: orderReceived
           summary: A two-line order was received on the pick path.
           payload:
-            event_id: c1d2e3f4-5a6b-4c7d-8e9f-0a1b2c3d4e5f
-            event_type: OrderReceived
-            occurred_at: "2026-09-07T10:00:00Z"
-            source: order-management
-            schema_version: 1
+            specversion: "1.0"
+            id: c1d2e3f4-5a6b-4c7d-8e9f-0a1b2c3d4e5f
+            source: /warehouse/order-management
+            type: com.warehouse.wes.order-management.order.OrderReceived
+            subject: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
+            time: "2026-09-07T10:00:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:order-management:analytics:OrderReceived:v1"
             data:
               order_id: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
               path_id: pick
@@ -379,17 +522,30 @@ components:
         carries only the line's identifying details for the funnel.
       tags:
         - name: order-line
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
       payload:
-        $ref: "#/components/schemas/OrderLineAnalyticsEvent"
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/order-management }
+              type: { const: com.warehouse.wes.order-management.order.OrderLineAllocated }
+              dataschema: { const: "urn:warehouse:order-management:analytics:OrderLineAllocated:v1" }
+              data:
+                $ref: "#/components/schemas/OrderLineAnalyticsData"
       examples:
         - name: orderLineAllocated
           summary: Line 1 of an order was allocated.
           payload:
-            event_id: d2e3f4a5-6b7c-4d8e-9f0a-1b2c3d4e5f6a
-            event_type: OrderLineAllocated
-            occurred_at: "2026-09-07T10:00:30Z"
-            source: order-management
-            schema_version: 1
+            specversion: "1.0"
+            id: d2e3f4a5-6b7c-4d8e-9f0a-1b2c3d4e5f6a
+            source: /warehouse/order-management
+            type: com.warehouse.wes.order-management.order.OrderLineAllocated
+            subject: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
+            time: "2026-09-07T10:00:30Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:order-management:analytics:OrderLineAllocated:v1"
             data:
               order_id: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
               line_no: 1
@@ -405,17 +561,30 @@ components:
         transport or 5xx failure (those fail the call outright instead).
       tags:
         - name: order-line
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
       payload:
-        $ref: "#/components/schemas/OrderLineAnalyticsEvent"
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/order-management }
+              type: { const: com.warehouse.wes.order-management.order.OrderLineBackordered }
+              dataschema: { const: "urn:warehouse:order-management:analytics:OrderLineBackordered:v1" }
+              data:
+                $ref: "#/components/schemas/OrderLineAnalyticsData"
       examples:
         - name: orderLineBackordered
           summary: Line 2 was backordered.
           payload:
-            event_id: e3f4a5b6-7c8d-4e9f-0a1b-2c3d4e5f6a7b
-            event_type: OrderLineBackordered
-            occurred_at: "2026-09-07T10:00:31Z"
-            source: order-management
-            schema_version: 1
+            specversion: "1.0"
+            id: e3f4a5b6-7c8d-4e9f-0a1b-2c3d4e5f6a7b
+            source: /warehouse/order-management
+            type: com.warehouse.wes.order-management.order.OrderLineBackordered
+            subject: ord-1b2f1e0a-5f4f-4a67-9c1e-6e2f3a4b5c6d
+            time: "2026-09-07T10:00:31Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:order-management:analytics:OrderLineBackordered:v1"
             data:
               order_id: ord-1b2f1e0a-5f4f-4a67-9c1e-6e2f3a4b5c6d
               line_no: 2
@@ -432,17 +601,30 @@ components:
         released).
       tags:
         - name: order
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
       payload:
-        $ref: "#/components/schemas/OrderAnalyticsEvent"
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/order-management }
+              type: { const: com.warehouse.wes.order-management.order.OrderAllocated }
+              dataschema: { const: "urn:warehouse:order-management:analytics:OrderAllocated:v1" }
+              data:
+                $ref: "#/components/schemas/OrderAnalyticsData"
       examples:
         - name: orderAllocatedAnalytics
           summary: An order concluded its pass fully allocated on pick.
           payload:
-            event_id: f4a5b6c7-8d9e-4f0a-1b2c-3d4e5f6a7b8c
-            event_type: OrderAllocated
-            occurred_at: "2026-09-07T10:01:00Z"
-            source: order-management
-            schema_version: 1
+            specversion: "1.0"
+            id: f4a5b6c7-8d9e-4f0a-1b2c-3d4e5f6a7b8c
+            source: /warehouse/order-management
+            type: com.warehouse.wes.order-management.order.OrderAllocated
+            subject: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
+            time: "2026-09-07T10:01:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:order-management:analytics:OrderAllocated:v1"
             data:
               order_id: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
               path_id: pick
@@ -456,17 +638,30 @@ components:
         reporting on partial-shipment orders.
       tags:
         - name: order
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
       payload:
-        $ref: "#/components/schemas/OrderPartiallyAllocatedAnalyticsEvent"
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/order-management }
+              type: { const: com.warehouse.wes.order-management.order.OrderPartiallyAllocated }
+              dataschema: { const: "urn:warehouse:order-management:analytics:OrderPartiallyAllocated:v1" }
+              data:
+                $ref: "#/components/schemas/OrderPartiallyAllocatedAnalyticsData"
       examples:
         - name: orderPartiallyAllocatedAnalytics
           summary: One line allocated, one backordered.
           payload:
-            event_id: a5b6c7d8-9e0f-4a1b-2c3d-4e5f6a7b8c9d
-            event_type: OrderPartiallyAllocated
-            occurred_at: "2026-09-07T10:02:00Z"
-            source: order-management
-            schema_version: 1
+            specversion: "1.0"
+            id: a5b6c7d8-9e0f-4a1b-2c3d-4e5f6a7b8c9d
+            source: /warehouse/order-management
+            type: com.warehouse.wes.order-management.order.OrderPartiallyAllocated
+            subject: ord-1b2f1e0a-5f4f-4a67-9c1e-6e2f3a4b5c6d
+            time: "2026-09-07T10:02:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:order-management:analytics:OrderPartiallyAllocated:v1"
             data:
               order_id: ord-1b2f1e0a-5f4f-4a67-9c1e-6e2f3a4b5c6d
               path_id: pick
@@ -483,17 +678,30 @@ components:
         makes the outcome observable rather than silent.
       tags:
         - name: order
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
       payload:
-        $ref: "#/components/schemas/OrderAllocationPartiallyFailedAnalyticsEvent"
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/order-management }
+              type: { const: com.warehouse.wes.order-management.order.OrderAllocationPartiallyFailed }
+              dataschema: { const: "urn:warehouse:order-management:analytics:OrderAllocationPartiallyFailed:v1" }
+              data:
+                $ref: "#/components/schemas/OrderAllocationPartiallyFailedAnalyticsData"
       examples:
         - name: orderAllocationPartiallyFailed
           summary: One line allocated before inventory-storage became unreachable.
           payload:
-            event_id: b6c7d8e9-0f1a-4b2c-3d4e-5f6a7b8c9d0e
-            event_type: OrderAllocationPartiallyFailed
-            occurred_at: "2026-09-07T10:03:00Z"
-            source: order-management
-            schema_version: 1
+            specversion: "1.0"
+            id: b6c7d8e9-0f1a-4b2c-3d4e-5f6a7b8c9d0e
+            source: /warehouse/order-management
+            type: com.warehouse.wes.order-management.order.OrderAllocationPartiallyFailed
+            subject: ord-3c4d5e6f-7a8b-4c9d-0e1f-2a3b4c5d6e7f
+            time: "2026-09-07T10:03:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:order-management:analytics:OrderAllocationPartiallyFailed:v1"
             data:
               order_id: ord-3c4d5e6f-7a8b-4c9d-0e1f-2a3b4c5d6e7f
               path_id: pick
@@ -510,17 +718,30 @@ components:
         line was released onto and the deterministic work unit id.
       tags:
         - name: order-line
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
       payload:
-        $ref: "#/components/schemas/OrderLineReleasedAnalyticsEvent"
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/order-management }
+              type: { const: com.warehouse.wes.order-management.order.OrderLineReleased }
+              dataschema: { const: "urn:warehouse:order-management:analytics:OrderLineReleased:v1" }
+              data:
+                $ref: "#/components/schemas/OrderLineReleasedAnalyticsData"
       examples:
         - name: orderLineReleased
           summary: Line 1 released onto the pick path.
           payload:
-            event_id: c7d8e9f0-1a2b-4c3d-4e5f-6a7b8c9d0e1f
-            event_type: OrderLineReleased
-            occurred_at: "2026-09-07T10:01:30Z"
-            source: order-management
-            schema_version: 1
+            specversion: "1.0"
+            id: c7d8e9f0-1a2b-4c3d-4e5f-6a7b8c9d0e1f
+            source: /warehouse/order-management
+            type: com.warehouse.wes.order-management.order.OrderLineReleased
+            subject: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
+            time: "2026-09-07T10:01:30Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:order-management:analytics:OrderLineReleased:v1"
             data:
               order_id: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
               line_no: 1
@@ -534,17 +755,30 @@ components:
       description: The funnel's bottom stage.
       tags:
         - name: order
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
       payload:
-        $ref: "#/components/schemas/OrderAnalyticsEvent"
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/order-management }
+              type: { const: com.warehouse.wes.order-management.order.OrderReleased }
+              dataschema: { const: "urn:warehouse:order-management:analytics:OrderReleased:v1" }
+              data:
+                $ref: "#/components/schemas/OrderAnalyticsData"
       examples:
         - name: orderReleased
           summary: The order fully released on the pick path.
           payload:
-            event_id: d8e9f0a1-2b3c-4d4e-5f6a-7b8c9d0e1f2a
-            event_type: OrderReleased
-            occurred_at: "2026-09-07T10:01:31Z"
-            source: order-management
-            schema_version: 1
+            specversion: "1.0"
+            id: d8e9f0a1-2b3c-4d4e-5f6a-7b8c9d0e1f2a
+            source: /warehouse/order-management
+            type: com.warehouse.wes.order-management.order.OrderReleased
+            subject: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
+            time: "2026-09-07T10:01:31Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:order-management:analytics:OrderReleased:v1"
             data:
               order_id: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
               path_id: pick
@@ -559,17 +793,30 @@ components:
         returned to inventory-storage.
       tags:
         - name: order
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
       payload:
-        $ref: "#/components/schemas/OrderCancelledAnalyticsEvent"
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/order-management }
+              type: { const: com.warehouse.wes.order-management.order.OrderCancelled }
+              dataschema: { const: "urn:warehouse:order-management:analytics:OrderCancelled:v1" }
+              data:
+                $ref: "#/components/schemas/OrderCancelledAnalyticsData"
       examples:
         - name: orderCancelled
           summary: A pre-release order was cancelled, revoking one reservation.
           payload:
-            event_id: e9f0a1b2-3c4d-4e5f-6a7b-8c9d0e1f2a3b
-            event_type: OrderCancelled
-            occurred_at: "2026-09-07T10:04:00Z"
-            source: order-management
-            schema_version: 1
+            specversion: "1.0"
+            id: e9f0a1b2-3c4d-4e5f-6a7b-8c9d0e1f2a3b
+            source: /warehouse/order-management
+            type: com.warehouse.wes.order-management.order.OrderCancelled
+            subject: ord-4d5e6f7a-8b9c-4d0e-1f2a-3b4c5d6e7f8a
+            time: "2026-09-07T10:04:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:order-management:analytics:OrderCancelled:v1"
             data:
               order_id: ord-4d5e6f7a-8b9c-4d0e-1f2a-3b4c5d6e7f8a
               path_id: pick
@@ -598,116 +845,201 @@ components:
       tags:
         - name: order
         - name: analytics
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
       payload:
-        $ref: "#/components/schemas/OrderRepromisedAnalyticsEvent"
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/order-management }
+              type: { const: com.warehouse.wes.order-management.order.OrderRepromised }
+              dataschema: { const: "urn:warehouse:order-management:analytics:OrderRepromised:v1" }
+              data:
+                $ref: "#/components/schemas/OrderRepromisedAnalyticsData"
       examples:
         - name: orderRepromisedAnalytics
           summary: A missed CPT pushed the promise to a later cutoff.
           payload:
-            event_id: 4b5c6d7e-8f9a-4b0c-1d2e-3f4a5b6c7d8e
-            event_type: OrderRepromised
-            occurred_at: "2026-09-14T12:00:00Z"
-            source: order-management
-            schema_version: 1
+            specversion: "1.0"
+            id: 4b5c6d7e-8f9a-4b0c-1d2e-3f4a5b6c7d8e
+            source: /warehouse/order-management
+            type: com.warehouse.wes.order-management.order.OrderRepromised
+            subject: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
+            time: "2026-09-14T12:00:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:order-management:analytics:OrderRepromised:v1"
             data:
               order_id: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
               cpt_id_old: sp1-1200
               cpt_id_new: sp1-1800
               reason: TaskCPTMissed
 
-  schemas:
-    IntegrationEnvelope:
-      type: object
-      description: The fleet envelope used on warehouse.order-management.events.
-      additionalProperties: false
-      required: [event_id, event_type, occurred_at, source, data]
-      properties:
-        event_id:
-          type: string
-          format: uuid
-          description: De-duplication key; delivery is at-least-once.
-        event_type:
-          type: string
-          enum: [OrderAllocated, OrderPartiallyAllocated, OrderRepromised]
-        occurred_at:
-          type: string
-          format: date-time
-        source:
-          type: string
-          enum: [order-management]
-        data:
-          $ref: "#/components/schemas/AllocationData"
+    ProcessPathCreatedInbound:
+      name: ProcessPathCreated
+      title: ProcessPathCreated (inbound)
+      summary: A process path was defined.
+      tags:
+        - name: order-management
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/process-path-management }
+              type: { const: com.warehouse.wes.process-path-management.processpath.ProcessPathCreated }
+              dataschema: { const: "urn:warehouse:process-path-management:events:ProcessPathCreated:v1" }
+              data:
+                $ref: "#/components/schemas/ProcessPathData"
 
-    AnalyticsEnvelope:
+    ProcessPathUpdatedInbound:
+      name: ProcessPathUpdated
+      title: ProcessPathUpdated (inbound)
+      summary: A process path definition changed.
+      tags:
+        - name: order-management
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/process-path-management }
+              type: { const: com.warehouse.wes.process-path-management.processpath.ProcessPathUpdated }
+              dataschema: { const: "urn:warehouse:process-path-management:events:ProcessPathUpdated:v1" }
+              data:
+                $ref: "#/components/schemas/ProcessPathData"
+
+    ProcessPathDeactivatedInbound:
+      name: ProcessPathDeactivated
+      title: ProcessPathDeactivated (inbound)
+      summary: A process path was deactivated.
+      tags:
+        - name: order-management
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/process-path-management }
+              type: { const: com.warehouse.wes.process-path-management.processpath.ProcessPathDeactivated }
+              dataschema: { const: "urn:warehouse:process-path-management:events:ProcessPathDeactivated:v1" }
+              data:
+                $ref: "#/components/schemas/ProcessPathData"
+
+    CPTScheduleChangedInbound:
+      name: CPTScheduleChanged
+      title: CPTScheduleChanged (inbound)
+      summary: A site's full CPT schedule snapshot.
+      tags:
+        - name: order-management
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/process-path-management }
+              type: { const: com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged }
+              dataschema: { const: "urn:warehouse:process-path-management:events:CPTScheduleChanged:v1" }
+              data:
+                $ref: "#/components/schemas/CPTScheduleData"
+
+    PathCapacityChangedInbound:
+      name: PathCapacityChanged
+      title: PathCapacityChanged (inbound)
+      summary: Remaining capacity for a path at an exact cutoff instant (ADR 0015).
+      tags:
+        - name: order-management
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/wes-work-planning }
+              type: { const: com.warehouse.wes.work-planning.workpool.PathCapacityChanged }
+              dataschema: { const: "urn:warehouse:wes-work-planning:events:PathCapacityChanged:v1" }
+              data:
+                $ref: "#/components/schemas/PathCapacityData"
+
+  messageTraits:
+    CloudEventsStructured:
+      contentType: application/cloudevents+json
+      headers:
+        type: object
+        required: [content-type]
+        properties:
+          content-type:
+            type: string
+            const: "application/cloudevents+json; charset=UTF-8"
+          traceparent:
+            type: string
+            description: W3C trace context of the producing span.
+          tracestate:
+            type: string
+      bindings:
+        kafka:
+          key:
+            type: string
+            description: The aggregate id (also the CloudEvents subject); Hash-partitioned.
+
+  schemas:
+    CloudEvent:
       type: object
       description: >-
-        The analytics envelope used on warehouse.order-management.analytics
-        — the fleet envelope plus schema_version.
-      additionalProperties: false
-      required: [event_id, event_type, occurred_at, source, schema_version, data]
+        CloudEvents 1.0 structured-mode event (JSON event format), the ONLY
+        envelope on every channel this service produces or consumes (ADR
+        0030, fleet standard). Every attribute below is REQUIRED in this
+        fleet. Kafka header `content-type` is
+        `application/cloudevents+json; charset=UTF-8`; W3C trace context
+        stays in the `traceparent`/`tracestate` headers. Consumers dispatch
+        on the FULL `type`, ignore unknown types, and dedupe on `id`.
+      required: [specversion, id, source, type, subject, time, datacontenttype, dataschema, data]
       properties:
-        event_id:
+        specversion:
+          type: string
+          const: "1.0"
+        id:
           type: string
           format: uuid
-          description: The projector's idempotency key.
-        event_type:
-          type: string
-        occurred_at:
-          type: string
-          format: date-time
+          description: >-
+            Minted once per domain event and persisted with the outbox row,
+            so a redelivery carries the same id. `(source, id)` is the
+            consumer idempotency key.
         source:
           type: string
-          enum: [order-management]
-        schema_version:
-          type: integer
-          enum: [1]
+          format: uri-reference
+          description: /warehouse/<repo-name>, e.g. /warehouse/order-management.
+        type:
+          type: string
+          pattern: '^com\.warehouse\.[a-z]+\.[a-z-]+\.[a-z]+\.[A-Z][A-Za-z]+(\.v[0-9]+)?$'
+          description: com.warehouse.<subdomain>.<bounded-context>.<entity>.<EventName>
+        subject:
+          type: string
+          minLength: 1
+          description: Id of the aggregate instance the event is about (order id for every event this service publishes).
+        time:
+          type: string
+          format: date-time
+          description: The domain event's occurred-at instant, UTC, RFC 3339.
+        datacontenttype:
+          type: string
+          const: application/json
+        dataschema:
+          type: string
+          format: uri
+          description: urn:warehouse:<repo-name>:<events|analytics>:<EventName>:v<N>
         data:
           type: object
-          description: The event_type-specific snake_case payload (see messages).
-
-    AllocationEvent:
-      allOf:
-        - $ref: "#/components/schemas/IntegrationEnvelope"
-
-    RepromisedEvent:
-      allOf:
-        - type: object
-          additionalProperties: false
-          required: [event_id, event_type, occurred_at, source, data]
-          properties:
-            event_id: { type: string, format: uuid }
-            event_type: { type: string, enum: [OrderRepromised] }
-            occurred_at: { type: string, format: date-time }
-            source: { type: string, enum: [order-management] }
-            data:
-              $ref: "#/components/schemas/RepromisedData"
-
-    TaskCPTMissedEvent:
-      allOf:
-        - type: object
-          additionalProperties: false
-          required: [event_id, event_type, occurred_at, source, data]
-          properties:
-            event_id: { type: string, format: uuid }
-            event_type: { type: string, enum: [TaskCPTMissed] }
-            occurred_at: { type: string, format: date-time }
-            source: { type: string, enum: [fulfillment-execution] }
-            data:
-              $ref: "#/components/schemas/TaskCPTMissedData"
-
-    PackageManifestedEvent:
-      allOf:
-        - type: object
-          additionalProperties: false
-          required: [event_id, event_type, occurred_at, source, data]
-          properties:
-            event_id: { type: string, format: uuid }
-            event_type: { type: string, enum: [PackageManifested] }
-            occurred_at: { type: string, format: date-time }
-            source: { type: string, enum: [fulfillment-execution] }
-            data:
-              $ref: "#/components/schemas/PackageManifestedData"
-
+          description: The event payload — see each message's own data schema.
     RepromisedData:
       type: object
       description: >-
@@ -729,7 +1061,7 @@ components:
         reason:
           type: string
           enum: [TaskCPTMissed, PackageManifested]
-          description: The fulfillment-execution event_type that triggered this recompute, verbatim.
+          description: The name of the fulfillment-execution event that triggered this recompute (the last segment of its CloudEvents type).
 
     TaskCPTMissedData:
       type: object
@@ -852,170 +1184,179 @@ components:
             an individual line's own group may cut off earlier). Absent
             under the same condition as promise_cpt_id.
 
-    OrderReceivedAnalyticsEvent:
-      allOf:
-        - $ref: "#/components/schemas/AnalyticsEnvelope"
-        - type: object
-          properties:
-            data:
-              type: object
-              additionalProperties: false
-              required: [order_id, path_id, line_count]
-              properties:
-                order_id: { type: string }
-                path_id: { type: string }
-                line_count: { type: integer, minimum: 1 }
+    OrderReceivedAnalyticsData:
+      type: object
+      additionalProperties: false
+      required: [order_id, path_id, line_count]
+      properties:
+        order_id: { type: string }
+        path_id: { type: string }
+        line_count: { type: integer, minimum: 1 }
 
-    OrderAnalyticsEvent:
-      allOf:
-        - $ref: "#/components/schemas/AnalyticsEnvelope"
-        - type: object
-          properties:
-            data:
-              type: object
-              additionalProperties: false
-              required: [order_id, path_id]
-              properties:
-                order_id: { type: string }
-                path_id: { type: string }
-                promise_basis:
-                  type: string
-                  enum: [Capability, LeadTime]
-                  description: >-
-                    ADR 0014 §6 / ADR 0019's additive promise-basis-
-                    distribution field, mirrored from the OrderAllocated
-                    domain event's own promise_basis. Absent on events
-                    published before this ADR, or when the underlying
-                    promise had no basis recorded.
-                promise_cutoff_at:
-                  type: string
-                  format: date-time
-                  description: >-
-                    ADR 0014 §6 / ADR 0019's additive promise-to-cutoff-gap
-                    source field: the promise's cutoff instant. Present
-                    ONLY when promise_basis is "Capability" — a
-                    LeadTime-basis promise's "cutoff" is just
-                    now-plus-a-configured-duration, not a real departure,
-                    and is deliberately excluded from the gap KPI.
-                split_shipment:
-                  type: boolean
-                  description: >-
-                    ADR 0014 §6 / ADR 0019's additive split-shipment-rate
-                    source field: true when the order had more than one
-                    order.PromiseGroup at allocation time (ADR 0014 §3 /
-                    ADR 0017), derived via an OrderRepo lookup at publish
-                    time.
+    OrderAnalyticsData:
+      type: object
+      additionalProperties: false
+      required: [order_id, path_id]
+      properties:
+        order_id: { type: string }
+        path_id: { type: string }
+        promise_basis:
+          type: string
+          enum: [Capability, LeadTime]
+          description: >-
+            ADR 0014 §6 / ADR 0019's additive promise-basis-
+            distribution field, mirrored from the OrderAllocated
+            domain event's own promise_basis. Absent on events
+            published before this ADR, or when the underlying
+            promise had no basis recorded.
+        promise_cutoff_at:
+          type: string
+          format: date-time
+          description: >-
+            ADR 0014 §6 / ADR 0019's additive promise-to-cutoff-gap
+            source field: the promise's cutoff instant. Present
+            ONLY when promise_basis is "Capability" — a
+            LeadTime-basis promise's "cutoff" is just
+            now-plus-a-configured-duration, not a real departure,
+            and is deliberately excluded from the gap KPI.
+        split_shipment:
+          type: boolean
+          description: >-
+            ADR 0014 §6 / ADR 0019's additive split-shipment-rate
+            source field: true when the order had more than one
+            order.PromiseGroup at allocation time (ADR 0014 §3 /
+            ADR 0017), derived via an OrderRepo lookup at publish
+            time.
 
-    OrderLineAnalyticsEvent:
-      allOf:
-        - $ref: "#/components/schemas/AnalyticsEnvelope"
-        - type: object
-          properties:
-            data:
-              type: object
-              additionalProperties: false
-              required: [order_id, line_no, path_id, sku]
-              properties:
-                order_id: { type: string }
-                line_no: { type: integer, minimum: 1 }
-                path_id: { type: string }
-                sku: { type: string }
+    OrderLineAnalyticsData:
+      type: object
+      additionalProperties: false
+      required: [order_id, line_no, path_id, sku]
+      properties:
+        order_id: { type: string }
+        line_no: { type: integer, minimum: 1 }
+        path_id: { type: string }
+        sku: { type: string }
 
-    OrderLineReleasedAnalyticsEvent:
-      allOf:
-        - $ref: "#/components/schemas/AnalyticsEnvelope"
-        - type: object
-          properties:
-            data:
-              type: object
-              additionalProperties: false
-              required: [order_id, line_no, path_id, work_unit_id]
-              properties:
-                order_id: { type: string }
-                line_no: { type: integer, minimum: 1 }
-                path_id: { type: string }
-                work_unit_id:
-                  type: string
-                  description: '{order_id}-line-{line_no} — deterministic, derived by BOTH sides.'
+    OrderLineReleasedAnalyticsData:
+      type: object
+      additionalProperties: false
+      required: [order_id, line_no, path_id, work_unit_id]
+      properties:
+        order_id: { type: string }
+        line_no: { type: integer, minimum: 1 }
+        path_id: { type: string }
+        work_unit_id:
+          type: string
+          description: '{order_id}-line-{line_no} — deterministic, derived by BOTH sides.'
 
-    OrderPartiallyAllocatedAnalyticsEvent:
-      allOf:
-        - $ref: "#/components/schemas/AnalyticsEnvelope"
-        - type: object
-          properties:
-            data:
-              type: object
-              additionalProperties: false
-              required: [order_id, path_id, allocated_lines, backordered_lines]
-              properties:
-                order_id: { type: string }
-                path_id: { type: string }
-                allocated_lines: { type: integer, minimum: 0 }
-                backordered_lines: { type: integer, minimum: 0 }
-                promise_basis:
-                  type: string
-                  enum: [Capability, LeadTime]
-                  description: Same ADR 0014 §6 / ADR 0019 field as OrderAnalyticsEvent's.
-                promise_cutoff_at:
-                  type: string
-                  format: date-time
-                  description: Same ADR 0014 §6 / ADR 0019 field as OrderAnalyticsEvent's.
-                split_shipment:
-                  type: boolean
-                  description: Same ADR 0014 §6 / ADR 0019 field as OrderAnalyticsEvent's.
+    OrderPartiallyAllocatedAnalyticsData:
+      type: object
+      additionalProperties: false
+      required: [order_id, path_id, allocated_lines, backordered_lines]
+      properties:
+        order_id: { type: string }
+        path_id: { type: string }
+        allocated_lines: { type: integer, minimum: 0 }
+        backordered_lines: { type: integer, minimum: 0 }
+        promise_basis:
+          type: string
+          enum: [Capability, LeadTime]
+          description: Same ADR 0014 §6 / ADR 0019 field as OrderAnalyticsEvent's.
+        promise_cutoff_at:
+          type: string
+          format: date-time
+          description: Same ADR 0014 §6 / ADR 0019 field as OrderAnalyticsEvent's.
+        split_shipment:
+          type: boolean
+          description: Same ADR 0014 §6 / ADR 0019 field as OrderAnalyticsEvent's.
 
-    OrderAllocationPartiallyFailedAnalyticsEvent:
-      allOf:
-        - $ref: "#/components/schemas/AnalyticsEnvelope"
-        - type: object
-          properties:
-            data:
-              type: object
-              additionalProperties: false
-              required: [order_id, path_id, allocated_lines, remaining_lines]
-              properties:
-                order_id: { type: string }
-                path_id: { type: string }
-                allocated_lines: { type: integer, minimum: 0 }
-                remaining_lines: { type: integer, minimum: 0 }
+    OrderAllocationPartiallyFailedAnalyticsData:
+      type: object
+      additionalProperties: false
+      required: [order_id, path_id, allocated_lines, remaining_lines]
+      properties:
+        order_id: { type: string }
+        path_id: { type: string }
+        allocated_lines: { type: integer, minimum: 0 }
+        remaining_lines: { type: integer, minimum: 0 }
 
-    OrderCancelledAnalyticsEvent:
-      allOf:
-        - $ref: "#/components/schemas/AnalyticsEnvelope"
-        - type: object
-          properties:
-            data:
-              type: object
-              additionalProperties: false
-              required: [order_id, path_id, revoked_reservations]
-              properties:
-                order_id: { type: string }
-                path_id: { type: string }
-                revoked_reservations: { type: integer, minimum: 0 }
+    OrderCancelledAnalyticsData:
+      type: object
+      additionalProperties: false
+      required: [order_id, path_id, revoked_reservations]
+      properties:
+        order_id: { type: string }
+        path_id: { type: string }
+        revoked_reservations: { type: integer, minimum: 0 }
 
-    OrderRepromisedAnalyticsEvent:
-      allOf:
-        - $ref: "#/components/schemas/AnalyticsEnvelope"
-        - type: object
+    OrderRepromisedAnalyticsData:
+      type: object
+      description: >-
+        Deliberately has NO path_id property, unlike every other
+        analytics event's data object on this channel — see
+        OrderRepromisedAnalytics' own description for why (ADR
+        0014 §6 / ADR 0019).
+      additionalProperties: false
+      required: [order_id, reason]
+      properties:
+        order_id: { type: string }
+        cpt_id_old:
+          type: string
+          description: The CPT identity the affected group targeted BEFORE the recompute. Absent for a LeadTime-basis previous promise.
+        cpt_id_new:
+          type: string
+          description: The CPT identity the affected group targets AFTER the recompute. Absent for a LeadTime-basis new promise.
+        reason:
+          type: string
+          enum: [TaskCPTMissed, PackageManifested]
+          description: The name of the fulfillment-execution event that triggered this recompute (the last segment of its CloudEvents type).
+
+    ProcessPathData:
+      type: object
+      description: >-
+        process-path-management's ProcessPath* payload, decoded
+        independently here (only the fields this service reads).
+        eligibility is absent on ProcessPathDeactivated.
+      required: [path_id]
+      properties:
+        path_id: { type: string }
+        match_prefix: { type: string }
+        cycle_time_p95: { type: string, description: "Go time.Duration string, e.g. 45m0s." }
+        eligibility:
+          type: object
           properties:
-            data:
-              type: object
-              description: >-
-                Deliberately has NO path_id property, unlike every other
-                analytics event's data object on this channel — see
-                OrderRepromisedAnalytics' own description for why (ADR
-                0014 §6 / ADR 0019).
-              additionalProperties: false
-              required: [order_id, reason]
-              properties:
-                order_id: { type: string }
-                cpt_id_old:
-                  type: string
-                  description: The CPT identity the affected group targeted BEFORE the recompute. Absent for a LeadTime-basis previous promise.
-                cpt_id_new:
-                  type: string
-                  description: The CPT identity the affected group targets AFTER the recompute. Absent for a LeadTime-basis new promise.
-                reason:
-                  type: string
-                  enum: [TaskCPTMissed, PackageManifested]
-                  description: The fulfillment-execution event_type that triggered this recompute, verbatim.
+            max_units_per_line: { type: integer }
+            required_product_attributes: { type: array, items: { type: string } }
+            excluded_product_attributes: { type: array, items: { type: string } }
+            non_sortable: { type: boolean }
+        destination_location_role: { type: string }
+
+    CPTScheduleData:
+      type: object
+      description: Full per-site CPT schedule snapshot (replaces the site's prior schedule).
+      required: [site_id, timezone, cutoffs]
+      properties:
+        site_id: { type: string }
+        timezone: { type: string }
+        cutoffs:
+          type: array
+          items:
+            type: object
+            required: [cpt_id, local_time]
+            properties:
+              cpt_id: { type: string }
+              local_time: { type: string, description: "HH:MM in the site timezone." }
+              days_of_week: { type: array, items: { type: string } }
+              ship_method: { type: string }
+              eligible_path_ids: { type: array, items: { type: string } }
+
+    PathCapacityData:
+      type: object
+      description: wes-work-planning's PathCapacityChanged payload (ADR 0015).
+      required: [path_id, cutoff_at, remaining_units, known]
+      properties:
+        path_id: { type: string }
+        cutoff_at: { type: string, format: date-time }
+        remaining_units: { type: integer }
+        known: { type: boolean }

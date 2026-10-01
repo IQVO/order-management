@@ -128,11 +128,11 @@ func TestOutbox_ReceiveOrder_CommitsAggregateAndBothTopicRowsTogether(t *testing
 		t.Fatalf("receive: %v", err)
 	}
 
-	if got := countOutbox(t, pool, "published_at IS NULL AND event_type = 'OrderReceived'"); got != 1 {
+	if got := countOutbox(t, pool, "published_at IS NULL AND event_type = 'com.warehouse.wes.order-management.order.OrderReceived'"); got != 1 {
 		t.Fatalf("expected exactly 1 unpublished OrderReceived row total, got %d", got)
 	}
-	gotIntegration := countOutboxWhereTopic(t, pool, outboundkafka.Topic, "OrderReceived")
-	gotAnalytics := countOutboxWhereTopic(t, pool, outboundkafka.AnalyticsTopic, "OrderReceived")
+	gotIntegration := countOutboxWhereTopic(t, pool, outboundkafka.Topic, "com.warehouse.wes.order-management.order.OrderReceived")
+	gotAnalytics := countOutboxWhereTopic(t, pool, outboundkafka.AnalyticsTopic, "com.warehouse.wes.order-management.order.OrderReceived")
 	// OrderReceived is not part of the integration publisher's contract
 	// (see kafka.Publisher's package doc — only OrderAllocated/
 	// OrderPartiallyAllocated/OrderRepromised are), so exactly one row

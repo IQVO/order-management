@@ -4,6 +4,7 @@ package kafkapathcapacity
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -43,7 +44,7 @@ func TestNewConsumer_TwoInstancesInARow_BothReplayFully(t *testing.T) {
 	cutoff := time.Date(2026, 9, 13, 18, 0, 0, 0, time.UTC)
 	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false}
 	if err := writer.WriteMessages(ctx, kafkago.Message{
-		Value: []byte(fmt.Sprintf(`{"event_type":"PathCapacityChanged","data":{"path_id":"pick","cutoff_at":%q,"remaining_units":25,"known":true}}`, cutoff.Format(time.RFC3339))),
+		Value: envelopeMsg(t, 0, 0, "com.warehouse.wes.work-planning.workpool.PathCapacityChanged", json.RawMessage(fmt.Sprintf(`{"path_id":"pick","cutoff_at":%q,"remaining_units":25,"known":true}`, cutoff.Format(time.RFC3339)))).Value,
 	}); err != nil {
 		t.Fatalf("seed publish: %v", err)
 	}
@@ -102,7 +103,7 @@ func TestNewConsumer_AlreadyCaughtUpGroup_ReadyImmediately(t *testing.T) {
 	cutoff := time.Date(2026, 9, 13, 8, 0, 0, 0, time.UTC)
 	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false}
 	if err := writer.WriteMessages(ctx, kafkago.Message{
-		Value: []byte(fmt.Sprintf(`{"event_type":"PathCapacityChanged","data":{"path_id":"singles","cutoff_at":%q,"remaining_units":0,"known":false}}`, cutoff.Format(time.RFC3339))),
+		Value: envelopeMsg(t, 0, 0, "com.warehouse.wes.work-planning.workpool.PathCapacityChanged", json.RawMessage(fmt.Sprintf(`{"path_id":"singles","cutoff_at":%q,"remaining_units":0,"known":false}`, cutoff.Format(time.RFC3339)))).Value,
 	}); err != nil {
 		t.Fatalf("seed publish: %v", err)
 	}
@@ -160,12 +161,12 @@ func TestPromisePolicy_EndToEnd_RealCapacityConsumer(t *testing.T) {
 
 	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false}
 	if err := writer.WriteMessages(ctx,
-		kafkago.Message{Value: []byte(fmt.Sprintf(
-			`{"event_type":"PathCapacityChanged","data":{"path_id":"pick","cutoff_at":%q,"remaining_units":10,"known":true}}`,
-			earlyCutoff.Format(time.RFC3339)))},
-		kafkago.Message{Value: []byte(fmt.Sprintf(
-			`{"event_type":"PathCapacityChanged","data":{"path_id":"pick","cutoff_at":%q,"remaining_units":100,"known":true}}`,
-			lateCutoff.Format(time.RFC3339)))},
+		kafkago.Message{Value: envelopeMsg(t, 0, 0, "com.warehouse.wes.work-planning.workpool.PathCapacityChanged", json.RawMessage(fmt.Sprintf(
+			`{"path_id":"pick","cutoff_at":%q,"remaining_units":10,"known":true}`,
+			earlyCutoff.Format(time.RFC3339)))).Value},
+		kafkago.Message{Value: envelopeMsg(t, 0, 0, "com.warehouse.wes.work-planning.workpool.PathCapacityChanged", json.RawMessage(fmt.Sprintf(
+			`{"path_id":"pick","cutoff_at":%q,"remaining_units":100,"known":true}`,
+			lateCutoff.Format(time.RFC3339)))).Value},
 	); err != nil {
 		t.Fatalf("seed publish: %v", err)
 	}
@@ -301,25 +302,15 @@ func createTopic(ctx context.Context, brokers []string, topic string) error {
 	}
 }
 
-// TestNewConsumer_DualShapeSameEventId_ConvergesToOneConsistentEntry is
-// the ADR-0021 Phase 2 Task 2b dual-write-safety regression: during the
-// eventual dual-write bake period, ONE domain PathCapacityChanged event
-// produces TWO physical Kafka messages on the same topic/key (same
-// event id) -- a flat-shaped one and a CloudEvents-shaped one, carrying
-// byte-identical `data`. This consumer is a full-replay LOCAL-CACHE
-// consumer (see the fleet skill's "idempotent by construction" note),
-// not a processed_events-gated use case: it has no dedup ledger, so
-// "fires exactly once" here means the two physical messages -- decoded
-// via two different wire shapes -- must converge on exactly the SAME
-// final cache entry rather than corrupt or duplicate state. That is
-// what this test proves: after both messages are consumed, exactly one
-// logical (path, cutoff) entry exists and its value is correct,
-// regardless of which physical message the reader saw first.
-func TestNewConsumer_DualShapeSameEventId_ConvergesToOneConsistentEntry(t *testing.T) {
+// TestNewConsumer_LegacyFlatMessage_SkippedCloudEventApplied proves, against
+// a real broker, that a retired flat-envelope message on the topic is
+// rejected (WARN + skip, never parsed) and does not block the partition:
+// the CloudEvents message behind it is applied and readiness is reached.
+func TestNewConsumer_LegacyFlatMessage_SkippedCloudEventApplied(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
-	container, err := tckafka.Run(ctx, "confluentinc/confluent-local:7.6.1", tckafka.WithClusterID("om-pathcapacity-dualshape"))
+	container, err := tckafka.Run(ctx, "confluentinc/confluent-local:7.6.1", tckafka.WithClusterID("om-pathcapacity-legacy"))
 	if err != nil {
 		t.Fatalf("start Kafka container: %v", err)
 	}
@@ -328,24 +319,17 @@ func TestNewConsumer_DualShapeSameEventId_ConvergesToOneConsistentEntry(t *testi
 	if err != nil {
 		t.Fatalf("Kafka brokers: %v", err)
 	}
-	topic := fmt.Sprintf("warehouse.work-planning.events.dualshape-%d", time.Now().UnixNano())
+	topic := fmt.Sprintf("warehouse.work-planning.events.legacy-%d", time.Now().UnixNano())
 	if err := createTopic(ctx, brokers, topic); err != nil {
 		t.Fatalf("create Kafka topic: %v", err)
 	}
 
 	cutoff := time.Date(2026, 9, 26, 2, 0, 0, 0, time.UTC)
-	eventID := "5c7d3f92-1b64-4a08-9e73-2f6a8c1d5b40" // same id/event_id on both physical messages
-	flatValue := []byte(fmt.Sprintf(
-		`{"event_id":%q,"event_type":"PathCapacityChanged","occurred_at":"2026-09-26T02:00:00Z","source":"wes-work-planning","data":{"path_id":"pick-to-tote","cutoff_at":%q,"remaining_units":17,"known":true}}`,
-		eventID, cutoff.Format(time.RFC3339)))
-	cloudEventsValue := []byte(fmt.Sprintf(
-		`{"specversion":"1.0","id":%q,"type":"com.warehouse.wes.work-planning.workpool.PathCapacityChanged","source":"/warehouse/wes-work-planning","subject":"pick-to-tote","time":"2026-09-26T02:00:00Z","datacontenttype":"application/json","data":{"path_id":"pick-to-tote","cutoff_at":%q,"remaining_units":17,"known":true}}`,
-		eventID, cutoff.Format(time.RFC3339)))
-
+	legacyCutoff := cutoff.Add(time.Hour)
 	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false}
 	if err := writer.WriteMessages(ctx,
-		kafkago.Message{Key: []byte(eventID), Value: flatValue},
-		kafkago.Message{Key: []byte(eventID), Value: cloudEventsValue},
+		legacyFlatMsg(t, 0, 0, "PathCapacityChanged", capacityData{PathId: "pick-to-tote", CutoffAt: legacyCutoff, RemainingUnits: 99, Known: true}),
+		envelopeMsg(t, 0, 1, ceTypeChanged, capacityData{PathId: "pick-to-tote", CutoffAt: cutoff, RemainingUnits: 17, Known: true}),
 	); err != nil {
 		t.Fatalf("seed publish: %v", err)
 	}
@@ -368,19 +352,10 @@ func TestNewConsumer_DualShapeSameEventId_ConvergesToOneConsistentEntry(t *testi
 		t.Fatalf("consumer never became ready: %v", err)
 	}
 
-	units, known := consumer.Remaining(shared.PathId("pick-to-tote"), "sp1-0200", cutoff)
-	if !known {
-		t.Fatal("expected known=true after consuming both physical shapes of the same event")
+	if units, known := consumer.Remaining(shared.PathId("pick-to-tote"), "sp1-0200", cutoff); !known || units != 17 {
+		t.Fatalf("CloudEvents entry: units=%d known=%v, want 17/true", units, known)
 	}
-	if units != 17 {
-		t.Fatalf("units = %d, want 17 -- both physical messages carry byte-identical data, so the converged entry must match", units)
-	}
-
-	c := consumer
-	c.mu.RLock()
-	entryCount := len(c.entries)
-	c.mu.RUnlock()
-	if entryCount != 1 {
-		t.Fatalf("cache entries = %d, want exactly 1 -- two physical messages for the same logical event must converge, not duplicate", entryCount)
+	if _, known := consumer.Remaining(shared.PathId("pick-to-tote"), "", legacyCutoff); known {
+		t.Fatal("legacy flat message must not populate the cache")
 	}
 }

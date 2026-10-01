@@ -10,6 +10,11 @@ description: ADR 0006 — an analytical read model (the "Order Funnel & Allocati
 
 ## Status
 
+> **Superseded by ADR-0030** (the analytics "Envelope v1" with `schema_version` described here). Every Kafka message is now a
+> CloudEvents 1.0 event — see
+> [ADR 0030](./0030-cloudevents-mandatory-event-envelope.md). The rest of
+> this record stands.
+
 Accepted.
 
 ## Context

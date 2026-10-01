@@ -237,8 +237,9 @@ contract is documented at
 - **Separate topic:** `warehouse.order-management.analytics` — distinct from the
   integration topic, so widening the report's inputs never risks an integration
   consumer. A **new** analytics publisher emits the full report-input event set
-  under Envelope v1 (keyed by `order_id`); the integration publisher is
-  untouched. When `EVENT_PUBLISHER=kafka`, the OLTP binary fans out to both.
+  as CloudEvents 1.0 events (keyed by `order_id`, `dataschema`
+  `urn:warehouse:order-management:analytics:<Event>:v1` — see ADR 0030); the
+  integration publisher is untouched. When `EVENT_PUBLISHER=kafka`, the OLTP binary fans out to both.
 - **Separate analytical database:** its own `ANALYTICS_DATABASE_URL`, its own
   migrations in `migrations/analytics/`, and a **read-only role** for the reader.
 - **Three processes, one writer:**

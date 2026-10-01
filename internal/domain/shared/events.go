@@ -263,8 +263,8 @@ func NewOrderAllocationPartiallyFailed(occurredAt time.Time, orderID OrderId, al
 // identity, only a computed cutoff instant (see order.Promise's doc
 // comment), so an empty string here means "that basis had no CPT
 // identity", never "no promise existed". Reason names the
-// fulfillment-execution event_type that triggered the recompute —
-// "TaskCPTMissed" or "PackageManifested", verbatim — so a downstream
+// fulfillment-execution event that triggered the recompute —
+// "TaskCPTMissed" or "PackageManifested" (the event name) — so a downstream
 // reader can tell which kind of signal moved the promise without a
 // second lookup.
 type OrderRepromised struct {

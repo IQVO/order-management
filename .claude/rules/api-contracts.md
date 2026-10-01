@@ -77,12 +77,21 @@ is suitable for a real integration test or deployment.
 
 ## Kafka contract (`apis/asyncapi.yaml`, AsyncAPI 2.6.0 — Spectral-gated, `api-lint` CI job)
 
-Fleet envelope, NOT CloudEvents. Two envelope variants:
+**CloudEvents 1.0, mandatory, on every topic produced or consumed** (ADR-0030).
+Structured content mode; Kafka header
+`content-type: application/cloudevents+json; charset=UTF-8`. No flat
+envelope, no dual-read, no `schema_version`, no envelope toggle.
 
-- **Integration envelope** on `warehouse.order-management.events`:
-  `{event_id, event_type, occurred_at, source, data}`, unkeyed, at-least-once.
-- **Analytics envelope** on `warehouse.order-management.analytics`: adds
-  `schema_version: 1`, keyed by `OrderId`.
+- Required attributes: `specversion=1.0`, `id` (UUID minted once, persisted
+  in the outbox row), `source=/warehouse/order-management`,
+  `type=com.warehouse.wes.order-management.order.<EventName>`,
+  `subject=<order id>`, `time` (occurred-at, UTC),
+  `datacontenttype=application/json`,
+  `dataschema=urn:warehouse:order-management:<events|analytics>:<EventName>:v1`.
+- Both topics keyed by `OrderId` (Hash balancer), at-least-once.
+- Build/parse ONLY via `internal/adapters/kafka/cloudevents` (sdk-go
+  `event` package). Consumers dispatch on the FULL `type`, ignore unknown
+  types, dedupe on `id`, and DLQ/skip anything failing `cloudevents.Decode`.
 
 ### Channel: `warehouse.order-management.events` (integration)
 
@@ -101,33 +110,39 @@ Fleet envelope, NOT CloudEvents. Two envelope variants:
 - `subscribe` operationId `consumeFulfillmentEvents`. fulfillment-
   execution's shared/fan-out topic (the SAME one `labor-performance`
   already consumes for `TaskCompleted`); this context reacts ONLY to
-  `TaskCPTMissed` and `PackageManifested`, decoding its own independent
-  copy of that service's real wire shape — never a Go import.
+  `com.warehouse.wes.fulfillment-execution.task.TaskCPTMissed` and
+  `com.warehouse.wes.fulfillment-execution.package.PackageManifested`
+  (full CloudEvents `type`), decoding its own independent copy of that
+  service's payload — never a Go import. Non-CloudEvents messages go to
+  `<topic>.dlq`.
   `data.order_ref` on both is a `WorkUnitId`-shaped reference
   (`{orderId}-line-{lineNo}`), NOT a bare `OrderId` — parsed back via
   `usecases.ParseWorkUnitID`, the reverse of `WorkUnitID` below.
   Stable shared consumer group `order-management-repromise`, gated on
   `KAFKA_BROKERS` alone.
 
-### Local-cache consumers (NOT declared in `apis/asyncapi.yaml`)
+### Local-cache consumers (declared in `apis/asyncapi.yaml` as subscribe channels)
 
 Enabled only by `PATH_CATALOGUE_SOURCE=kafka` (default `none`); each uses
 its own per-process-unique consumer group and a full-replay readiness gate
 before `cmd/order` serves traffic:
 
 - `kafkacatalog` — `warehouse.process-path-management.events`,
-  `ProcessPathCreated`/`ProcessPathUpdated`/`ProcessPathDeactivated`
-  (ADR-0013).
-- `kafkacptschedule` — same topic, `CPTScheduleChanged` (ADR-0014).
+  `com.warehouse.wes.process-path-management.processpath.ProcessPathCreated`/
+  `...ProcessPathUpdated`/`...ProcessPathDeactivated` (ADR-0013).
+- `kafkacptschedule` — same topic,
+  `com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged`
+  (ADR-0014).
 - `kafkapathcapacity` — `warehouse.work-planning.events`,
-  `PathCapacityChanged` (ADR-0015).
+  `com.warehouse.wes.work-planning.workpool.PathCapacityChanged` (ADR-0015).
+- Non-CloudEvents messages are logged at WARN and skipped.
 
 ### Channel: `warehouse.order-management.analytics`
 
 - `publish` operationId `publishOrderAnalytics` (this service is the
   producer).
 - `subscribe` operationId `projectOrderAnalytics` (`cmd/order-projector` is
-  the sole consumer/writer — FirstOffset, idempotent on `event_id`).
+  the sole consumer/writer — FirstOffset, idempotent on the CloudEvents `id`).
 - Carries all 10 domain event types (see `domain-model.md`'s event
   table) as 10 distinct messages — `OrderRepromised` added by ADR-0019.
 

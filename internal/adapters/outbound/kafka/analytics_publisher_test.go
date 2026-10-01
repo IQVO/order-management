@@ -46,12 +46,9 @@ func orderOnPath(t *testing.T, id, path string) *order.Order {
 	return o
 }
 
-func decodeAnalytics(t *testing.T, raw []byte) (kafka.AnalyticsEnvelope, map[string]any) {
+func decodeAnalytics(t *testing.T, raw []byte) (envelope, map[string]any) {
 	t.Helper()
-	var env kafka.AnalyticsEnvelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		t.Fatalf("unmarshal envelope: %v", err)
-	}
+	env := decodeCE(t, raw)
 	var data map[string]any
 	if err := json.Unmarshal(env.Data, &data); err != nil {
 		t.Fatalf("unmarshal data: %v", err)
@@ -184,21 +181,25 @@ func assertAnalyticsEvent(t *testing.T, at time.Time, event shared.DomainEvent, 
 	}
 
 	env, data := decodeAnalytics(t, msg.Value)
-	if env.EventType != wantType {
-		t.Errorf("event_type = %q, want %q", env.EventType, wantType)
+	if env.Type != typeOf(wantType) {
+		t.Errorf("type = %q, want %q", env.Type, typeOf(wantType))
 	}
-	if env.EventID != "evt-fixed" {
-		t.Errorf("event_id = %q, want evt-fixed", env.EventID)
+	if env.ID != "evt-fixed" {
+		t.Errorf("id = %q, want evt-fixed", env.ID)
 	}
-	if env.Source != "order-management" {
-		t.Errorf("source = %q, want order-management", env.Source)
+	if env.Source != "/warehouse/order-management" {
+		t.Errorf("source = %q, want /warehouse/order-management", env.Source)
 	}
-	if env.SchemaVersion != 1 {
-		t.Errorf("schema_version = %d, want 1", env.SchemaVersion)
+	if env.Subject != wantKey {
+		t.Errorf("subject = %q, want %q", env.Subject, wantKey)
 	}
-	if !env.OccurredAt.Equal(at) {
-		t.Errorf("occurred_at = %v, want %v", env.OccurredAt, at)
+	if want := "urn:warehouse:order-management:analytics:" + wantType + ":v1"; env.DataSchema != want {
+		t.Errorf("dataschema = %q, want %q", env.DataSchema, want)
 	}
+	if !env.Time.Equal(at) {
+		t.Errorf("time = %v, want %v", env.Time, at)
+	}
+	assertContentTypeHeader(t, msg)
 	if data["path_id"] != wantPath {
 		t.Errorf("path_id = %v, want %q", data["path_id"], wantPath)
 	}
@@ -237,8 +238,8 @@ func TestAnalyticsPublisher_OrderRepromised(t *testing.T) {
 		t.Fatalf("expected 1 message, got %d", len(w.messages))
 	}
 	env, data := decodeAnalytics(t, w.messages[0].Value)
-	if env.EventType != "OrderRepromised" {
-		t.Errorf("event_type = %q, want OrderRepromised", env.EventType)
+	if env.Type != typeOf("OrderRepromised") {
+		t.Errorf("type = %q, want %q", env.Type, typeOf("OrderRepromised"))
 	}
 	if string(w.messages[0].Key) != "o1" {
 		t.Errorf("key = %q, want o1", string(w.messages[0].Key))
