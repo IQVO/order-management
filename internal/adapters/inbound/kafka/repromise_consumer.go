@@ -66,6 +66,22 @@ const RepromiseConsumerGroup = "order-management-repromise"
 // topic/group without touching production names.
 const dlqTopicSuffix = ".dlq"
 
+// newDLQWriter builds the dead-letter writer for topic. It MUST set
+// AllowAutoTopicCreation: the fleet creates every business topic on
+// first write (warehouse-infra kafka.tf, num.partitions=8) and a fresh
+// broker has no "<topic>.dlq" yet. Without the flag the first poison
+// message fails its DLQ publish with "[3] Unknown Topic Or Partition",
+// the offset is (correctly) not committed, and the consumer stops for
+// good -- observed live in wes-work-planning, where it halted the
+// whole order-to-work-unit flow.
+func newDLQWriter(brokers []string, topic string) *kafkago.Writer {
+	return &kafkago.Writer{
+		Addr:                   kafkago.TCP(brokers...),
+		Topic:                  topic + dlqTopicSuffix,
+		AllowAutoTopicCreation: true,
+	}
+}
+
 // maxHandlerAttempts bounds RepromiseOrder.Execute's in-process retry
 // (ADR-0025 §DLQ) before a message is dead-lettered: 1 initial attempt
 // plus up to 2 retries, matching the plan's "up to 3" bound.
@@ -159,10 +175,7 @@ func NewRepromiseConsumerForTopic(brokers []string, groupID, topic string, repro
 		}),
 		repromiseOrder: repromiseOrder,
 		logger:         logger,
-		dlqWriter: &kafkago.Writer{
-			Addr:  kafkago.TCP(brokers...),
-			Topic: topic + dlqTopicSuffix,
-		},
+		dlqWriter:      newDLQWriter(brokers, topic),
 	}
 }
 
