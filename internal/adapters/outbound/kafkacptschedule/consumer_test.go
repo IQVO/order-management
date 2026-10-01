@@ -3,10 +3,15 @@ package kafkacptschedule
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
+	ce "github.com/cloudevents/sdk-go/v2/event"
 	kafkago "github.com/segmentio/kafka-go"
+
+	"github.com/claudioed/order-management/internal/adapters/kafka/cloudevents"
 )
 
 type fakeReader struct {
@@ -26,18 +31,40 @@ func (r *fakeReader) ReadMessage(ctx context.Context) (kafkago.Message, error) {
 
 func (r *fakeReader) Close() error { return nil }
 
-func envelopeMsg(t *testing.T, partition int, offset int64, eventType string, data any) kafkago.Message {
+func envelopeMsg(t *testing.T, partition int, offset int64, ceType string, data any) kafkago.Message {
+	t.Helper()
+	e := ce.New(ce.CloudEventsVersionV1)
+	e.SetID(fmt.Sprintf("evt-%d-%d", partition, offset))
+	e.SetSource("/warehouse/process-path-management")
+	e.SetType(ceType)
+	e.SetSubject("subject-1")
+	e.SetTime(time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC))
+	if err := e.SetData("application/json", data); err != nil {
+		t.Fatalf("SetData: %v", err)
+	}
+	raw, err := json.Marshal(e)
+	if err != nil {
+		t.Fatalf("marshal CloudEvent: %v", err)
+	}
+	return kafkago.Message{Partition: partition, Offset: offset, Value: raw}
+}
+
+// legacyFlatMsg is the retired pre-CloudEvents flat envelope; the consumer
+// must reject it (never parse it) and keep going.
+func legacyFlatMsg(t *testing.T, partition int, offset int64, eventType string, data any) kafkago.Message {
 	t.Helper()
 	rawData, err := json.Marshal(data)
 	if err != nil {
 		t.Fatalf("marshal data: %v", err)
 	}
-	env := envelope{EventType: eventType, Data: rawData}
-	rawEnv, err := json.Marshal(env)
+	raw, err := json.Marshal(map[string]any{
+		"event_id": "legacy", "event_type": eventType, "occurred_at": time.Now(),
+		"source": "legacy", "data": json.RawMessage(rawData),
+	})
 	if err != nil {
-		t.Fatalf("marshal envelope: %v", err)
+		t.Fatalf("marshal flat: %v", err)
 	}
-	return kafkago.Message{Partition: partition, Offset: offset, Value: rawEnv}
+	return kafkago.Message{Partition: partition, Offset: offset, Value: raw}
 }
 
 func newTestConsumer(reader Reader, target targetOffsets) *Consumer {
@@ -63,7 +90,7 @@ func TestConsumer_NoTargetOffsets_IsReadyImmediately(t *testing.T) {
 func TestConsumer_AppliesCPTScheduleChanged(t *testing.T) {
 	reader := &fakeReader{
 		messages: []kafkago.Message{
-			envelopeMsg(t, 0, 0, eventTypeChanged, scheduleData{
+			envelopeMsg(t, 0, 0, ceTypeChanged, scheduleData{
 				SiteId:   "site-1",
 				Timezone: "UTC",
 				Cutoffs: []cutoffData{
@@ -103,11 +130,11 @@ func TestConsumer_NextCutoffs_UnknownSite(t *testing.T) {
 func TestConsumer_LaterCPTScheduleChangedReplacesEarlierSnapshot(t *testing.T) {
 	reader := &fakeReader{
 		messages: []kafkago.Message{
-			envelopeMsg(t, 0, 0, eventTypeChanged, scheduleData{
+			envelopeMsg(t, 0, 0, ceTypeChanged, scheduleData{
 				SiteId: "site-1", Timezone: "UTC",
 				Cutoffs: []cutoffData{{CptId: "old", LocalTime: "18:00"}},
 			}),
-			envelopeMsg(t, 0, 1, eventTypeChanged, scheduleData{
+			envelopeMsg(t, 0, 1, ceTypeChanged, scheduleData{
 				SiteId: "site-1", Timezone: "UTC",
 				Cutoffs: []cutoffData{{CptId: "new", LocalTime: "20:00"}},
 			}),
@@ -138,7 +165,7 @@ func TestConsumer_LaterCPTScheduleChangedReplacesEarlierSnapshot(t *testing.T) {
 func TestConsumer_UnknownEventType_IsIgnored(t *testing.T) {
 	reader := &fakeReader{
 		messages: []kafkago.Message{
-			envelopeMsg(t, 0, 0, "ProcessPathCreated", map[string]any{"path_id": "PICK"}),
+			envelopeMsg(t, 0, 0, "com.warehouse.wes.process-path-management.processpath.ProcessPathCreated", map[string]any{"path_id": "PICK"}),
 		},
 	}
 	c := newTestConsumer(reader, targetOffsets{0: 1})
@@ -149,5 +176,26 @@ func TestConsumer_UnknownEventType_IsIgnored(t *testing.T) {
 
 	if err := c.WaitReady(ctx); err != nil {
 		t.Fatalf("expected Ready before timeout even for an event type this consumer ignores, got: %v", err)
+	}
+}
+
+func TestConsumer_LegacyFlatEnvelope_RejectedAndSkipped(t *testing.T) {
+	c := newTestConsumer(&fakeReader{}, targetOffsets{})
+	err := c.handle(legacyFlatMsg(t, 0, 0, "CPTScheduleChanged", scheduleData{SiteId: "sp1", Timezone: "UTC"}))
+	if !errors.Is(err, cloudevents.ErrNotCloudEvent) {
+		t.Fatalf("err = %v, want ErrNotCloudEvent", err)
+	}
+	if _, ok := c.NextCutoffs("sp1", time.Now(), 1); ok {
+		t.Fatal("legacy flat message must not populate the schedule cache")
+	}
+}
+
+func TestConsumer_ShortTypeName_NotDispatched(t *testing.T) {
+	c := newTestConsumer(&fakeReader{}, targetOffsets{})
+	if err := c.handle(envelopeMsg(t, 0, 0, "CPTScheduleChanged", scheduleData{SiteId: "sp1", Timezone: "UTC"})); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if _, ok := c.NextCutoffs("sp1", time.Now(), 1); ok {
+		t.Fatal("a bare short type must not be dispatched")
 	}
 }

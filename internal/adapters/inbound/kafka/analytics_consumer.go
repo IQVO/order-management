@@ -1,12 +1,11 @@
 // Package kafka holds the inbound Kafka adapters. This file implements the
 // analytics projector's consumer: it reads the order-management analytics
 // topic and applies each report-moving event to the funnel ProjectionStore,
-// exactly once per event_id despite Kafka's at-least-once delivery (ADR-0006).
+// exactly once per CloudEvents id despite Kafka's at-least-once delivery (ADR-0006).
 package kafka
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -19,6 +18,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/claudioed/order-management/internal/adapters/kafka/cloudevents"
 	"github.com/claudioed/order-management/internal/analytics/report"
 )
 
@@ -31,7 +31,7 @@ const AnalyticsConsumerGroup = "order-management-analytics"
 const tracerName = "github.com/claudioed/order-management/internal/adapters/inbound/kafka"
 
 // ProcessedEvents is the consumer's idempotency gate: it records which
-// event_ids have been admitted, so an at-least-once redelivery is a no-op. It
+// CloudEvents ids have been admitted, so an at-least-once redelivery is a no-op. It
 // is declared here — where it is consumed — so the analytics side owns its own
 // port and the OLTP application layer stays untouched (ADR-0006). The Postgres
 // implementation lives in the analyticsstore outbound adapter.
@@ -41,18 +41,20 @@ type ProcessedEvents interface {
 	MarkProcessed(ctx context.Context, eventId string) (bool, error)
 }
 
-// analyticsEnvelope is the inbound decode shape of the Envelope v1 wrapper on
-// the analytics topic. The data payload is left as a RawMessage and decoded
-// per event_type. It is declared here (rather than imported from the outbound
-// publisher) so this inbound adapter does not depend on an outbound adapter.
-type analyticsEnvelope struct {
-	EventID       string          `json:"event_id"`
-	EventType     string          `json:"event_type"`
-	OccurredAt    time.Time       `json:"occurred_at"`
-	Source        string          `json:"source"`
-	SchemaVersion int             `json:"schema_version"`
-	Data          json.RawMessage `json:"data"`
-}
+// Full CloudEvents `type` strings of the analytics events this projector
+// consumes (its own service's events, entity `order`).
+const (
+	ceTypeOrderReceived                  = "com.warehouse.wes.order-management.order.OrderReceived"
+	ceTypeOrderAllocated                 = "com.warehouse.wes.order-management.order.OrderAllocated"
+	ceTypeOrderPartiallyAllocated        = "com.warehouse.wes.order-management.order.OrderPartiallyAllocated"
+	ceTypeOrderAllocationPartiallyFailed = "com.warehouse.wes.order-management.order.OrderAllocationPartiallyFailed"
+	ceTypeOrderReleased                  = "com.warehouse.wes.order-management.order.OrderReleased"
+	ceTypeOrderCancelled                 = "com.warehouse.wes.order-management.order.OrderCancelled"
+	ceTypeOrderLineAllocated             = "com.warehouse.wes.order-management.order.OrderLineAllocated"
+	ceTypeOrderLineBackordered           = "com.warehouse.wes.order-management.order.OrderLineBackordered"
+	ceTypeOrderLineReleased              = "com.warehouse.wes.order-management.order.OrderLineReleased"
+	ceTypeOrderRepromised                = "com.warehouse.wes.order-management.order.OrderRepromised"
+)
 
 // analyticsData is the union of fields the projecting event payloads carry.
 // Every report-moving event carries path_id (enriched by the publisher); the
@@ -75,7 +77,7 @@ type analyticsData struct {
 }
 
 // AnalyticsConsumer reads analytics events off the analytics topic and applies
-// each to the funnel ProjectionStore, exactly once per event_id.
+// each to the funnel ProjectionStore, exactly once per CloudEvents id.
 type AnalyticsConsumer struct {
 	Reader     *kafkago.Reader
 	Projection report.ProjectionStore
@@ -119,6 +121,11 @@ func (c *AnalyticsConsumer) Run(ctx context.Context) error {
 			return err
 		}
 		if err := c.Handle(ctx, msg); err != nil {
+			if errors.Is(err, cloudevents.ErrNotCloudEvent) {
+				c.Logger.WarnContext(ctx, "skipping non-CloudEvents analytics message",
+					"topic", msg.Topic, "partition", msg.Partition, "offset", msg.Offset, "error", err)
+				continue
+			}
 			c.Logger.ErrorContext(ctx, "analytics message handling failed", "error", err)
 		}
 	}
@@ -155,26 +162,29 @@ func (c *AnalyticsConsumer) Handle(ctx context.Context, msg kafkago.Message) err
 	return nil
 }
 
-// HandleMessage decodes raw as an analyticsEnvelope and applies the matching
-// projection method for its event_type. Event types outside the projection
-// contract are ignored (and not marked processed). For a projecting event it
-// dedupes on event_id via ProcessedEvents before applying, so a redelivery is
-// a no-op. It is exported separately from Run so tests can feed raw envelopes
-// without a live broker.
+// HandleMessage decodes raw as a CloudEvents 1.0 event and applies the
+// matching projection method for its full `type`. A message that is not a
+// valid CloudEvent (including the retired flat envelope) returns an error
+// wrapping cloudevents.ErrNotCloudEvent — Run logs it at WARN and moves on;
+// it is never parsed any other way. Types outside the projection contract
+// are ignored (and not marked processed). For a projecting event it dedupes
+// on the CloudEvents `id` via ProcessedEvents before applying, so a
+// redelivery is a no-op. `time` is the event's occurred-at. It is exported
+// separately from Run so tests can feed raw events without a live broker.
 func (c *AnalyticsConsumer) HandleMessage(ctx context.Context, raw []byte) error {
-	var env analyticsEnvelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return fmt.Errorf("analytics: decode envelope: %w", err)
+	e, err := cloudevents.Decode(raw)
+	if err != nil {
+		return fmt.Errorf("analytics: %w", err)
 	}
 
 	// Only the funnel-moving events project. Every other analytics event type
 	// is acknowledged without touching the read model or the processed set, so
 	// a later contract change could reprocess it.
-	if !isProjecting(env.EventType) {
+	if !isProjecting(e.Type()) {
 		return nil
 	}
 
-	isNew, err := c.Processed.MarkProcessed(ctx, env.EventID)
+	isNew, err := c.Processed.MarkProcessed(ctx, e.ID())
 	if err != nil {
 		return fmt.Errorf("analytics: mark processed: %w", err)
 	}
@@ -183,20 +193,20 @@ func (c *AnalyticsConsumer) HandleMessage(ctx context.Context, raw []byte) error
 	}
 
 	var data analyticsData
-	if err := json.Unmarshal(env.Data, &data); err != nil {
+	if err := e.DataAs(&data); err != nil {
 		return fmt.Errorf("analytics: decode data: %w", err)
 	}
 
-	return c.apply(ctx, env.EventType, env.EventID, data, env.OccurredAt)
+	return c.apply(ctx, e.Type(), e.ID(), data, e.Time())
 }
 
-// isProjecting reports whether eventType moves a funnel counter.
-func isProjecting(eventType string) bool {
-	switch eventType {
-	case "OrderReceived", "OrderAllocated", "OrderPartiallyAllocated",
-		"OrderAllocationPartiallyFailed", "OrderReleased", "OrderCancelled",
-		"OrderLineAllocated", "OrderLineBackordered", "OrderLineReleased",
-		"OrderRepromised":
+// isProjecting reports whether ceType moves a funnel counter.
+func isProjecting(ceType string) bool {
+	switch ceType {
+	case ceTypeOrderReceived, ceTypeOrderAllocated, ceTypeOrderPartiallyAllocated,
+		ceTypeOrderAllocationPartiallyFailed, ceTypeOrderReleased, ceTypeOrderCancelled,
+		ceTypeOrderLineAllocated, ceTypeOrderLineBackordered, ceTypeOrderLineReleased,
+		ceTypeOrderRepromised:
 		return true
 	default:
 		return false
@@ -209,27 +219,27 @@ func isProjecting(eventType string) bool {
 // applied in the SAME call as the funnel counter — see
 // report.ProjectionStore.ApplyOrderAllocated's doc comment for why.
 // OrderRepromised (ADR 0018) routes to the path_id-free counter.
-func (c *AnalyticsConsumer) apply(ctx context.Context, eventType, eventID string, data analyticsData, at time.Time) error {
-	switch eventType {
-	case "OrderReceived":
+func (c *AnalyticsConsumer) apply(ctx context.Context, ceType, eventID string, data analyticsData, at time.Time) error {
+	switch ceType {
+	case ceTypeOrderReceived:
 		return c.Projection.ApplyOrderReceived(ctx, eventID, data.PathID, at)
-	case "OrderAllocated":
+	case ceTypeOrderAllocated:
 		return c.Projection.ApplyOrderAllocated(ctx, eventID, data.PathID, at, data.PromiseBasis, data.PromiseCutoffAt, data.SplitShipment)
-	case "OrderPartiallyAllocated":
+	case ceTypeOrderPartiallyAllocated:
 		return c.Projection.ApplyOrderPartiallyAllocated(ctx, eventID, data.PathID, at, data.PromiseBasis, data.PromiseCutoffAt, data.SplitShipment)
-	case "OrderAllocationPartiallyFailed":
+	case ceTypeOrderAllocationPartiallyFailed:
 		return c.Projection.ApplyOrderAllocationFailed(ctx, eventID, data.PathID, at)
-	case "OrderReleased":
+	case ceTypeOrderReleased:
 		return c.Projection.ApplyOrderReleased(ctx, eventID, data.PathID, at)
-	case "OrderCancelled":
+	case ceTypeOrderCancelled:
 		return c.Projection.ApplyOrderCancelled(ctx, eventID, data.PathID, at)
-	case "OrderLineAllocated":
+	case ceTypeOrderLineAllocated:
 		return c.Projection.ApplyLineAllocated(ctx, eventID, data.PathID, at)
-	case "OrderLineBackordered":
+	case ceTypeOrderLineBackordered:
 		return c.Projection.ApplyLineBackordered(ctx, eventID, data.PathID, at)
-	case "OrderLineReleased":
+	case ceTypeOrderLineReleased:
 		return c.Projection.ApplyLineReleased(ctx, eventID, data.PathID, at)
-	case "OrderRepromised":
+	case ceTypeOrderRepromised:
 		return c.Projection.ApplyOrderRepromised(ctx, eventID, at)
 	default:
 		return nil

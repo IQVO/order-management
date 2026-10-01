@@ -4,6 +4,7 @@ package kafkacatalog
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -47,10 +48,10 @@ func TestTwoIndependentConsumers_SameTopic_BothReplayCorrectly(t *testing.T) {
 	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false}
 	if err := writer.WriteMessages(ctx,
 		kafkago.Message{
-			Value: []byte(`{"event_type":"ProcessPathCreated","data":{"path_id":"TWOTEST","match_prefix":"twotest","cycle_time_p95":"45m0s","eligibility":{"max_units_per_line":1}}}`),
+			Value: envelopeMsg(t, 0, 0, "com.warehouse.wes.process-path-management.processpath.ProcessPathCreated", json.RawMessage(`{"path_id":"TWOTEST","match_prefix":"twotest","cycle_time_p95":"45m0s","eligibility":{"max_units_per_line":1}}`)).Value,
 		},
 		kafkago.Message{
-			Value: []byte(`{"event_type":"CPTScheduleChanged","data":{"site_id":"two-site","timezone":"UTC","cutoffs":[{"cpt_id":"sp1-1800","local_time":"18:00","eligible_path_ids":["twotest"]}]}}`),
+			Value: envelopeMsg(t, 0, 0, "com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged", json.RawMessage(`{"site_id":"two-site","timezone":"UTC","cutoffs":[{"cpt_id":"sp1-1800","local_time":"18:00","eligible_path_ids":["twotest"]}]}`)).Value,
 		},
 	); err != nil {
 		t.Fatalf("seed publish: %v", err)

@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	kafkago "github.com/segmentio/kafka-go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/claudioed/order-management/internal/adapters/kafka/cloudevents"
 	"github.com/claudioed/order-management/internal/application/ports"
 	"github.com/claudioed/order-management/internal/domain/order"
 	"github.com/claudioed/order-management/internal/domain/shared"
@@ -24,28 +26,13 @@ import (
 // integration topic (warehouse.order-management.events) exactly.
 const AnalyticsTopic = "warehouse.order-management.analytics"
 
-// analyticsSchemaVersion is the schema version stamped onto every analytics
-// envelope this publisher emits.
-const analyticsSchemaVersion = 1
-
 // analyticsSpanName is the producer span name for an analytics publish.
 const analyticsSpanName = "kafka.publish " + AnalyticsTopic
 
-// AnalyticsEnvelope is the shared Envelope v1 wrapper for the analytics
-// stream. Unlike the integration envelope it carries the payload as a
-// json.RawMessage so a single publisher can emit the event_type-specific
-// data object for every domain event without a bespoke struct per type.
-type AnalyticsEnvelope struct {
-	EventID       string          `json:"event_id"`
-	EventType     string          `json:"event_type"`
-	OccurredAt    time.Time       `json:"occurred_at"`
-	Source        string          `json:"source"`
-	SchemaVersion int             `json:"schema_version"`
-	Data          json.RawMessage `json:"data"`
-}
-
 // AnalyticsPublisher publishes each order-management domain event onto
-// AnalyticsTopic as an AnalyticsEnvelope. It satisfies ports.EventPublisher
+// AnalyticsTopic as a CloudEvents 1.0 event (same `type` as the
+// integration occurrence, `dataschema`
+// urn:warehouse:order-management:analytics:<EventName>:v1). It satisfies ports.EventPublisher
 // and is a SEPARATE adapter from Publisher: the integration publisher
 // (publisher.go) forwards only OrderAllocated/OrderPartiallyAllocated and is
 // left untouched.
@@ -66,7 +53,7 @@ type AnalyticsPublisher struct {
 
 // NewAnalyticsPublisher constructs an AnalyticsPublisher writing to
 // AnalyticsTopic on brokers. orders enriches events with their process path;
-// newID mints the envelope event_id.
+// newID mints the CloudEvents `id`.
 //
 // Balancer is kafkago.Hash, matching Publisher's NewWriterForTopic choice
 // (see its doc comment): this publisher already keys every message by
@@ -91,7 +78,7 @@ func NewAnalyticsPublisher(brokers []string, orders ports.OrderRepo, newID func(
 // (an unrecognised type) is skipped rather than erroring, so the caller can
 // hand it the full event stream indiscriminately.
 func (p *AnalyticsPublisher) Publish(ctx context.Context, event shared.DomainEvent) error {
-	eventType, key, payload, ok, err := p.buildEnvelope(ctx, event)
+	eventType, key, payload, ok, err := p.buildEvent(ctx, event)
 	if err != nil || !ok {
 		return err
 	}
@@ -105,45 +92,47 @@ func (p *AnalyticsPublisher) Publish(ctx context.Context, event shared.DomainEve
 // the injected trace headers carry whatever span is already active on
 // ctx.
 func (p *AnalyticsPublisher) Encode(ctx context.Context, event shared.DomainEvent) (Encoded, bool, error) {
-	eventType, key, payload, ok, err := p.buildEnvelope(ctx, event)
+	eventType, key, payload, ok, err := p.buildEvent(ctx, event)
 	if err != nil || !ok {
 		return Encoded{}, ok, err
 	}
-	headers := []kafkago.Header{}
+	headers := []kafkago.Header{cloudevents.ContentTypeHeader()}
 	otel.GetTextMapPropagator().Inject(ctx, headerCarrier{headers: &headers})
 	return Encoded{Topic: AnalyticsTopic, EventType: eventType, Key: []byte(key), Value: payload, Headers: headers}, true, nil
 }
 
-// buildEnvelope maps event onto its analytics envelope and marshals it,
-// without touching tracing or the broker. ok is false for an event type
+// buildEvent maps event onto its analytics CloudEvent and marshals it,
+// without touching tracing or the broker. eventType is the full CloudEvents
+// `type`; key (= `subject`) is the OrderId. ok is false for an event type
 // outside the analytics contract (see marshalData), matching this
 // publisher's existing "skip, don't error" convention.
-func (p *AnalyticsPublisher) buildEnvelope(ctx context.Context, event shared.DomainEvent) (eventType, key string, payload []byte, ok bool, err error) {
-	eventType, key, data, ok := p.marshalData(ctx, event)
+func (p *AnalyticsPublisher) buildEvent(ctx context.Context, event shared.DomainEvent) (eventType, key string, payload []byte, ok bool, err error) {
+	eventName, key, data, ok := p.marshalData(ctx, event)
 	if !ok {
 		return "", "", nil, false, nil
 	}
-	env := AnalyticsEnvelope{
-		EventID:       p.newID(),
-		EventType:     eventType,
-		OccurredAt:    event.OccurredAt(),
-		Source:        Source,
-		SchemaVersion: analyticsSchemaVersion,
-		Data:          data,
-	}
-	payload, err = json.Marshal(env)
+	payload, err = cloudevents.New(cloudevents.Spec{
+		ID:        p.newID(),
+		Entity:    entityOrder,
+		EventName: eventName,
+		Subject:   key,
+		Time:      event.OccurredAt(),
+		Stream:    cloudevents.StreamAnalytics,
+		Version:   dataSchemaVersion,
+		Data:      data,
+	})
 	if err != nil {
-		return "", "", nil, false, fmt.Errorf("kafka: marshal analytics envelope: %w", err)
+		return "", "", nil, false, fmt.Errorf("kafka: build analytics event: %w", err)
 	}
-	return eventType, key, payload, true, nil
+	return cloudevents.Type(entityOrder, eventName), key, payload, true, nil
 }
 
-// newID mints an envelope event id, defaulting to a fixed sentinel only when
-// no generator was injected (which never happens in wiring, but keeps the
-// zero value usable in a test).
+// newID mints the CloudEvents id, falling back to a random UUID when no
+// generator was injected (wiring always injects uuid.NewString; the
+// fallback keeps the zero value usable in a test).
 func (p *AnalyticsPublisher) newID() string {
 	if p.NewID == nil {
-		return ""
+		return uuid.NewString()
 	}
 	return p.NewID()
 }
@@ -200,7 +189,7 @@ func (p *AnalyticsPublisher) firstReleasedLinePath(ctx context.Context, orderID 
 	return p.orderPath(ctx, orderID)
 }
 
-// marshalData maps a domain event to its analytics event_type, aggregate-id
+// marshalData maps a domain event to its event name, aggregate-id
 // message key (the OrderId), and snake_case JSON payload (which always carries
 // the enriched path_id). The bool return is false for an event type outside
 // the analytics contract, so Publish can skip it.
@@ -322,7 +311,7 @@ func mustMarshal(v any) json.RawMessage {
 	return b
 }
 
-// write publishes one already-marshalled envelope inside a producer span,
+// write publishes one already-marshalled CloudEvent inside a producer span,
 // injecting that span's context into the message headers so the projector's
 // consume span becomes its child.
 func (p *AnalyticsPublisher) write(ctx context.Context, eventType, key string, payload []byte) error {
@@ -332,11 +321,12 @@ func (p *AnalyticsPublisher) write(ctx context.Context, eventType, key string, p
 			semconv.MessagingSystemKafka,
 			semconv.MessagingDestinationName(AnalyticsTopic),
 			semconv.MessagingOperationName("publish"),
+			semconv.CloudEventsEventType(eventType),
 		),
 	)
 	defer span.End()
 
-	headers := []kafkago.Header{}
+	headers := []kafkago.Header{cloudevents.ContentTypeHeader()}
 	otel.GetTextMapPropagator().Inject(ctx, headerCarrier{headers: &headers})
 
 	msg := kafkago.Message{Key: []byte(key), Value: payload, Headers: headers}

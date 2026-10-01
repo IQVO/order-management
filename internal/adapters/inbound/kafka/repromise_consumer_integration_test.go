@@ -4,7 +4,6 @@ package kafka_test
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -151,32 +150,29 @@ func TestRepromiseConsumer_RealTaskCPTMissedMessage_DrivesRepromiseOrder(t *test
 	}
 }
 
-// mustTaskCPTMissedEnvelopeJSON builds fulfillment-execution's real,
-// shipped TaskCPTMissed wire envelope (ADR 0025 §7), verbatim, with
-// orderRef as data.order_ref.
+// mustTaskCPTMissedEnvelopeJSON builds fulfillment-execution's real
+// TaskCPTMissed wire message — a CloudEvents 1.0 structured-mode event —
+// with orderRef as data.order_ref and a fresh id.
 func mustTaskCPTMissedEnvelopeJSON(t *testing.T, orderRef string) []byte {
 	t.Helper()
-	data, err := json.Marshal(map[string]any{
+	return mustTaskCPTMissedEnvelopeJSONWithEventID(t, fmt.Sprintf("evt-%d", time.Now().UnixNano()), orderRef)
+}
+
+// mustTaskCPTMissedEnvelopeJSONWithEventID is mustTaskCPTMissedEnvelopeJSON
+// with an explicit CloudEvents id.
+func mustTaskCPTMissedEnvelopeJSONWithEventID(t *testing.T, eventID, orderRef string) []byte {
+	t.Helper()
+	return ceEvent(t, ceSpec{
+		id: eventID, source: "/warehouse/fulfillment-execution",
+		ceType:  "com.warehouse.wes.fulfillment-execution.task.TaskCPTMissed",
+		subject: "task-itest-1", at: time.Now().UTC(),
+		dataschema: "urn:warehouse:fulfillment-execution:events:TaskCPTMissed:v1",
+	}, map[string]any{
 		"task_id":   "task-itest-1",
 		"order_ref": orderRef,
 		"task_type": "PICK",
 		"cpt":       time.Now().UTC().Format(time.RFC3339),
 	})
-	if err != nil {
-		t.Fatalf("marshal data: %v", err)
-	}
-	env := map[string]any{
-		"event_id":    fmt.Sprintf("evt-%d", time.Now().UnixNano()),
-		"event_type":  "TaskCPTMissed",
-		"occurred_at": time.Now().UTC().Format(time.RFC3339),
-		"source":      "fulfillment-execution",
-		"data":        json.RawMessage(data),
-	}
-	b, err := json.Marshal(env)
-	if err != nil {
-		t.Fatalf("marshal envelope: %v", err)
-	}
-	return b
 }
 
 func waitForRepromise(t *testing.T, ctx context.Context, orders *memory.OrderRepo, orderID shared.OrderId, originalCutoff time.Time) {
@@ -223,21 +219,16 @@ func createRepromiseTopic(t *testing.T, ctx context.Context, brokers []string, t
 	t.Fatalf("Kafka topic %q never became ready", topic)
 }
 
-// TestRepromiseConsumer_DualShapeSameEventId_FiresRepromiseExactlyOnce
-// is the ADR-0027 / ADR-0021 Phase 2 Task 2e dual-write-safety
-// regression: during the eventual dual-write bake period, ONE domain
-// TaskCPTMissed event produces TWO physical Kafka messages on the same
-// topic/key (same event_id/id) -- a flat-shaped one and a CloudEvents-
-// shaped one. RepromiseOrder's own event_id idempotency gate
-// (ports.RepromiseProcessedEvents.MarkProcessed) must make the SECOND
-// physical message a no-op, so the use case fires exactly once
-// regardless of which physical shape the consumer decodes first.
-func TestRepromiseConsumer_DualShapeSameEventId_FiresRepromiseExactlyOnce(t *testing.T) {
+// TestRepromiseConsumer_RedeliveredSameCloudEventsId_FiresRepromiseExactlyOnce
+// proves the consumer dedupes on the CloudEvents `id`: two physical
+// messages carrying the SAME id (an at-least-once redelivery, or an
+// outbox relay re-send) drive RepromiseOrder exactly once.
+func TestRepromiseConsumer_RedeliveredSameCloudEventsId_FiresRepromiseExactlyOnce(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
 	container, err := tckafka.Run(ctx, "confluentinc/confluent-local:7.6.1",
-		tckafka.WithClusterID(fmt.Sprintf("om-repromise-dualshape-%d", time.Now().UnixNano())))
+		tckafka.WithClusterID(fmt.Sprintf("om-repromise-redelivery-%d", time.Now().UnixNano())))
 	if err != nil {
 		t.Fatalf("start Kafka container: %v", err)
 	}
@@ -251,7 +242,7 @@ func TestRepromiseConsumer_DualShapeSameEventId_FiresRepromiseExactlyOnce(t *tes
 	if err != nil {
 		t.Fatalf("resolve Kafka brokers: %v", err)
 	}
-	topic := fmt.Sprintf("warehouse.fulfillment.events.dualshape-itest-%d", time.Now().UnixNano())
+	topic := fmt.Sprintf("warehouse.fulfillment.events.redelivery-itest-%d", time.Now().UnixNano())
 	createRepromiseTopic(t, ctx, brokers, topic)
 
 	orders := memory.NewOrderRepo()
@@ -259,7 +250,7 @@ func TestRepromiseConsumer_DualShapeSameEventId_FiresRepromiseExactlyOnce(t *tes
 	if err != nil {
 		t.Fatalf("NewOrderLine: %v", err)
 	}
-	orderID := shared.OrderId(fmt.Sprintf("ord-dualshape-%d", time.Now().UnixNano()))
+	orderID := shared.OrderId(fmt.Sprintf("ord-redelivery-%d", time.Now().UnixNano()))
 	o, err := order.New(orderID, []*order.OrderLine{l}, false)
 	if err != nil {
 		t.Fatalf("order.New: %v", err)
@@ -289,7 +280,7 @@ func TestRepromiseConsumer_DualShapeSameEventId_FiresRepromiseExactlyOnce(t *tes
 
 	consumer := inboundkafka.NewRepromiseConsumerForTopic(
 		brokers,
-		fmt.Sprintf("order-management-repromise-dualshape-itest-%d", time.Now().UnixNano()),
+		fmt.Sprintf("order-management-repromise-redelivery-itest-%d", time.Now().UnixNano()),
 		topic,
 		repromiseOrder,
 		nil,
@@ -301,45 +292,16 @@ func TestRepromiseConsumer_DualShapeSameEventId_FiresRepromiseExactlyOnce(t *tes
 	go func() { runErr <- consumer.Run(consumeCtx) }()
 
 	orderRef := usecases.WorkUnitID(orderID, 1)
-	eventID := fmt.Sprintf("evt-dualshape-%d", time.Now().UnixNano()) // SAME event_id/id on both physical messages
-	cpt := time.Now().UTC().Format(time.RFC3339)
-
-	flatData, err := json.Marshal(map[string]any{
-		"task_id": "task-dualshape-1", "order_ref": orderRef, "task_type": "PICK", "cpt": cpt,
-	})
-	if err != nil {
-		t.Fatalf("marshal flat data: %v", err)
-	}
-	flatValue, err := json.Marshal(map[string]any{
-		"event_id": eventID, "event_type": "TaskCPTMissed", "occurred_at": cpt,
-		"source": "fulfillment-execution", "data": json.RawMessage(flatData),
-	})
-	if err != nil {
-		t.Fatalf("marshal flat envelope: %v", err)
-	}
-	ceData, err := json.Marshal(map[string]any{
-		"task_id": "task-dualshape-1", "order_ref": orderRef, "task_type": "PICK", "cpt": cpt,
-	})
-	if err != nil {
-		t.Fatalf("marshal CloudEvents data: %v", err)
-	}
-	ceValue, err := json.Marshal(map[string]any{
-		"specversion": "1.0", "id": eventID,
-		"type":   "com.warehouse.wes.fulfillment-execution.task.TaskCPTMissed",
-		"source": "/warehouse/fulfillment-execution", "subject": "task-dualshape-1",
-		"time": cpt, "datacontenttype": "application/json", "data": json.RawMessage(ceData),
-	})
-	if err != nil {
-		t.Fatalf("marshal CloudEvents envelope: %v", err)
-	}
+	eventID := fmt.Sprintf("evt-redelivered-%d", time.Now().UnixNano()) // SAME CloudEvents id on both physical messages
+	value := mustTaskCPTMissedEnvelopeJSONWithEventID(t, eventID, orderRef)
 
 	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic}
 	defer func() { _ = writer.Close() }()
 	if err := writer.WriteMessages(ctx,
-		kafkago.Message{Key: []byte(eventID), Value: flatValue},
-		kafkago.Message{Key: []byte(eventID), Value: ceValue},
+		kafkago.Message{Key: []byte(eventID), Value: value},
+		kafkago.Message{Key: []byte(eventID), Value: value},
 	); err != nil {
-		t.Fatalf("publish dual-shape TaskCPTMissed pair: %v", err)
+		t.Fatalf("publish redelivered TaskCPTMissed pair: %v", err)
 	}
 
 	waitForRepromise(t, ctx, orders, orderID, originalCutoff)
@@ -359,7 +321,7 @@ func TestRepromiseConsumer_DualShapeSameEventId_FiresRepromiseExactlyOnce(t *tes
 	}
 
 	if len(events.events) != 1 {
-		t.Fatalf("published events = %d, want exactly 1 -- the use case's event_id idempotency gate must dedupe the second physical (dual-write) message", len(events.events))
+		t.Fatalf("published events = %d, want exactly 1 -- the use case's CloudEvents-id idempotency gate must dedupe the redelivered message", len(events.events))
 	}
 	repromised, ok := events.events[0].(shared.OrderRepromised)
 	if !ok {

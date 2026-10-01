@@ -23,8 +23,8 @@
 //     by making every NewConsumer call use a unique, process-scoped
 //     group id — never a shared name.
 //
-// This consumer filters strictly for event_type == "PathCapacityChanged"
-// on this topic — wes-work-planning publishes other event types on the
+// This consumer filters strictly for the full CloudEvents type
+// com.warehouse.wes.work-planning.workpool.PathCapacityChanged on this topic — wes-work-planning publishes other event types on the
 // same topic (ShiftPlanCommitted, WorkUnitCreated, etc.) that this
 // service has no interest in and ignores, the same fan-out-topic
 // convention kafkacatalog/kafkacptschedule already established for
@@ -42,16 +42,16 @@ package kafkapathcapacity
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
 	kafkago "github.com/segmentio/kafka-go"
 
+	"github.com/claudioed/order-management/internal/adapters/kafka/cloudevents"
 	"github.com/claudioed/order-management/internal/domain/shared"
 )
 
@@ -66,88 +66,10 @@ const Topic = "warehouse.work-planning.events"
 // correctness requirement here, not a cosmetic choice.
 const consumerGroupPrefix = "order-management-path-capacity"
 
-// eventTypeChanged is the one event type this consumer acts on.
-const eventTypeChanged = "PathCapacityChanged"
-
-// cloudEventsTypePathCapacityChanged is the exact reverse-DNS `type`
-// string wes-work-planning's asyncapi.yaml specifies for
-// PathCapacityChanged (ADR-0018, ADR-0021 dual-read migration). Read
-// directly from apis/asyncapi.yaml — do not re-derive the middle
-// segment.
-const cloudEventsTypePathCapacityChanged = "com.warehouse.wes.work-planning.workpool.PathCapacityChanged"
-
-// envelope is the CloudEvents-like wrapper shared across every
-// warehouse-systems publisher.
-type envelope struct {
-	EventType string          `json:"event_type"`
-	Data      json.RawMessage `json:"data"`
-}
-
-// specversionProbe is a minimal decode used purely to discriminate the
-// flat envelope from a CloudEvents 1.0 structured envelope (ADR-0021
-// Phase 2 Task 2b): a CloudEvents message carries a non-empty
-// `specversion` key that the flat envelope never has.
-type specversionProbe struct {
-	Specversion string `json:"specversion"`
-}
-
-// cloudEventsEnvelope is the CloudEvents 1.0 structured envelope shape
-// wes-work-planning's asyncapi.yaml documents for this topic. `type` is
-// the reverse-DNS event type string; `data` is byte-identical to the
-// flat envelope's `data`.
-type cloudEventsEnvelope struct {
-	Specversion string          `json:"specversion"`
-	Type        string          `json:"type"`
-	Data        json.RawMessage `json:"data"`
-}
-
-// bareEventType strips a CloudEvents reverse-DNS type string back to
-// the bare event name the existing switch/case logic keys on (e.g.
-// "com.warehouse.wes.work-planning.workpool.PathCapacityChanged" ->
-// "PathCapacityChanged"). Returns the input unchanged if it contains no
-// dot, so a malformed/unexpected type string fails soft downstream
-// (falls into the "unrecognized event type" default branch) rather than
-// panicking here.
-func bareEventType(ceType string) string {
-	if idx := strings.LastIndex(ceType, "."); idx >= 0 && idx+1 < len(ceType) {
-		return ceType[idx+1:]
-	}
-	return ceType
-}
-
-// decodeEnvelope normalizes either wire shape (today's flat envelope, or
-// a CloudEvents 1.0 structured envelope, per ADR-0021 Phase 2 Task 2b)
-// into this consumer's existing internal envelope representation, so
-// the unchanged handle/switch logic below never needs to know which
-// shape arrived on the wire. specversion's presence is the sole
-// discriminator (see ADR-0021's decision section) — never inferred from
-// any other field.
-func decodeEnvelope(raw []byte) (envelope, error) {
-	var probe specversionProbe
-	if err := json.Unmarshal(raw, &probe); err != nil {
-		return envelope{}, fmt.Errorf("kafkapathcapacity: probe specversion: %w", err)
-	}
-	if probe.Specversion == "" {
-		// Flat envelope path (today's shape, unchanged).
-		var flat envelope
-		if err := json.Unmarshal(raw, &flat); err != nil {
-			return envelope{}, fmt.Errorf("kafkapathcapacity: unmarshal envelope: %w", err)
-		}
-		return flat, nil
-	}
-	if probe.Specversion != "1.0" {
-		// Malformed/unrecognized specversion: fail soft, mirroring
-		// this consumer's existing malformed-message handling
-		// posture (handle() logs and skips rather than wedging the
-		// Run loop).
-		return envelope{}, fmt.Errorf("kafkapathcapacity: unrecognized CloudEvents specversion %q", probe.Specversion)
-	}
-	var ce cloudEventsEnvelope
-	if err := json.Unmarshal(raw, &ce); err != nil {
-		return envelope{}, fmt.Errorf("kafkapathcapacity: unmarshal CloudEvents envelope: %w", err)
-	}
-	return envelope{EventType: bareEventType(ce.Type), Data: ce.Data}, nil
-}
+// ceTypeChanged is the one full CloudEvents `type` this consumer acts on,
+// byte-for-byte as wes-work-planning publishes it (fleet standard §4
+// cross-service table). Dispatch is on the FULL string, never a short name.
+const ceTypeChanged = "com.warehouse.wes.work-planning.workpool.PathCapacityChanged"
 
 // capacityData is the wire payload shape for PathCapacityChanged,
 // decoded verbatim from wes-work-planning's publisher (its own
@@ -404,8 +326,15 @@ func (c *Consumer) Run(ctx context.Context) error {
 			return err
 		}
 		if err := c.handle(msg); err != nil {
-			c.Logger.ErrorContext(ctx, "path capacity message handling failed",
-				"topic", msg.Topic, "offset", msg.Offset, "partition", msg.Partition, "error", err)
+			if errors.Is(err, cloudevents.ErrNotCloudEvent) {
+				// Not a CloudEvents 1.0 event (e.g. the retired flat
+				// envelope): skip past it, never parse another shape.
+				c.Logger.WarnContext(ctx, "skipping non-CloudEvents message",
+					"topic", msg.Topic, "offset", msg.Offset, "partition", msg.Partition, "error", err)
+			} else {
+				c.Logger.ErrorContext(ctx, "path capacity message handling failed",
+					"topic", msg.Topic, "offset", msg.Offset, "partition", msg.Partition, "error", err)
+			}
 		}
 		c.checkReady(msg)
 	}
@@ -433,23 +362,28 @@ func (c *Consumer) checkReady(msg kafkago.Message) {
 	}
 }
 
+// handle decodes msg as a CloudEvents 1.0 event and applies it. A
+// non-CloudEvents message returns an error wrapping
+// cloudevents.ErrNotCloudEvent (Run logs it at WARN and moves on). Each
+// PathCapacityChanged is a last-write-wins observation for its
+// (path, cutoff) key, so re-applying the same event is idempotent.
 func (c *Consumer) handle(msg kafkago.Message) error {
-	env, err := decodeEnvelope(msg.Value)
+	e, err := cloudevents.Decode(msg.Value)
 	if err != nil {
-		return fmt.Errorf("kafkapathcapacity: decode envelope: %w", err)
+		return fmt.Errorf("kafkapathcapacity: %w", err)
 	}
 
-	switch env.EventType {
-	case eventTypeChanged:
+	switch e.Type() {
+	case ceTypeChanged:
 		var data capacityData
-		if err := json.Unmarshal(env.Data, &data); err != nil {
-			return fmt.Errorf("kafkapathcapacity: unmarshal %s data: %w", env.EventType, err)
+		if err := e.DataAs(&data); err != nil {
+			return fmt.Errorf("kafkapathcapacity: unmarshal %s data: %w", e.Type(), err)
 		}
 		if data.PathId == "" {
-			return fmt.Errorf("kafkapathcapacity: %s missing path_id", env.EventType)
+			return fmt.Errorf("kafkapathcapacity: %s missing path_id", e.Type())
 		}
 		if data.CutoffAt.IsZero() {
-			return fmt.Errorf("kafkapathcapacity: %s missing cutoff_at", env.EventType)
+			return fmt.Errorf("kafkapathcapacity: %s missing cutoff_at", e.Type())
 		}
 		c.mu.Lock()
 		c.entries[newCapacityKey(data.PathId, data.CutoffAt)] = capacityEntry{

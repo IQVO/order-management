@@ -18,25 +18,29 @@ package kafka
 
 import (
 	"context"
-	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
 	kafkago "github.com/segmentio/kafka-go"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/claudioed/order-management/internal/adapters/kafka/cloudevents"
 	"github.com/claudioed/order-management/internal/domain/shared"
 )
 
 // Topic is the integration events topic this service publishes to.
 const Topic = "warehouse.order-management.events"
 
-// Source identifies this service in the event envelope.
-const Source = "order-management"
+// entityOrder is the `<entity>` segment of every CloudEvents `type` this
+// service publishes: every Order* event is raised by the Order aggregate.
+const entityOrder = "order"
+
+// dataSchemaVersion is the `dataschema` version of every payload this
+// package publishes today (both streams start at v1).
+const dataSchemaVersion = 1
 
 // tracerName scopes the publish spans this adapter emits.
 const tracerName = "github.com/claudioed/order-management/internal/adapters/outbound/kafka"
@@ -55,10 +59,14 @@ type Writer interface {
 // Encoded is one already-encoded, wire-ready Kafka message: the topic it
 // belongs on (a multi-topic outbox/relay routes purely off this field —
 // the underlying relay writer carries no fixed topic of its own), the
-// partition key, the JSON-marshalled envelope, and the W3C trace headers
-// captured at encode time. It is the unit postgres.OutboxPublisher stores
+// partition key, the CloudEvents 1.0 structured-mode JSON event, and the
+// headers captured at encode time (W3C trace context plus the CloudEvents
+// `content-type` header). It is the unit postgres.OutboxPublisher stores
 // and postgres.OutboxRelay later hands to a Sink, so the direct-publish
 // and outbox paths can never disagree about what a message looks like.
+//
+// EventType is the full CloudEvents `type` attribute; it is persisted in
+// the outbox row's event_type column purely for logging/inspection.
 type Encoded struct {
 	Topic     string
 	EventType string
@@ -77,16 +85,6 @@ type Encoded struct {
 // write.
 type Encoder interface {
 	Encode(ctx context.Context, event shared.DomainEvent) (enc Encoded, ok bool, err error)
-}
-
-// envelope is the integration event wrapper shared across all
-// warehouse-systems services.
-type envelope struct {
-	EventID    string          `json:"event_id"`
-	EventType  string          `json:"event_type"`
-	OccurredAt time.Time       `json:"occurred_at"`
-	Source     string          `json:"source"`
-	Data       json.RawMessage `json:"data"`
 }
 
 // releasedLineData is the `data.lines[]` entry shape — frozen, and shared
@@ -173,7 +171,7 @@ func NewWriter(brokers ...string) *kafkago.Writer {
 // LeastBytes routes purely by cumulative byte volume, ignoring Key
 // entirely. Hash is the balancer that actually gives "same Key always maps
 // to the same partition", which is the whole point of stamping OrderId
-// onto every message (see encodeEnvelope) after the Phase 3 1->8
+// onto every message (see encodeEvent) after the Phase 3 1->8
 // partition scaleup exposed the missing per-order ordering guarantee.
 func NewWriterForTopic(topic string, brokers ...string) *kafkago.Writer {
 	return &kafkago.Writer{
@@ -205,20 +203,27 @@ func toReleasedLineData(lines []shared.ReleasedLine) []releasedLineData {
 	return out
 }
 
-// encodeEnvelope maps event onto its integration envelope and marshals it,
-// without touching tracing or the broker. key is the Kafka partition key —
-// always the event's Order aggregate id (shared.OrderId), matching the
-// analytics publisher's own key choice (see AnalyticsPublisher.marshalData)
-// — so every integration event for the SAME order lands on the SAME
-// partition regardless of partition count (Kafka's default partitioner
-// hashes a non-nil Key deterministically), preserving per-aggregate
-// ordering (OrderAllocated -> OrderPartiallyAllocated -> OrderRepromised
-// for one order can never be observed out of relative order by a consumer,
-// even with topic partitions > 1). ok is false for a domain event outside
-// this publisher's published contract (see the package doc comment) — the
-// caller (Publish, Encode) treats that as "nothing to do", matching this
-// publisher's pre-outbox behaviour of silently skipping such events.
-func encodeEnvelope(event shared.DomainEvent) (env envelope, msg []byte, key []byte, ok bool, err error) {
+// encodedEvent is one integration event already rendered as a CloudEvent.
+type encodedEvent struct {
+	id    string
+	ceTyp string
+	key   []byte
+	value []byte
+}
+
+// encodeEvent maps event onto its CloudEvents 1.0 integration event and
+// marshals it, without touching tracing or the broker. The CloudEvents
+// `id` is minted here exactly once; the outbox persists the resulting
+// bytes, so a relay redelivery carries the same id. key is the Kafka
+// partition key — always the event's Order aggregate id (shared.OrderId),
+// matching the analytics publisher's own key choice and the CloudEvents
+// `subject` — so every integration event for the SAME order lands on the
+// SAME partition (kafkago.Hash), preserving per-aggregate ordering
+// (OrderAllocated -> OrderPartiallyAllocated -> OrderRepromised). ok is
+// false for a domain event outside this publisher's published contract
+// (see the package doc comment) — the caller (Publish, Encode) treats
+// that as "nothing to do".
+func encodeEvent(event shared.DomainEvent) (out encodedEvent, ok bool, err error) {
 	var data any
 	var orderID shared.OrderId
 
@@ -250,27 +255,29 @@ func encodeEnvelope(event shared.DomainEvent) (env envelope, msg []byte, key []b
 			Reason:   e.Reason,
 		}
 	default:
-		return envelope{}, nil, nil, false, nil
+		return encodedEvent{}, false, nil
 	}
 
-	payload, err := json.Marshal(data)
+	id := uuid.NewString()
+	value, err := cloudevents.New(cloudevents.Spec{
+		ID:        id,
+		Entity:    entityOrder,
+		EventName: event.EventName(),
+		Subject:   orderID.String(),
+		Time:      event.OccurredAt(),
+		Stream:    cloudevents.StreamEvents,
+		Version:   dataSchemaVersion,
+		Data:      data,
+	})
 	if err != nil {
-		return envelope{}, nil, nil, false, err
+		return encodedEvent{}, false, err
 	}
-
-	env = envelope{
-		EventID:    uuid.NewString(),
-		EventType:  event.EventName(),
-		OccurredAt: event.OccurredAt(),
-		Source:     Source,
-		Data:       payload,
-	}
-
-	msg, err = json.Marshal(env)
-	if err != nil {
-		return envelope{}, nil, nil, false, err
-	}
-	return env, msg, []byte(orderID.String()), true, nil
+	return encodedEvent{
+		id:    id,
+		ceTyp: cloudevents.Type(entityOrder, event.EventName()),
+		key:   []byte(orderID.String()),
+		value: value,
+	}, true, nil
 }
 
 // Encode implements Encoder: it builds the wire-ready integration message
@@ -280,13 +287,13 @@ func encodeEnvelope(event shared.DomainEvent) (env envelope, msg []byte, key []b
 // consumer parent onto the REQUEST that enqueued the row rather than a
 // later, unrelated relay pass).
 func (p *Publisher) Encode(ctx context.Context, event shared.DomainEvent) (Encoded, bool, error) {
-	env, msg, key, ok, err := encodeEnvelope(event)
+	enc, ok, err := encodeEvent(event)
 	if err != nil || !ok {
 		return Encoded{}, ok, err
 	}
-	headers := []kafkago.Header{}
+	headers := []kafkago.Header{cloudevents.ContentTypeHeader()}
 	otel.GetTextMapPropagator().Inject(ctx, headerCarrier{headers: &headers})
-	return Encoded{Topic: Topic, EventType: env.EventType, Key: key, Value: msg, Headers: headers}, true, nil
+	return Encoded{Topic: Topic, EventType: enc.ceTyp, Key: enc.key, Value: enc.value, Headers: headers}, true, nil
 }
 
 // Publish forwards event onto Kafka directly (no outbox) — used when the
@@ -296,20 +303,12 @@ func (p *Publisher) Encode(ctx context.Context, event shared.DomainEvent) (Encod
 // producer span per call, header injection from that span's context, and
 // the call's error recorded on the span before it is returned.
 func (p *Publisher) Publish(ctx context.Context, event shared.DomainEvent) error {
-	_, msg, key, ok, err := encodeEnvelope(event)
+	enc, ok, err := encodeEvent(event)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		return nil
-	}
-
-	// Re-decode just enough of the envelope for the span attributes —
-	// cheaper and simpler than threading env through unchanged, and this
-	// path is not hot (a request thread, not the relay's tight loop).
-	var env envelope
-	if err := json.Unmarshal(msg, &env); err != nil {
-		return err
 	}
 
 	ctx, span := otel.Tracer(tracerName).Start(ctx, spanName,
@@ -318,8 +317,8 @@ func (p *Publisher) Publish(ctx context.Context, event shared.DomainEvent) error
 			semconv.MessagingSystemKafka,
 			semconv.MessagingDestinationName(Topic),
 			semconv.MessagingOperationName("publish"),
-			semconv.MessagingMessageID(env.EventID),
-			attribute.String("messaging.message.event_type", env.EventType),
+			semconv.MessagingMessageID(enc.id),
+			semconv.CloudEventsEventType(enc.ceTyp),
 		),
 	)
 	defer span.End()
@@ -327,10 +326,10 @@ func (p *Publisher) Publish(ctx context.Context, event shared.DomainEvent) error
 	// Inject after starting the span so the headers carry *this* span as the
 	// parent: that is what stitches the downstream consumer's trace onto
 	// this one.
-	headers := []kafkago.Header{}
+	headers := []kafkago.Header{cloudevents.ContentTypeHeader()}
 	otel.GetTextMapPropagator().Inject(ctx, headerCarrier{headers: &headers})
 
-	if err := p.writer.WriteMessages(ctx, kafkago.Message{Key: key, Value: msg, Headers: headers}); err != nil {
+	if err := p.writer.WriteMessages(ctx, kafkago.Message{Key: enc.key, Value: enc.value, Headers: headers}); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return err
