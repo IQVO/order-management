@@ -176,6 +176,7 @@ func NewWriter(brokers ...string) *kafkago.Writer {
 func NewWriterForTopic(topic string, brokers ...string) *kafkago.Writer {
 	return &kafkago.Writer{
 		BatchTimeout:           syncWriterBatchTimeout,
+		RequiredAcks:           syncWriterRequiredAcks,
 		Addr:                   kafkago.TCP(brokers...),
 		Topic:                  topic,
 		Balancer:               &kafkago.Hash{},
