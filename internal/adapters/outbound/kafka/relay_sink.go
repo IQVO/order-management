@@ -24,6 +24,7 @@ type RelaySink struct {
 // brokers, with no topic of its own.
 func NewRelaySink(brokers ...string) *RelaySink {
 	return &RelaySink{writer: &kafkago.Writer{
+		BatchTimeout:           syncWriterBatchTimeout,
 		Addr:                   kafkago.TCP(brokers...),
 		Balancer:               &kafkago.Hash{},
 		AllowAutoTopicCreation: true,
