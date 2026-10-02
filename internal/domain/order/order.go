@@ -468,6 +468,41 @@ func (o *Order) RetryAllocate(lineNo int, reservationID string) error {
 	return nil
 }
 
+// ReconfirmReservation records the reservation inventory-storage holds for
+// an Allocated line at release time. Reservations expire upstream (TTL), so
+// a line allocated long ago is re-reserved right before release; the id may
+// be the same one (still active) or a new one (the old one expired). Only an
+// Allocated line can be reconfirmed.
+func (o *Order) ReconfirmReservation(lineNo int, reservationID string) error {
+	line, err := o.line(lineNo)
+	if err != nil {
+		return err
+	}
+	if line.status != LineAllocated {
+		return ErrLineNotAllocated
+	}
+	id := reservationID
+	line.reservationID = &id
+	return nil
+}
+
+// LoseReservation moves an Allocated line back to Backordered when its
+// reservation lapsed upstream and the stock is no longer available. It
+// is the only Allocated -> Backordered transition; RetryAllocate brings
+// the line back once stock returns.
+func (o *Order) LoseReservation(lineNo int) error {
+	line, err := o.line(lineNo)
+	if err != nil {
+		return err
+	}
+	if line.status != LineAllocated {
+		return ErrLineNotAllocated
+	}
+	line.status = LineBackordered
+	line.reservationID = nil
+	return nil
+}
+
 // MarkBackordered records the business fact that inventory-storage has no
 // usable stock for this line (its 409). A line already Backordered stays
 // Backordered — a failed retry is not an error.
