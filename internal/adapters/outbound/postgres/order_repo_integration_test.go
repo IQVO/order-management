@@ -359,7 +359,7 @@ func TestOutboxPublisher_AppendsToOutboxEventsTable(t *testing.T) {
 	var value []byte
 	err := pool.QueryRow(ctx,
 		`SELECT topic, event_type, value FROM outbox_events
-		 WHERE event_type = 'OrderReceived' AND published_at IS NULL
+		 WHERE event_type = 'com.warehouse.wes.order-management.order.OrderReceived' AND published_at IS NULL
 		 LIMIT 1`,
 	).Scan(&topic, &eventType, &value)
 	if err != nil {
@@ -368,14 +368,14 @@ func TestOutboxPublisher_AppendsToOutboxEventsTable(t *testing.T) {
 	if topic != kafka.AnalyticsTopic {
 		t.Errorf("topic = %s, want %s", topic, kafka.AnalyticsTopic)
 	}
-	if eventType != "OrderReceived" {
-		t.Errorf("event_type = %s, want OrderReceived", eventType)
+	if eventType != "com.warehouse.wes.order-management.order.OrderReceived" {
+		t.Errorf("event_type = %s, want com.warehouse.wes.order-management.order.OrderReceived", eventType)
 	}
 	if len(value) == 0 {
-		t.Error("value = empty, want the marshalled event JSON")
+		t.Error("value = empty, want the marshalled CloudEvent JSON")
 	}
 	var count int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox_events WHERE event_type = 'OrderReceived'`).Scan(&count); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM outbox_events WHERE event_type = 'com.warehouse.wes.order-management.order.OrderReceived'`).Scan(&count); err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if count != 1 {

@@ -2,12 +2,13 @@ package kafka_test
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
 
 	inboundkafka "github.com/claudioed/order-management/internal/adapters/inbound/kafka"
+	"github.com/claudioed/order-management/internal/adapters/kafka/cloudevents"
 )
 
 // projCall captures one projection-store method invocation.
@@ -87,25 +88,16 @@ func (p *fakeProcessed) MarkProcessed(_ context.Context, eventID string) (bool, 
 	return true, nil
 }
 
-func analyticsEnvelope(t *testing.T, eventID, eventType string, at time.Time, data map[string]any) []byte {
+const omTypePrefix = "com.warehouse.wes.order-management.order."
+
+// analyticsEnvelope builds a CloudEvents 1.0 analytics event for eventName
+// exactly as this service's own analytics publisher emits it.
+func analyticsEnvelope(t *testing.T, eventID, eventName string, at time.Time, data map[string]any) []byte {
 	t.Helper()
-	raw, err := json.Marshal(data)
-	if err != nil {
-		t.Fatalf("marshal data: %v", err)
-	}
-	env := map[string]any{
-		"event_id":       eventID,
-		"event_type":     eventType,
-		"occurred_at":    at.Format(time.RFC3339Nano),
-		"source":         "order-management",
-		"schema_version": 1,
-		"data":           json.RawMessage(raw),
-	}
-	b, err := json.Marshal(env)
-	if err != nil {
-		t.Fatalf("marshal envelope: %v", err)
-	}
-	return b
+	return ceEvent(t, ceSpec{
+		id: eventID, source: "/warehouse/order-management", ceType: omTypePrefix + eventName,
+		subject: "o1", at: at, dataschema: "urn:warehouse:order-management:analytics:" + eventName + ":v1",
+	}, data)
 }
 
 func TestAnalyticsConsumer_RoutesEachEventType(t *testing.T) {
@@ -248,5 +240,37 @@ func TestAnalyticsConsumer_RoutesPromiseKPIFields(t *testing.T) {
 	}
 	if !got.splitShipment {
 		t.Error("splitShipment = false, want true")
+	}
+}
+
+// TestAnalyticsConsumer_RejectsLegacyFlatEnvelope proves the retired flat
+// analytics envelope (event_id/event_type/occurred_at/schema_version) is
+// rejected as a non-CloudEvent and never projected or marked processed.
+func TestAnalyticsConsumer_RejectsLegacyFlatEnvelope(t *testing.T) {
+	proj := &fakeProjection{}
+	processed := newFakeProcessed()
+	c := &inboundkafka.AnalyticsConsumer{Projection: proj, Processed: processed, Logger: slog.Default()}
+
+	err := c.HandleMessage(context.Background(), legacyFlatMessage("legacy-1", "OrderReceived", `{"order_id":"o1","path_id":"pick"}`))
+	if !errors.Is(err, cloudevents.ErrNotCloudEvent) {
+		t.Fatalf("err = %v, want ErrNotCloudEvent", err)
+	}
+	if len(proj.calls) != 0 || len(processed.seen) != 0 {
+		t.Fatalf("legacy message must not be applied: calls=%d seen=%v", len(proj.calls), processed.seen)
+	}
+}
+
+// TestAnalyticsConsumer_ShortTypeNotDispatched proves dispatch is on the
+// FULL CloudEvents type: a valid CloudEvent whose type is the bare short
+// name is ignored as unknown.
+func TestAnalyticsConsumer_ShortTypeNotDispatched(t *testing.T) {
+	proj := &fakeProjection{}
+	c := &inboundkafka.AnalyticsConsumer{Projection: proj, Processed: newFakeProcessed(), Logger: slog.Default()}
+	raw := ceEvent(t, ceSpec{id: "x", source: "/warehouse/order-management", ceType: "OrderReceived", subject: "o1", at: time.Now()}, map[string]any{"path_id": "pick"})
+	if err := c.HandleMessage(context.Background(), raw); err != nil {
+		t.Fatalf("HandleMessage: %v", err)
+	}
+	if len(proj.calls) != 0 {
+		t.Fatalf("short type must not dispatch, got %d calls", len(proj.calls))
 	}
 }

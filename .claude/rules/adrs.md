@@ -133,7 +133,7 @@
     again fresh, and — if the group's promise moved — saves the new
     breakdown and publishes the new `shared.OrderRepromised` event on
     `warehouse.order-management.events`. Idempotent on the Kafka
-    message's `event_id` alone via a NEW OLTP-side port
+    message's id (CloudEvents `id` since ADR-0030) alone via a NEW OLTP-side port
     `ports.RepromiseProcessedEvents` (Postgres migration
     `0004_repromise_processed_events`) — a deliberate, documented
     simplification of ADR 0014 §5's stated `(orderId, sourceEventId)`
@@ -289,6 +289,18 @@ Other ADR-adjacent facts worth knowing without opening every file:
   a genuinely different active path when one exists and admits it. Nil
   catalogue or an empty `ListActive()` still fails OPEN to
   `shared.DefaultPathId`, exactly ADR-0013's original floor.
+
+- **0030 — ACCEPTED: CloudEvents 1.0 as the mandatory event envelope
+  (fleet standard).** Every Kafka message produced or consumed (integration
+  AND analytics) is a CloudEvents 1.0 event, structured mode, built/parsed
+  only via `internal/adapters/kafka/cloudevents` (sdk-go `event` package).
+  `source=/warehouse/order-management`,
+  `type=com.warehouse.wes.order-management.order.<EventName>`,
+  `subject=<order id>`, `dataschema=urn:warehouse:order-management:<events|analytics>:<EventName>:v1`.
+  Consumers dispatch on the FULL type, dedupe on `id`, DLQ/skip
+  non-CloudEvents. **Supersedes** the flat envelope of ADR-0005, the
+  analytics Envelope v1 (`schema_version`) of ADR-0006, and the flat
+  dispatch shown in ADR-0015/0018. No dual-read, no toggle.
 
 - Gateway API `HTTPRoute` chart template exists (`charts/order-management`
   `values.yaml` `gatewayApi:` block, `enabled: false` by default) —

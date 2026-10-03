@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
+	"github.com/claudioed/order-management/internal/adapters/kafka/cloudevents"
 	"github.com/claudioed/order-management/internal/adapters/outbound/kafka"
 	"github.com/claudioed/order-management/internal/domain/shared"
 )
@@ -34,12 +35,23 @@ func (w *fakeWriter) WriteMessages(_ context.Context, msgs ...kafkago.Message) e
 	return nil
 }
 
+// envelope is the test's flattened view of a decoded CloudEvent: every
+// context attribute plus the raw data payload.
 type envelope struct {
-	EventID    string          `json:"event_id"`
-	EventType  string          `json:"event_type"`
-	OccurredAt time.Time       `json:"occurred_at"`
-	Source     string          `json:"source"`
-	Data       json.RawMessage `json:"data"`
+	SpecVersion     string
+	ID              string
+	Source          string
+	Type            string
+	Subject         string
+	Time            time.Time
+	DataContentType string
+	DataSchema      string
+	Data            json.RawMessage
+}
+
+// typeOf is the full CloudEvents type this service publishes for name.
+func typeOf(name string) string {
+	return "com.warehouse.wes.order-management.order." + name
 }
 
 type releasedLineData struct {
@@ -72,15 +84,24 @@ func publishOne(t *testing.T, writer *fakeWriter, pub *kafka.Publisher, event sh
 	return writer.messages[0]
 }
 
-// decodeEnvelope unmarshals a published message value into the shared
-// envelope shape.
+// decodeEnvelope decodes and validates a published message value as a
+// CloudEvents 1.0 event via the service's own cloudevents.Decode.
 func decodeEnvelope(t *testing.T, msg kafkago.Message) envelope {
 	t.Helper()
-	var env envelope
-	if err := json.Unmarshal(msg.Value, &env); err != nil {
-		t.Fatalf("failed to unmarshal envelope: %v", err)
+	return decodeCE(t, msg.Value)
+}
+
+func decodeCE(t *testing.T, raw []byte) envelope {
+	t.Helper()
+	e, err := cloudevents.Decode(raw)
+	if err != nil {
+		t.Fatalf("cloudevents.Decode: %v (%s)", err, raw)
 	}
-	return env
+	return envelope{
+		SpecVersion: e.SpecVersion(), ID: e.ID(), Source: e.Source(), Type: e.Type(),
+		Subject: e.Subject(), Time: e.Time(), DataContentType: e.DataContentType(),
+		DataSchema: e.DataSchema(), Data: e.Data(),
+	}
 }
 
 // decodeAllocationData unmarshals an envelope's data payload into the
@@ -130,16 +151,16 @@ func TestPublisher_OrderAllocated_EnvelopeShape(t *testing.T) {
 // published OrderAllocated event.
 func assertAllocatedEnvelopeHeader(t *testing.T, env envelope, occurredAt time.Time) {
 	t.Helper()
-	if env.EventType != "OrderAllocated" {
-		t.Errorf("EventType = %q, want OrderAllocated", env.EventType)
+	if env.Type != typeOf("OrderAllocated") {
+		t.Errorf("EventType = %q, want OrderAllocated", env.Type)
 	}
-	if env.Source != kafka.Source {
-		t.Errorf("Source = %q, want %q", env.Source, kafka.Source)
+	if env.Source != cloudevents.Source {
+		t.Errorf("Source = %q, want %q", env.Source, cloudevents.Source)
 	}
-	if !env.OccurredAt.Equal(occurredAt) {
-		t.Errorf("OccurredAt = %v, want %v", env.OccurredAt, occurredAt)
+	if !env.Time.Equal(occurredAt) {
+		t.Errorf("OccurredAt = %v, want %v", env.Time, occurredAt)
 	}
-	if env.EventID == "" {
+	if env.ID == "" {
 		t.Error("EventID must not be empty")
 	}
 }
@@ -178,12 +199,9 @@ func TestPublisher_OrderPartiallyAllocated_EnvelopeShape(t *testing.T) {
 		t.Fatalf("expected 1 message, got %d", len(writer.messages))
 	}
 
-	var env envelope
-	if err := json.Unmarshal(writer.messages[0].Value, &env); err != nil {
-		t.Fatalf("failed to unmarshal envelope: %v", err)
-	}
-	if env.EventType != "OrderPartiallyAllocated" {
-		t.Errorf("EventType = %q, want OrderPartiallyAllocated", env.EventType)
+	env := decodeEnvelope(t, writer.messages[0])
+	if env.Type != typeOf("OrderPartiallyAllocated") {
+		t.Errorf("EventType = %q, want OrderPartiallyAllocated", env.Type)
 	}
 
 	var data allocationData
@@ -204,10 +222,7 @@ func TestPublisher_OrderAllocated_EmptyLines(t *testing.T) {
 		t.Fatalf("Publish returned error: %v", err)
 	}
 
-	var env envelope
-	if err := json.Unmarshal(writer.messages[0].Value, &env); err != nil {
-		t.Fatalf("failed to unmarshal envelope: %v", err)
-	}
+	env := decodeEnvelope(t, writer.messages[0])
 	var data allocationData
 	if err := json.Unmarshal(env.Data, &data); err != nil {
 		t.Fatalf("failed to unmarshal data: %v", err)
@@ -255,15 +270,12 @@ func TestPublisher_OrderRepromised_EnvelopeShape(t *testing.T) {
 		t.Fatalf("expected 1 message, got %d", len(writer.messages))
 	}
 
-	var env envelope
-	if err := json.Unmarshal(writer.messages[0].Value, &env); err != nil {
-		t.Fatalf("failed to unmarshal envelope: %v", err)
+	env := decodeEnvelope(t, writer.messages[0])
+	if env.Type != typeOf("OrderRepromised") {
+		t.Errorf("EventType = %q, want OrderRepromised", env.Type)
 	}
-	if env.EventType != "OrderRepromised" {
-		t.Errorf("EventType = %q, want OrderRepromised", env.EventType)
-	}
-	if env.Source != kafka.Source {
-		t.Errorf("Source = %q, want %q", env.Source, kafka.Source)
+	if env.Source != cloudevents.Source {
+		t.Errorf("Source = %q, want %q", env.Source, cloudevents.Source)
 	}
 
 	var data repromisedData
@@ -287,10 +299,7 @@ func TestPublisher_OrderRepromised_EmptyCptIdsOmitted(t *testing.T) {
 		t.Fatalf("Publish returned error: %v", err)
 	}
 
-	var env envelope
-	if err := json.Unmarshal(writer.messages[0].Value, &env); err != nil {
-		t.Fatalf("failed to unmarshal envelope: %v", err)
-	}
+	env := decodeEnvelope(t, writer.messages[0])
 	var raw map[string]any
 	if err := json.Unmarshal(env.Data, &raw); err != nil {
 		t.Fatalf("failed to unmarshal raw data: %v", err)
@@ -411,8 +420,8 @@ func assertPublishSpanAttributes(t *testing.T, published sdktrace.ReadOnlySpan) 
 	if attrs["messaging.destination.name"] != kafka.Topic {
 		t.Errorf("messaging.destination.name = %q, want %q", attrs["messaging.destination.name"], kafka.Topic)
 	}
-	if attrs["messaging.message.event_type"] != "OrderAllocated" {
-		t.Errorf("messaging.message.event_type = %q, want OrderAllocated", attrs["messaging.message.event_type"])
+	if attrs["cloudevents.event_type"] != typeOf("OrderAllocated") {
+		t.Errorf("cloudevents.event_type = %q, want %q", attrs["cloudevents.event_type"], typeOf("OrderAllocated"))
 	}
 }
 

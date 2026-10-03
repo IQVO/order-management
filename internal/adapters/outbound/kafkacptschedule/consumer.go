@@ -24,7 +24,7 @@ package kafkacptschedule
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -33,14 +33,15 @@ import (
 
 	kafkago "github.com/segmentio/kafka-go"
 
+	"github.com/claudioed/order-management/internal/adapters/kafka/cloudevents"
 	"github.com/claudioed/order-management/internal/domain/order"
 )
 
 // Topic is process-path-management's publish topic — the same topic
 // kafkacatalog consumes. See that package's doc comment for why this
 // service has no business knowing anything else about
-// process-path-management beyond this topic name and the envelope/
-// payload shapes it decodes.
+// process-path-management beyond this topic name and the CloudEvents
+// type/payload shapes it decodes.
 const Topic = "warehouse.process-path-management.events"
 
 // consumerGroupPrefix names this service's dedicated, PER-PROCESS
@@ -50,20 +51,15 @@ const Topic = "warehouse.process-path-management.events"
 // its own full history for its own event type.
 const consumerGroupPrefix = "order-management-cpt-schedule"
 
-// eventTypeChanged is the one event type this consumer acts on.
-const eventTypeChanged = "CPTScheduleChanged"
+// ceTypeChanged is the one full CloudEvents `type` this consumer acts on,
+// byte-for-byte as process-path-management publishes it (fleet standard
+// §4 cross-service table).
+const ceTypeChanged = "com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged"
 
 // cptSearchHorizonDays bounds how far into the future NextCutoffs walks
 // looking for concrete occurrences of a recurring cutoff rule, so a
 // misconfigured or genuinely empty schedule cannot spin forever.
 const cptSearchHorizonDays = 14
-
-// envelope is the CloudEvents-like wrapper shared across every
-// warehouse-systems publisher.
-type envelope struct {
-	EventType string          `json:"event_type"`
-	Data      json.RawMessage `json:"data"`
-}
 
 // scheduleData is the wire payload shape for CPTScheduleChanged, decoded
 // verbatim from process-path-management's publisher.
@@ -129,12 +125,7 @@ func NewConsumerForTopic(ctx context.Context, brokers []string, topic string, lo
 		return nil, fmt.Errorf("kafkacptschedule: determine readiness target: %w", err)
 	}
 
-	reader := kafkago.NewReader(kafkago.ReaderConfig{
-		Brokers:     brokers,
-		Topic:       topic,
-		GroupID:     uniqueConsumerGroup(),
-		StartOffset: kafkago.FirstOffset,
-	})
+	reader := kafkago.NewReader(readerConfig(brokers, topic, uniqueConsumerGroup()))
 
 	c := &Consumer{
 		Reader:    reader,
@@ -147,6 +138,41 @@ func NewConsumerForTopic(ctx context.Context, brokers []string, topic string, lo
 		c.markReady()
 	}
 	return c, nil
+}
+
+// replayCommitInterval makes the replay reader commit offsets
+// periodically and asynchronously instead of after every message.
+//
+// With a GroupID set and CommitInterval left at zero, kafka-go's
+// Reader.ReadMessage performs a SYNCHRONOUS CommitMessages broker round
+// trip after EVERY message, which turns boot replay into
+// O(history) x RTT. Against the real cluster broker that capped the replay
+// at ~126 msg/s (2,000 messages in 15.8s) versus ~3,200 msg/s (10,000
+// messages in 3.1s) with a 1s interval — slow enough that order-management
+// could not replay warehouse.work-planning.events (~10,600 messages)
+// inside WaitReadyTimeout and was killed in a CrashLoopBackOff.
+//
+// Async commits are safe here, and only here: the consumer group is unique
+// to this process instance (uniqueConsumerGroup), its committed offsets are
+// never resumed by any other process, and a restart replays from
+// FirstOffset under a NEW group. Commit durability is therefore irrelevant
+// to correctness — losing the last interval's commits on a crash changes
+// nothing — so the per-message synchronous commit is pure overhead. Do NOT
+// copy this to a consumer on a fixed, shared group that commits after
+// handling (at-least-once): there the synchronous commit is deliberate.
+const replayCommitInterval = time.Second
+
+// readerConfig builds the kafka-go ReaderConfig for the full-replay cache
+// reader: a process-unique group starting at the earliest offset, with
+// periodic asynchronous commits (see replayCommitInterval).
+func readerConfig(brokers []string, topic, group string) kafkago.ReaderConfig {
+	return kafkago.ReaderConfig{
+		Brokers:        brokers,
+		Topic:          topic,
+		GroupID:        group,
+		StartOffset:    kafkago.FirstOffset,
+		CommitInterval: replayCommitInterval,
+	}
 }
 
 // uniqueConsumerGroup builds a group id unique to this process instance
@@ -251,8 +277,15 @@ func (c *Consumer) Run(ctx context.Context) error {
 			return err
 		}
 		if err := c.handle(msg); err != nil {
-			c.Logger.ErrorContext(ctx, "CPT schedule message handling failed",
-				"topic", msg.Topic, "offset", msg.Offset, "partition", msg.Partition, "error", err)
+			if errors.Is(err, cloudevents.ErrNotCloudEvent) {
+				// Not a CloudEvents 1.0 event (e.g. the retired flat
+				// envelope): skip past it, never parse another shape.
+				c.Logger.WarnContext(ctx, "skipping non-CloudEvents message",
+					"topic", msg.Topic, "offset", msg.Offset, "partition", msg.Partition, "error", err)
+			} else {
+				c.Logger.ErrorContext(ctx, "CPT schedule message handling failed",
+					"topic", msg.Topic, "offset", msg.Offset, "partition", msg.Partition, "error", err)
+			}
 		}
 		c.checkReady(msg)
 	}
@@ -280,20 +313,25 @@ func (c *Consumer) checkReady(msg kafkago.Message) {
 	}
 }
 
+// handle decodes msg as a CloudEvents 1.0 event and applies it. A
+// non-CloudEvents message returns an error wrapping
+// cloudevents.ErrNotCloudEvent (Run logs it at WARN and moves on). Each
+// CPTScheduleChanged is a full per-site snapshot, so re-applying the same
+// event is idempotent and no id dedupe is needed.
 func (c *Consumer) handle(msg kafkago.Message) error {
-	var env envelope
-	if err := json.Unmarshal(msg.Value, &env); err != nil {
-		return fmt.Errorf("kafkacptschedule: unmarshal envelope: %w", err)
+	e, err := cloudevents.Decode(msg.Value)
+	if err != nil {
+		return fmt.Errorf("kafkacptschedule: %w", err)
 	}
 
-	switch env.EventType {
-	case eventTypeChanged:
+	switch e.Type() {
+	case ceTypeChanged:
 		var data scheduleData
-		if err := json.Unmarshal(env.Data, &data); err != nil {
-			return fmt.Errorf("kafkacptschedule: unmarshal %s data: %w", env.EventType, err)
+		if err := e.DataAs(&data); err != nil {
+			return fmt.Errorf("kafkacptschedule: unmarshal %s data: %w", e.Type(), err)
 		}
 		if data.SiteId == "" {
-			return fmt.Errorf("kafkacptschedule: %s missing site_id", env.EventType)
+			return fmt.Errorf("kafkacptschedule: %s missing site_id", e.Type())
 		}
 		c.mu.Lock()
 		c.schedules[data.SiteId] = data

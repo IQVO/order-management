@@ -4,6 +4,7 @@ package kafkacptschedule
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -37,7 +38,7 @@ func TestNewConsumer_TwoInstancesInARow_BothReplayFully(t *testing.T) {
 
 	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false}
 	if err := writer.WriteMessages(ctx, kafkago.Message{
-		Value: []byte(`{"event_type":"CPTScheduleChanged","data":{"site_id":"site-1","timezone":"UTC","cutoffs":[{"cpt_id":"sp1-1800","local_time":"18:00","eligible_path_ids":["pick"]}]}}`),
+		Value: envelopeMsg(t, 0, 0, "com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged", json.RawMessage(`{"site_id":"site-1","timezone":"UTC","cutoffs":[{"cpt_id":"sp1-1800","local_time":"18:00","eligible_path_ids":["pick"]}]}`)).Value,
 	}); err != nil {
 		t.Fatalf("seed publish: %v", err)
 	}
@@ -94,7 +95,7 @@ func TestNewConsumer_AlreadyCaughtUpGroup_ReadyImmediately(t *testing.T) {
 
 	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false}
 	if err := writer.WriteMessages(ctx, kafkago.Message{
-		Value: []byte(`{"event_type":"CPTScheduleChanged","data":{"site_id":"site-2","timezone":"UTC","cutoffs":[{"cpt_id":"sp1-0800","local_time":"08:00","eligible_path_ids":["pick"]}]}}`),
+		Value: envelopeMsg(t, 0, 0, "com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged", json.RawMessage(`{"site_id":"site-2","timezone":"UTC","cutoffs":[{"cpt_id":"sp1-0800","local_time":"08:00","eligible_path_ids":["pick"]}]}`)).Value,
 	}); err != nil {
 		t.Fatalf("seed publish: %v", err)
 	}

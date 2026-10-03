@@ -4,7 +4,6 @@ package kafka_test
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -13,6 +12,7 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	tckafka "github.com/testcontainers/testcontainers-go/modules/kafka"
 
+	"github.com/claudioed/order-management/internal/adapters/kafka/cloudevents"
 	adapter "github.com/claudioed/order-management/internal/adapters/outbound/kafka"
 	"github.com/claudioed/order-management/internal/domain/shared"
 )
@@ -64,15 +64,21 @@ func TestPublisherPublishesAllocationEnvelopeToKafka(t *testing.T) {
 		t.Fatalf("read published message: %v", err)
 	}
 
-	var envelope struct {
-		EventType string `json:"event_type"`
-		Source    string `json:"source"`
+	e, err := cloudevents.Decode(message.Value)
+	if err != nil {
+		t.Fatalf("published message is not a valid CloudEvent: %v (%s)", err, message.Value)
 	}
-	if err := json.Unmarshal(message.Value, &envelope); err != nil {
-		t.Fatalf("unmarshal published envelope: %v", err)
+	if e.Type() != "com.warehouse.wes.order-management.order.OrderAllocated" || e.Source() != "/warehouse/order-management" {
+		t.Fatalf("published event type/source = %q/%q", e.Type(), e.Source())
 	}
-	if envelope.EventType != "OrderAllocated" || envelope.Source != adapter.Source {
-		t.Fatalf("published envelope = %+v, want OrderAllocated from %q", envelope, adapter.Source)
+	var contentType string
+	for _, h := range message.Headers {
+		if h.Key == "content-type" {
+			contentType = string(h.Value)
+		}
+	}
+	if contentType != "application/cloudevents+json; charset=UTF-8" {
+		t.Fatalf("content-type header = %q", contentType)
 	}
 }
 

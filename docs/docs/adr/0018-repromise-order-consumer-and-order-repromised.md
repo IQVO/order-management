@@ -10,6 +10,11 @@ description: "ADR 0018 — order-management's half of ADR 0014 §5's feedback lo
 
 ## Status
 
+> **Superseded by ADR-0030** (the flat inbound envelope shown here; the consumer now dispatches on the full CloudEvents types and dedupes on the CloudEvents `id`). Every Kafka message is now a
+> CloudEvents 1.0 event — see
+> [ADR 0030](./0030-cloudevents-mandatory-event-envelope.md). The rest of
+> this record stands.
+
 Accepted — implemented in the same change that introduces this record.
 This is the final piece of [ADR 0014](/docs/adr/0014-promise-derived-from-fulfillment-capability)'s
 entire rollout: Phase 0 (the ADR pair with process-path-management's ADR

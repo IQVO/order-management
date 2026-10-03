@@ -22,30 +22,34 @@ to it — check `apis/asyncapi.yaml`'s intro section (it documents exactly
 who is downstream: wes-work-planning consumes the integration topic) or
 the equivalent ubiquitous-language doc for the other services.
 
-### 2. Envelope: this fleet's own JSON envelope, NOT CloudEvents
+### 2. Envelope: CloudEvents 1.0 (mandatory, ADR-0030)
 
 Every message on `warehouse.order-management.events` (integration) and
-`warehouse.order-management.analytics` (analytics) uses this service's
-own envelope — check `apis/asyncapi.yaml`'s "Message format" section
-before assuming CloudEvents; not every context in this fleet uses the
-same envelope shape (wes-work-planning's IS CloudEvents; this one is
-not):
+`warehouse.order-management.analytics` (analytics) is a CloudEvents 1.0
+event in structured content mode, built ONLY through
+`internal/adapters/kafka/cloudevents.New` (never a hand-rolled struct),
+with the `cloudevents.ContentTypeHeader()` Kafka header:
 
 ```json
 {
-  "event_id": "<uuid>",
-  "event_type": "OrderAllocated",
-  "occurred_at": "<RFC3339>",
-  "source": "order-management",
+  "specversion": "1.0",
+  "id": "<uuid, minted once at encode time>",
+  "source": "/warehouse/order-management",
+  "type": "com.warehouse.wes.order-management.order.OrderAllocated",
+  "subject": "<order id>",
+  "time": "<occurred-at, RFC3339 UTC>",
+  "datacontenttype": "application/json",
+  "dataschema": "urn:warehouse:order-management:events:OrderAllocated:v1",
   "data": { /* the actual payload, business types only */ }
 }
 ```
 
-The analytics envelope adds one field, `schema_version: 1`, and is keyed
-by `OrderId`; the integration envelope is unkeyed. `event_type` here is a
-bare PascalCase event name (`OrderAllocated`), NOT the reverse-DNS form
-some other fleet services use — copy the convention from this repo's own
-`apis/asyncapi.yaml`, don't assume a sibling repo's convention applies.
+Analytics events use the SAME `type` with
+`dataschema: urn:warehouse:order-management:analytics:<EventName>:v1`.
+Both topics are keyed by `OrderId`. A breaking `data` change needs a new
+`.v2` type and a new `dataschema` version — never mutate an existing one.
+Add a golden exact-JSON test for the new type (see
+`internal/adapters/outbound/kafka/cloudevents_golden_test.go`).
 
 ### 3. Implementation
 
@@ -55,7 +59,7 @@ publishing wires an EXISTING domain event onto Kafka, it doesn't invent a
 new payload shape at the adapter layer; see `internal/domain/shared/events.go`).
 In `internal/adapters/outbound/kafka/publisher.go`:
 
-- Add the event's marshal-to-envelope case
+- Add the event's case to `encodeEvent` (it becomes a CloudEvent via `cloudevents.New`)
 - The `data.lines[]` entry shape (`releasedLineData`) is FROZEN and
   shared verbatim with wes-work-planning's consumer — any change there
   needs both sides coordinated, not just this repo

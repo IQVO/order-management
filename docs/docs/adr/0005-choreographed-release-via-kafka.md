@@ -10,6 +10,11 @@ description: ADR 0005 — replace the public /allocate and /release REST verbs a
 
 ## Status
 
+> **Superseded by ADR-0030** (the flat `event_id`/`event_type`/`occurred_at`/`source`/`data` integration envelope described here). Every Kafka message is now a
+> CloudEvents 1.0 event — see
+> [ADR 0030](./0030-cloudevents-mandatory-event-envelope.md). The rest of
+> this record stands.
+
 Accepted. This is a real architecture redesign of an already-shipped v1,
 driven by direct review feedback on that v1 (see the Context section
 below) — not a hypothetical exercise. It amends the release-orchestration
