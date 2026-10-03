@@ -144,7 +144,7 @@ type packageManifestedData struct {
 // order_ref parses as a valid WorkUnitId-shaped
 // "{orderId}-line-{lineNo}" reference.
 type RepromiseConsumer struct {
-	reader         *kafkago.Reader
+	reader         messageReader
 	repromiseOrder *usecases.RepromiseOrder
 	logger         *slog.Logger
 	// dlqWriter publishes a poison message (ADR-0025 §DLQ) to
@@ -156,6 +156,22 @@ type RepromiseConsumer struct {
 	// writer so those tests keep compiling unchanged.
 	dlqWriter *kafkago.Writer
 }
+
+// messageReader is the slice of *kafkago.Reader the consumer uses; an
+// interface so the broker-outage recovery in Run can be unit-tested with
+// a scripted reader.
+type messageReader interface {
+	FetchMessage(ctx context.Context) (kafkago.Message, error)
+	CommitMessages(ctx context.Context, msgs ...kafkago.Message) error
+	Config() kafkago.ReaderConfig
+	Close() error
+}
+
+// Broker-outage recovery bounds for Run (see its doc comment).
+const (
+	recoverInitialInterval = 250 * time.Millisecond
+	recoverMaxInterval     = 30 * time.Second
+)
 
 // NewRepromiseConsumer constructs a RepromiseConsumer reading
 // FulfillmentEventsTopic on brokers under RepromiseConsumerGroup.
@@ -195,20 +211,82 @@ func (c *RepromiseConsumer) Close() error {
 	return errors.Join(readerErr, c.dlqWriter.Close())
 }
 
-// Run consumes the topic until ctx is cancelled.
+// Run consumes the topic until ctx is cancelled. It only returns when ctx
+// is done: a broker outage must never take the service down with it.
+//
+// Observed live (warehouse-day simulation): the shared broker was
+// OOM-killed and restarted; the in-flight offset commit failed with "use of
+// closed network connection", Run returned it, and main exited the whole
+// order-management process -- every later POST /orders failed until a
+// manual restart.
+//
+// Now a fetch error, or a handleMessage error (which is only ever an
+// offset-commit or DLQ-publish failure -- business errors are retried and
+// dead-lettered inside handleMessage), is logged and retried with jittered
+// exponential backoff (250ms doubling to 30s). A message whose handling
+// failed is retried itself until it succeeds, so nothing is skipped: the
+// Kafka reader has already moved past it in memory, and only a rebalance
+// would otherwise redeliver it. Handling is idempotent on the CloudEvents
+// id, so a retried message that partially succeeded is safe.
 func (c *RepromiseConsumer) Run(ctx context.Context) error {
+	policy := newRecoverBackoff()
 	for {
 		msg, err := c.reader.FetchMessage(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			return err
+			if !c.waitToRecover(ctx, policy, "fetch", err) {
+				return nil
+			}
+			continue
 		}
-		if err := c.handleMessage(ctx, msg); err != nil {
-			return err
+		if !c.handleUntilDone(ctx, policy, msg) {
+			return nil
+		}
+		policy.Reset()
+	}
+}
+
+// handleUntilDone retries one message's handling across infrastructure
+// failures. It reports false only when ctx is done.
+func (c *RepromiseConsumer) handleUntilDone(ctx context.Context, policy backoff.BackOff, msg kafkago.Message) bool {
+	for {
+		err := c.handleMessage(ctx, msg)
+		if err == nil {
+			return true
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+		if !c.waitToRecover(ctx, policy, "handle", err, "partition", msg.Partition, "offset", msg.Offset) {
+			return false
 		}
 	}
+}
+
+// waitToRecover logs a recoverable broker-side failure and sleeps the next
+// backoff interval. It reports false if ctx ended while waiting.
+func (c *RepromiseConsumer) waitToRecover(ctx context.Context, policy backoff.BackOff, stage string, err error, args ...any) bool {
+	wait := policy.NextBackOff()
+	c.log(ctx, "repromise: kafka unavailable, retrying",
+		append([]any{"stage", stage, "retry_in", wait.String(), "error", err}, args...)...)
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(wait):
+		return true
+	}
+}
+
+// newRecoverBackoff never gives up (MaxElapsedTime 0): Run is meant to
+// outlive any broker outage.
+func newRecoverBackoff() backoff.BackOff {
+	return backoff.NewExponentialBackOff(
+		backoff.WithInitialInterval(recoverInitialInterval),
+		backoff.WithMaxInterval(recoverMaxInterval),
+		backoff.WithMaxElapsedTime(0),
+	)
 }
 
 // handleMessage processes one fetched message inside a
