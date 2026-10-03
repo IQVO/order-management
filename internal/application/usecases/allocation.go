@@ -148,7 +148,13 @@ func publishOrderAllocationOutcome(
 	outcome allocationOutcome,
 	released []shared.ReleasedLine,
 ) error {
-	if outcome.allocated == 0 && outcome.backordered == 0 {
+	// Nothing to say only when this pass neither changed allocation NOR
+	// released anything. A held order's release (ADR 0020) re-enters with
+	// every line already Allocated -- allocated == 0 -- but releases them;
+	// wes-work-planning learns about released lines only from this event's
+	// Lines, so suppressing it left released held orders with no work ever
+	// created (they never shipped).
+	if outcome.allocated == 0 && outcome.backordered == 0 && len(released) == 0 {
 		return nil
 	}
 
