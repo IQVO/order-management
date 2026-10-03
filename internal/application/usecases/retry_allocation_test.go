@@ -30,13 +30,15 @@ func TestRetryAllocationClearsABackorderAndUnblocksShipComplete(t *testing.T) {
 	assertLineStatuses(t, got, order.LineReleased, order.LineReleased)
 	assertEventNames(t, f.events, "OrderLineAllocated", "OrderAllocated")
 
-	// ONLY the backordered line was retried — the already-allocated line
-	// was not reserved a second time.
-	if got := len(f.inventory.reserveCalls) - reservesBeforeRetry; got != 1 {
-		t.Fatalf("retry made %d reserve calls, want exactly 1 (the backordered line)", got)
+	// The backordered line is retried, and the already-allocated line is
+	// re-confirmed (not blindly trusted) before release: its reservation
+	// may have expired upstream while the order waited on the backorder.
+	// See release_reconfirm_test.go.
+	if got := len(f.inventory.reserveCalls) - reservesBeforeRetry; got != 2 {
+		t.Fatalf("retry made %d reserve calls, want 2 (retry the backordered line, re-confirm the allocated one)", got)
 	}
-	if last := f.inventory.reserveCalls[len(f.inventory.reserveCalls)-1]; last.SKU != "SKU-2" {
-		t.Fatalf("retry reserved %q, want SKU-2", last.SKU)
+	if first := f.inventory.reserveCalls[reservesBeforeRetry]; first.SKU != "SKU-2" {
+		t.Fatalf("retry reserved %q first, want the backordered SKU-2", first.SKU)
 	}
 
 	// The promise date was recomputed over both allocated lines.

@@ -403,6 +403,14 @@ func allocateAndRelease(
 		// passes, every line the aggregate now reports Allocated (this pass's
 		// newly-allocated lines, and any already-Allocated from an earlier
 		// pass) is eligible and is released right here, in the same flow.
+		// Reservations expire upstream; re-confirm every line about to be
+		// released that this pass did not just reserve. A lost reservation
+		// backorders the line, so EnsureReleasable (inside
+		// releaseAllocatedLines) blocks a ship-complete order.
+		blocked, recErr := reconfirmBeforeRelease(ctx, deps, o, lines, &outcome)
+		if recErr != nil || blocked {
+			return recErr
+		}
 		released, relErr := releaseAllocatedLines(o, promiseGroupByLine(o))
 		if relErr != nil {
 			return relErr
@@ -550,4 +558,82 @@ func ParseWorkUnitID(workUnitID string) (orderID shared.OrderId, lineNo int, ok 
 		return "", 0, false
 	}
 	return shared.OrderId(orderPart), n, true
+}
+
+// reconfirmAllocatedLines re-reserves every Allocated line NOT in justReserved
+// right before release. inventory-storage reservations expire (30 min TTL by
+// default), so a line allocated long ago -- an order that sat Backordered or
+// held -- may no longer hold any stock. Re-reserving is idempotent while the
+// reservation is still active (inventory-storage hands back the same one for
+// the same demandRef, SKU and quantity) and takes a fresh one if it lapsed.
+// If the stock is gone the line goes back to Backordered. It returns how many
+// lines lost their reservation.
+//
+// Observed live (warehouse-day order #003): a ship-complete order waited
+// Backordered for longer than the TTL; retry-allocation re-reserved only
+// the backordered line and released all three, two of them on EXPIRED
+// reservations, so the floor picked stock nothing held.
+func reconfirmAllocatedLines(
+	ctx context.Context,
+	inventory ports.InventoryReservationClient,
+	events ports.EventPublisher,
+	clock ports.Clock,
+	o *order.Order,
+	justReserved []*order.OrderLine,
+) (int, error) {
+	skip := make(map[int]bool, len(justReserved))
+	for _, l := range justReserved {
+		skip[l.LineNo()] = true
+	}
+	lost := 0
+	for _, line := range o.LinesWithStatus(order.LineAllocated) {
+		if skip[line.LineNo()] {
+			continue
+		}
+		result, err := inventory.Reserve(ctx, ports.ReservationRequest{
+			SKU:       line.SKU(),
+			Quantity:  line.Quantity(),
+			DemandRef: o.ID(),
+			LineNo:    line.LineNo(),
+			Attempt:   o.Version(),
+		})
+		switch {
+		case err == nil:
+			if err := o.ReconfirmReservation(line.LineNo(), result.ReservationID); err != nil {
+				return lost, err
+			}
+		case errors.Is(err, ports.ErrInsufficientStock):
+			if err := o.LoseReservation(line.LineNo()); err != nil {
+				return lost, err
+			}
+			lost++
+			if err := events.Publish(ctx, shared.NewOrderLineBackordered(
+				clock.Now(), o.ID(), line.LineNo(), line.SKU(), line.Quantity(),
+			)); err != nil {
+				return lost, err
+			}
+		default:
+			return lost, err
+		}
+	}
+	return lost, nil
+}
+
+// reconfirmBeforeRelease runs reconfirmAllocatedLines and, when a
+// ship-complete order lost a reservation, saves and publishes the
+// re-backordered state instead of releasing. blocked reports that the
+// caller must stop (release is not allowed this pass).
+func reconfirmBeforeRelease(ctx context.Context, deps allocationDeps, o *order.Order, justReserved []*order.OrderLine, outcome *allocationOutcome) (bool, error) {
+	lost, err := reconfirmAllocatedLines(ctx, deps.Inventory, deps.Events, deps.Clock, o, justReserved)
+	if err != nil {
+		return true, err
+	}
+	outcome.backordered += lost
+	if lost == 0 || o.AllowPartialShipment() {
+		return false, nil
+	}
+	if err := deps.Orders.Save(ctx, o); err != nil {
+		return true, err
+	}
+	return true, publishOrderAllocationOutcome(ctx, deps.Events, deps.Clock, o, *outcome, nil)
 }
