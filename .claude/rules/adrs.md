@@ -1,4 +1,8 @@
-# Architecture Decision Records (20 total, `docs/docs/adr/`)
+---
+paths:
+  - "docs/docs/adr/**"
+---
+# Architecture Decision Records (0001-0020 summarized here; 0021-0030 exist in `docs/docs/adr/` — read the file)
 
 1. **0001 — Hexagonal (ports & adapters) architecture.** The dependency
    rule this whole repo enforces (`internal/architecture/` fitness test).
@@ -11,9 +15,9 @@
 4. **0004 — The cancellation boundary is release.** BR6 in ADR form,
    including the documented "no clawback of released work" known gap.
 5. **0005 — Choreographed release via Kafka, folded allocate-then-release,
-   and pathId goes internal-only.** The big one: deletes `/allocate` and
-   `/release` REST verbs, deletes `ports.WorkReleaseClient` and
-   `internal/adapters/outbound/weswork/` entirely, replaces the synchronous
+   and pathId goes internal-only.** The big one: the `/allocate` and
+   `/release` REST verbs were deleted, as were `ports.WorkReleaseClient` and
+   the whole wes-work-planning HTTP outbound adapter; it replaces the synchronous
    wes-work-planning call with Kafka choreography, folds the whole saga into
    `ReceiveOrder`/`RetryAllocation`. **Read this before touching anything in
    the allocation/release path.**
@@ -195,8 +199,8 @@
     (`releaseHeldOrder`), `releaseOnAllocation`/`requiredShipBy` on
     `POST /orders`, `ErrOrderNotHeld` -> 409 `order-not-held`, migrations
     `0005_release_on_allocation`/`0006_required_ship_by`. The caller is
-    `network-fulfillment` (`internal/adapters/outbound/ordermanagement`:
-    `POST /orders`, `POST /orders/{id}/release`, `DELETE /orders/{id}`).
+    `network-fulfillment` (its own order-management outbound adapter, in
+    that repo: `POST /orders`, `POST /orders/{id}/release`, `DELETE /orders/{id}`).
 
 **0026 — ACCEPTED: per-workload HorizontalPodAutoscaler and pgxpool
 MaxConns/statement_timeout tuning (Phase 3 scalability).** An
