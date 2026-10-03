@@ -1,3 +1,12 @@
+---
+paths:
+  - ".github/**"
+  - "Makefile"
+  - ".gremlins.yaml"
+  - ".golangci.yml"
+  - "lefthook.yml"
+---
+
 # CI / quality gates
 
 ## GitHub Actions workflows (`.github/workflows/`)
