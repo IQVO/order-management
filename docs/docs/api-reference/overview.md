@@ -92,6 +92,7 @@ other services in this platform emit:
 | `no-backordered-lines` | 409 | `RetryAllocation` on an order with nothing backordered |
 | `order-not-held` | 409 | `ReleaseHeldOrder` on an order that was not held at intake (ADR 0020) |
 | `downstream-not-configured` | 503 | a Supplier client is running in permissive (no-op) mode |
+| `downstream-unavailable` | 503 | inventory-storage failed (transport error, timeout, open circuit breaker, unexpected status) on `POST /orders/{id}/retry-allocation` or `DELETE /orders/{id}` (ADR 0003) |
 | `internal-error` | 500 | anything unmapped — currently including `ErrHeldOrderMustBeShipComplete`, which returns status 422 but has no dedicated `type` yet |
 
 `problemFor` in `internal/adapters/inbound/http/errors.go` also maps

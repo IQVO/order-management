@@ -16,6 +16,7 @@ package inventorystorage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	gobreaker "github.com/sony/gobreaker/v2"
@@ -101,7 +102,8 @@ func (c *BreakerClient) Reserve(ctx context.Context, req ports.ReservationReques
 		return c.inner.Reserve(callCtx, req)
 	})
 	if isBreakerRejection(err) {
-		return c.fallback.Reserve(ctx, req)
+		res, ferr := c.fallback.Reserve(ctx, req)
+		return res, breakerOpen(ferr)
 	}
 	if err != nil {
 		return ports.ReservationResult{}, err
@@ -118,9 +120,22 @@ func (c *BreakerClient) RevokeReservation(ctx context.Context, reservationID str
 		return nil, c.inner.RevokeReservation(callCtx, reservationID)
 	})
 	if isBreakerRejection(err) {
-		return c.fallback.RevokeReservation(ctx, reservationID)
+		return breakerOpen(c.fallback.RevokeReservation(ctx, reservationID))
 	}
 	return err
+}
+
+// breakerOpen tags the permissive fallback's refusal while the circuit
+// is open as ports.ErrDownstreamUnavailable too, keeping
+// ports.ErrDownstreamNotConfigured reachable via errors.Is. Both map to
+// 503; the extra tag lets the HTTP adapter report the accurate problem
+// type (downstream-unavailable) instead of claiming the downstream is
+// "not configured" when it is merely failing.
+func breakerOpen(fallbackErr error) error {
+	if fallbackErr == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: circuit open: %w", ports.ErrDownstreamUnavailable, fallbackErr)
 }
 
 // isBreakerRejection reports whether err is gobreaker refusing to even

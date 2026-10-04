@@ -43,10 +43,12 @@ func statusFor(err error) int {
 		return http.StatusConflict
 
 	// The downstream Suppliers are not wired up (permissive mode), or an
-	// ambiguous transport/5xx failure reached this context. Neither is the
-	// caller's fault and neither is a business fact, so both surface as
-	// 503 rather than being papered over with a 2xx.
+	// ambiguous transport/timeout/5xx failure reached this context (or the
+	// circuit breaker is open). Neither is the caller's fault and neither
+	// is a business fact, so both surface as 503 rather than being
+	// papered over with a 2xx (ADR-0003).
 	case errors.Is(err, ports.ErrDownstreamNotConfigured),
+		errors.Is(err, ports.ErrDownstreamUnavailable),
 		errors.Is(err, ports.ErrInsufficientStock):
 		return http.StatusServiceUnavailable
 
@@ -107,6 +109,10 @@ var problemCatalog = []struct {
 	// ambiguous transport/5xx failure reached this context. Neither is the
 	// caller's fault and neither is a business fact, so both surface as
 	// 503 rather than being papered over with a 2xx.
+	// downstream-unavailable is listed BEFORE downstream-not-configured:
+	// an open circuit breaker wraps both sentinels, and "unavailable" is
+	// the accurate type for it.
+	{ports.ErrDownstreamUnavailable, problemInfo{"downstream-unavailable", "A downstream service is unavailable or answered unexpectedly"}},
 	{ports.ErrDownstreamNotConfigured, problemInfo{"downstream-not-configured", "A downstream service is running in permissive (no-op) mode"}},
 	{ports.ErrInsufficientStock, problemInfo{"insufficient-stock", "Insufficient usable stock reported by inventory-storage"}},
 }
