@@ -106,13 +106,60 @@ type orderLineResponse struct {
 }
 
 type orderResponse struct {
-	ID                   string              `json:"id"`
-	Status               string              `json:"status"`
-	AllowPartialShipment bool                `json:"allowPartialShipment"`
-	ReleaseOnAllocation  bool                `json:"releaseOnAllocation"`
-	RequiredShipBy       *time.Time          `json:"requiredShipBy,omitempty"`
-	PromiseDate          *string             `json:"promiseDate,omitempty"`
-	Lines                []orderLineResponse `json:"lines"`
+	ID                   string     `json:"id"`
+	Status               string     `json:"status"`
+	AllowPartialShipment bool       `json:"allowPartialShipment"`
+	ReleaseOnAllocation  bool       `json:"releaseOnAllocation"`
+	RequiredShipBy       *time.Time `json:"requiredShipBy,omitempty"`
+	PromiseDate          *string    `json:"promiseDate,omitempty"`
+	// CapacityConstraint is present ONLY when the order's promise overlaps a
+	// published warehouse-planning shortage window at the configured site
+	// (ADR 0031). It is a derived, read-time annotation: it never changes
+	// the promise, the status or the allocation, and it is omitted entirely
+	// when there is no such window — so with no planning events consumed the
+	// response is byte-identical to what it was before.
+	CapacityConstraint *capacityConstraintResponse `json:"capacityConstraint,omitempty"`
+	Lines              []orderLineResponse         `json:"lines"`
+}
+
+// capacityConstraintResponse explains WHY an order is capacity-constrained:
+// the site it was matched on and each planned shortage window it overlaps.
+type capacityConstraintResponse struct {
+	Constrained bool                         `json:"constrained"`
+	Site        string                       `json:"site"`
+	Windows     []plannedCapacityWindowBrief `json:"windows"`
+}
+
+// plannedCapacityWindowBrief is the explainable subset of a planned
+// capacity window attached to an order.
+type plannedCapacityWindowBrief struct {
+	PlanID         string  `json:"planId"`
+	WindowStart    string  `json:"windowStart"`
+	WindowEnd      string  `json:"windowEnd"`
+	Shortage       float64 `json:"shortage"`
+	BottleneckStep string  `json:"bottleneckStep,omitempty"`
+}
+
+// plannedCapacityWindowResponse is one row of GET /planned-capacity.
+type plannedCapacityWindowResponse struct {
+	PlanID             string  `json:"planId"`
+	WarehouseID        string  `json:"warehouseId"`
+	Location           string  `json:"location"`
+	PathID             string  `json:"pathId,omitempty"`
+	WindowStart        string  `json:"windowStart"`
+	WindowEnd          string  `json:"windowEnd"`
+	AssignedDemand     float64 `json:"assignedDemand"`
+	CapacityOverWindow float64 `json:"capacityOverWindow"`
+	Shortage           float64 `json:"shortage"`
+	BottleneckStep     string  `json:"bottleneckStep,omitempty"`
+	Status             string  `json:"status"`
+	AsOf               string  `json:"asOf"`
+}
+
+// plannedCapacityResponse is the body of GET /planned-capacity.
+type plannedCapacityResponse struct {
+	Site    string                          `json:"site"`
+	Windows []plannedCapacityWindowResponse `json:"windows"`
 }
 
 // problemDetails is the RFC 7807 (Problem Details for HTTP APIs) response

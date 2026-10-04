@@ -1,0 +1,17 @@
+PROPOSED CLAUDE.md CHANGE (not applied; CLAUDE.md is protected from tool writes).
+Apply by the parent. Insert this bullet into "## Hard rules (NON-NEGOTIABLE)", directly after the
+"CloudEvents 1.0 is MANDATORY ..." bullet (i.e. before the "- **Tests:**" bullet), and add
+`.claude/rules/adrs.md` (0031) to nothing else — the rule files were already updated in this PR.
+
+- **Planned capacity is advisory (ADR-0031):** `warehouse-planning`'s CapacityPlan events feed a LOCAL
+  read model (`order.PlannedCapacityWindow`, Postgres `planned_capacity_windows`; never a live call to
+  that service). A PUBLISHED shortage overlapping an order's `[now, promise cutoff)` at
+  `PLANNED_CAPACITY_SITE_ID` only ANNOTATES the order response (`capacityConstraint`, derived at read
+  time): it MUST NOT move a promise, reject/hold an order, change `Status`, or touch allocation or
+  reservations (ADR-0003/0017 fill-or-kill is unchanged). The consumer group id comes from
+  `PLANNED_CAPACITY_CONSUMER_GROUP` (no default; unset = feature off). Read the ADR before touching
+  `internal/domain/order/planned_capacity.go` or `inbound/kafka/planned_capacity_consumer.go`.
+
+Optional second edit, in the "Commands"/rule-file index sentence: nothing needed (`adrs.md`,
+`domain-model.md`, `cloudevents-events.md`, `hexagonal-layout.md`, `deferred-and-known-gaps.md` and
+`ci-quality-gates.md` were updated directly in this PR).

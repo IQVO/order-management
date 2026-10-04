@@ -52,9 +52,21 @@ spec:
               value: {{ .Values.config.httpAddr | quote }}
             - name: EVENT_PUBLISHER
               value: {{ .Values.config.eventPublisher | quote }}
-            {{- if eq .Values.config.eventPublisher "kafka" }}
+            {{- if or (eq .Values.config.eventPublisher "kafka") .Values.plannedCapacity.consumerGroup }}
             - name: KAFKA_BROKERS
               value: {{ .Values.kafka.brokers | quote }}
+            {{- end }}
+            {{- if .Values.plannedCapacity.consumerGroup }}
+            # ADR 0031: consume warehouse-planning's capacity plans. The
+            # group id is a fixed, stable value (a restarted pod resumes
+            # from its committed offsets); empty (the default) renders
+            # nothing and the integration stays off.
+            - name: PLANNED_CAPACITY_CONSUMER_GROUP
+              value: {{ .Values.plannedCapacity.consumerGroup | quote }}
+            {{- if .Values.plannedCapacity.siteId }}
+            - name: PLANNED_CAPACITY_SITE_ID
+              value: {{ .Values.plannedCapacity.siteId | quote }}
+            {{- end }}
             {{- end }}
             - name: INVENTORY_STORAGE_MODE
               value: {{ .Values.inventoryStorage.mode | quote }}

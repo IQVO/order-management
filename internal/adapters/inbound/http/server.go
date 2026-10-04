@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -31,6 +32,14 @@ type Server struct {
 	ReleaseHeld     *usecases.ReleaseHeldOrder
 	CancelOrder     *usecases.CancelOrder
 	GetOrder        *usecases.GetOrder
+	// CapacityConstraints annotates order responses with the published
+	// warehouse-planning shortage windows their promise overlaps (ADR 0031).
+	// Optional: nil (every pre-existing caller/test, and any deployment with
+	// no planned-capacity read model) means no annotation.
+	CapacityConstraints *usecases.OrderCapacityConstraints
+	// PlannedCapacity backs GET /planned-capacity (ADR 0031). Optional: nil
+	// leaves the route unregistered (404), as before.
+	PlannedCapacity *usecases.GetPlannedCapacity
 	// IdempotencyPool, when non-nil, wires RequireIdempotencyKey onto
 	// POST /orders (see idempotency.go). A nil pool means "no
 	// transactional Postgres backing wired" (in-memory dev/test
@@ -101,6 +110,9 @@ func NewRouter(s *Server, logger *slog.Logger, serviceName string) http.Handler 
 	r.Post("/orders/{id}/retry-allocation", s.handleRetryAllocation)
 	r.Post("/orders/{id}/release", s.handleReleaseHeldOrder)
 	r.Delete("/orders/{id}", s.handleCancelOrder)
+	if s.PlannedCapacity != nil {
+		r.Get("/planned-capacity", s.handleGetPlannedCapacity)
+	}
 
 	return r
 }
@@ -148,7 +160,7 @@ func (s *Server) handleReceiveOrder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Location", "/orders/"+o.ID().String())
-	writeJSON(w, http.StatusCreated, toOrderResponse(o))
+	writeJSON(w, http.StatusCreated, s.orderResponse(r.Context(), o))
 }
 
 func (s *Server) handleGetOrder(w http.ResponseWriter, r *http.Request) {
@@ -161,7 +173,7 @@ func (s *Server) handleGetOrder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toOrderResponse(o))
+	writeJSON(w, http.StatusOK, s.orderResponse(r.Context(), o))
 }
 
 func (s *Server) handleRetryAllocation(w http.ResponseWriter, r *http.Request) {
@@ -174,7 +186,7 @@ func (s *Server) handleRetryAllocation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toOrderResponse(o))
+	writeJSON(w, http.StatusOK, s.orderResponse(r.Context(), o))
 }
 
 // handleReleaseHeldOrder commits an order held at intake
@@ -191,7 +203,7 @@ func (s *Server) handleReleaseHeldOrder(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toOrderResponse(o))
+	writeJSON(w, http.StatusOK, s.orderResponse(r.Context(), o))
 }
 
 func (s *Server) handleCancelOrder(w http.ResponseWriter, r *http.Request) {
@@ -204,6 +216,75 @@ func (s *Server) handleCancelOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// orderResponse builds the order DTO and, when a planned-capacity read model
+// is wired, annotates it with the capacity constraint (ADR 0031). A failing
+// read model is logged and omitted: an order read must never fail because an
+// advisory annotation is unavailable.
+func (s *Server) orderResponse(ctx context.Context, o *order.Order) orderResponse {
+	resp := toOrderResponse(o)
+	if s.CapacityConstraints == nil {
+		return resp
+	}
+	windows, err := s.CapacityConstraints.For(ctx, o)
+	if err != nil {
+		slog.WarnContext(ctx, "capacity constraint lookup failed; omitting annotation",
+			"order_id", o.ID().String(), "error", err)
+		return resp
+	}
+	if len(windows) == 0 {
+		return resp
+	}
+	brief := make([]plannedCapacityWindowBrief, len(windows))
+	for i, w := range windows {
+		brief[i] = plannedCapacityWindowBrief{
+			PlanID: w.PlanID, WindowStart: w.Start.UTC().Format(timeFormat), WindowEnd: w.End.UTC().Format(timeFormat),
+			Shortage: w.Shortage, BottleneckStep: w.BottleneckStep,
+		}
+	}
+	resp.CapacityConstraint = &capacityConstraintResponse{Constrained: true, Site: s.CapacityConstraints.SiteID, Windows: brief}
+	return resp
+}
+
+// handleGetPlannedCapacity serves the local planned-capacity read model for
+// one site: GET /planned-capacity?site=SIM1[&from=RFC3339]. It lists windows
+// of any status ending after `from` (default: now), so an operator can see
+// drafts as well as the published shortages that annotate orders.
+func (s *Server) handleGetPlannedCapacity(w http.ResponseWriter, r *http.Request) {
+	site := r.URL.Query().Get("site")
+	if site == "" {
+		writeProblem(w, http.StatusBadRequest, problemInfo{"invalid-query-parameter", "A required query parameter is missing or invalid"},
+			"query parameter \"site\" is required", r.URL.Path)
+		return
+	}
+	var from *time.Time
+	if r.URL.Query().Has("from") {
+		// Presence, not non-emptiness: `from=` is an invalid timestamp (400),
+		// never a silent "now".
+		t, err := time.Parse(timeFormat, r.URL.Query().Get("from"))
+		if err != nil {
+			writeProblem(w, http.StatusBadRequest, problemInfo{"invalid-query-parameter", "A required query parameter is missing or invalid"},
+				"query parameter \"from\" must be an RFC 3339 timestamp", r.URL.Path)
+			return
+		}
+		from = &t
+	}
+	windows, err := s.PlannedCapacity.Execute(r.Context(), site, from)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	out := make([]plannedCapacityWindowResponse, len(windows))
+	for i, c := range windows {
+		out[i] = plannedCapacityWindowResponse{
+			PlanID: c.PlanID, WarehouseID: c.WarehouseID, Location: c.Location, PathID: c.PathID,
+			WindowStart: c.Start.UTC().Format(timeFormat), WindowEnd: c.End.UTC().Format(timeFormat),
+			AssignedDemand: c.AssignedDemand, CapacityOverWindow: c.CapacityOverWindow, Shortage: c.Shortage,
+			BottleneckStep: c.BottleneckStep, Status: string(c.Status), AsOf: c.AsOf.UTC().Format(timeFormat),
+		}
+	}
+	writeJSON(w, http.StatusOK, plannedCapacityResponse{Site: site, Windows: out})
 }
 
 // orderIDParam extracts and validates the {id} path parameter, writing the

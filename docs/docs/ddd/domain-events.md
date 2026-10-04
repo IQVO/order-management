@@ -70,6 +70,13 @@ for the re-promise feedback loop. In short:
 - **Inbound topic (ADR 0018 only):** `warehouse.fulfillment.events` —
   fulfillment-execution's shared/fan-out topic, consumed ONLY for
   `TaskCPTMissed`/`PackageManifested`.
+- **Inbound topic (ADR 0031, opt-in):** `warehouse.warehouse-planning.events` —
+  warehouse-planning's `CapacityPlanCreated`/`CapacityPlanPublished`/
+  `CapacityShortageDetected` (and `BottleneckDetected`, recognised and
+  ignored) feed a local planned-capacity read model; a published shortage
+  overlapping an order's promise annotates the order response. No event is
+  published in return and no promise moves. Enabled only when
+  `PLANNED_CAPACITY_CONSUMER_GROUP` is set.
 - **Envelope:** CloudEvents 1.0, structured content mode, mandatory on
   every topic ([ADR 0030](/docs/adr/0030-cloudevents-mandatory-event-envelope)):
   `{specversion, id, source: /warehouse/order-management, type:

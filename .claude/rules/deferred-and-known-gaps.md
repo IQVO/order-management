@@ -26,6 +26,13 @@ Still deferred, as of the last verified pass:
   remains the tagged fallback), i.e. the instant the order leaves the
   building — there is no live carrier or transit-time integration, and no
   such service exists in this fleet to call.
+- **A fulfillment site on the order (ADR-0031).** Orders carry no site, so
+  the planned-capacity annotation matches `PLANNED_CAPACITY_SITE_ID`
+  (default `DEFAULT_SITE_ID`) like the promise does; if that differs from
+  warehouse-planning's `location`, no order is annotated. Also deferred: a
+  path-level match (planning's `path_id` is its own label), pushing the
+  promise on a shortage (a shortage is a quantity, not a delay) and an
+  `OrderCapacityConstrained` event.
 - **Multi-path selection.** `PathSelectionPolicy` evaluates eligibility
   (ADR-0016) but can only choose `shared.DefaultPathId`:
   `ports.ProcessPathCatalogue` has no "list active paths" method.

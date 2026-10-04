@@ -86,6 +86,7 @@ Typos, broken links and formatting are of course fair game.
 | [0024](./0024-optimistic-concurrency-version-column.md) | Optimistic concurrency (version column) for the Order aggregate | Accepted |
 | [0027](./0027-kafka-integration-publisher-partition-key.md) | Partition key (OrderId) on the integration publisher's Kafka messages | Accepted |
 | [0030](./0030-cloudevents-mandatory-event-envelope.md) | CloudEvents 1.0 as the mandatory event envelope | Accepted |
+| [0031](./0031-consume-warehouse-planning-capacity-plans.md) | Consume warehouse-planning's capacity plans into a local planned-capacity read model | Accepted |
 
 Each of these reconstructs a decision that is actually visible in this
 repository's `CLAUDE.md` and code — none is a generic placeholder.

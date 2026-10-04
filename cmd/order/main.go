@@ -121,6 +121,13 @@ func run() error {
 	clock := memory.SystemClock{}
 	server := buildInboundServer(orders, publisher, clock, promise, lookups.inventory, lookups.classification, catalogue, orderMetrics, uow, dbPool, readiness)
 
+	// ADR 0031: planned capacity from warehouse-planning. A nil value (the
+	// consumer-group env unset) leaves everything below exactly as before.
+	if pc := buildPlannedCapacity(dbPool, logger); pc != nil {
+		pc.attach(server, clock)
+		defer pc.startConsumer(logger)()
+	}
+
 	repromiseConsumerCtx, cancelRepromiseConsumer := context.WithCancel(context.Background())
 	defer cancelRepromiseConsumer()
 	repromiseOrder := newRepromiseOrder(orders, publisher, clock, promise, repromiseProcessed, uow, logger)

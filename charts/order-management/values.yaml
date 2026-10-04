@@ -162,12 +162,28 @@ database:
   # incompatibility this key exists to route migrations around.
   migrationsExistingSecretKey: "MIGRATIONS_DATABASE_URL"
 
-# KAFKA_BROKERS is only rendered when config.eventPublisher is "kafka".
-# Unlike fulfillment-execution, order-management has no inbound Kafka
-# consumer — this is purely the outbound domain-event publisher toggle
-# (cmd/order/main.go: buildRepoAdapters, EVENT_PUBLISHER env var).
+# KAFKA_BROKERS is rendered when config.eventPublisher is "kafka" OR
+# plannedCapacity.consumerGroup is set (the planned-capacity consumer needs
+# a broker even when events are only logged).
 kafka:
   brokers: "kafka:9092"
+
+# Planned capacity from warehouse-planning (ADR 0031). When consumerGroup is
+# set, cmd/order consumes warehouse.warehouse-planning.events into a local
+# planned-capacity read model, serves GET /planned-capacity, and annotates an
+# order response with `capacityConstraint` when its promise overlaps a
+# published shortage window at siteId. EMPTY (the default) renders no env at
+# all and the service behaves exactly as before.
+plannedCapacity:
+  # PLANNED_CAPACITY_CONSUMER_GROUP. A fixed, stable id: a restarted pod
+  # resumes from its committed offsets and N replicas share partitions. Never
+  # share it with another environment's cluster. There is deliberately no
+  # default in the binary, so a locally run process cannot join this group.
+  consumerGroup: ""
+  # PLANNED_CAPACITY_SITE_ID: the warehouse-planning `location` (site/building
+  # code, e.g. SIM1) an order's promise is matched against. Empty falls back
+  # to the binary's DEFAULT_SITE_ID, i.e. the site the promise is computed for.
+  siteId: ""
 
 # inventory-storage is this service's outbound HTTP dependency for per-line
 # stock allocation (POST/DELETE /reservations). Defaults to "permissive"

@@ -218,6 +218,7 @@ jobs:
           go test -tags=integration ./internal/adapters/outbound/kafkacptschedule
           go test -tags=integration ./internal/adapters/outbound/kafkapathcapacity
           go test -tags=integration ./internal/adapters/inbound/kafka
+          go test -tags=integration ./internal/adapters/outbound/postgres
 
 
   # ============================================================

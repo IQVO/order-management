@@ -89,6 +89,7 @@ const sidebars: SidebarsConfig = {
         'adr/0024-optimistic-concurrency-version-column',
         'adr/0027-kafka-integration-publisher-partition-key',
         'adr/0030-cloudevents-mandatory-event-envelope',
+        'adr/0031-consume-warehouse-planning-capacity-plans',
       ],
     },
   ],
