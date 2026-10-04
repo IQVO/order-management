@@ -396,44 +396,83 @@ func serveAndShutdown(
 	case <-ctx.Done():
 	}
 
-	return drainUnderShutdown(logger, httpServer, readiness,
+	return drainUnderShutdown(logger, httpServer, readiness, drainDelayFromEnv(logger),
 		stopRelay, relayDone,
 		repromiseConsumer, repromiseConsumerDone, cancelRepromiseConsumer)
 }
 
+// DefaultShutdownDrainDelay is how long shutdown waits, after flipping
+// /readyz to not-ready and before closing the listener, for Kubernetes'
+// readinessProbe (periodSeconds 5) and the endpoint controller to
+// observe the flip and stop routing NEW traffic to this pod (ADR-0025
+// §8). SHUTDOWN_DRAIN_DELAY overrides it; "0" disables the wait (tests,
+// local dev).
+const DefaultShutdownDrainDelay = 5 * time.Second
+
+// shutdownBudget bounds HTTP drain + consumer stop + relay final pass.
+const shutdownBudget = 10 * time.Second
+
+// drainDelayFromEnv reads SHUTDOWN_DRAIN_DELAY. Unlike durationEnv, 0 is
+// a legal value (disable the delay); negative or unparsable values fall
+// back to DefaultShutdownDrainDelay with a warning.
+func drainDelayFromEnv(logger *slog.Logger) time.Duration {
+	raw := os.Getenv("SHUTDOWN_DRAIN_DELAY")
+	if raw == "" {
+		return DefaultShutdownDrainDelay
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		logger.Warn("ignoring invalid duration env var", "key", "SHUTDOWN_DRAIN_DELAY", "value", raw, "fallback", DefaultShutdownDrainDelay.String())
+		return DefaultShutdownDrainDelay
+	}
+	return d
+}
+
 // drainUnderShutdown performs the ADR-0025 §graceful shutdown sequence:
-// flip readiness first, drain the HTTP server, then stop and await the
-// outbox relay and the repromise consumer, all bounded by one 10s
-// deadline (see the numbered steps below).
+//
+//  1. readiness.SetNotReady() — /readyz answers 503 so the readinessProbe
+//     stops routing new traffic here;
+//  2. wait drainDelay — time for the probe/endpoint controller to observe
+//     the flip BEFORE the listener closes (otherwise requests still being
+//     routed hit a closed port);
+//  3. httpServer.Shutdown — drain in-flight requests (writer #1 of the
+//     outbox);
+//  4. stop and await the repromise consumer, including the commit of the
+//     message it is mid-handling (writer #2 of the outbox);
+//  5. stop and await the outbox relay LAST — it must make its final pass
+//     only after every writer has stopped, otherwise an event committed
+//     by the HTTP drain or the consumer's last message would be stranded
+//     until the next pod boots (ADR-0022).
+//
+// Steps 3-5 share one shutdownBudget deadline; the drain delay is outside
+// it (terminationGracePeriodSeconds must cover delay + budget).
 func drainUnderShutdown(
 	logger *slog.Logger,
-	httpServer *http.Server,
+	httpServer interface {
+		Shutdown(ctx context.Context) error
+	},
 	readiness *inboundhttp.Readiness,
+	drainDelay time.Duration,
 	stopRelay context.CancelFunc,
 	relayDone <-chan struct{},
 	repromiseConsumer *inboundkafka.RepromiseConsumer,
 	repromiseConsumerDone <-chan struct{},
 	cancelRepromiseConsumer context.CancelFunc,
 ) error {
+	readiness.SetNotReady()
+	if drainDelay > 0 {
+		logger.Info("shutdown: readiness flipped to not-ready; waiting for traffic to drain", "drain_delay", drainDelay.String())
+		time.Sleep(drainDelay)
+	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownBudget)
 	defer cancel()
 	err := httpServer.Shutdown(shutdownCtx)
 
-	// Let the relay finish its in-flight pass so an event committed by a
-	// request that completed just before shutdown is not stranded until
-	// the next pod boots.
-	stopRelay()
-	select {
-	case <-relayDone:
-	case <-shutdownCtx.Done():
-		logger.Warn("outbox relay did not stop before the shutdown deadline")
-	}
-
 	// Stop the repromise consumer's loop cleanly: cancel so no NEW
 	// message is fetched, then wait (bounded) for any message already
-	// being handled to finish — including its offset commit — before
-	// this function returns and the deferred repromiseConsumer.Close()/
+	// being handled to finish — including its offset commit — before the
+	// relay's final pass and the deferred repromiseConsumer.Close()/
 	// closeAdapters() calls run.
 	cancelRepromiseConsumer()
 	if repromiseConsumer != nil {
@@ -442,6 +481,16 @@ func drainUnderShutdown(
 		case <-shutdownCtx.Done():
 			logger.Warn("repromise consumer did not stop before the shutdown deadline")
 		}
+	}
+
+	// Every outbox writer has now stopped: let the relay finish its
+	// in-flight pass so events committed by the last HTTP request or the
+	// consumer's last message are not stranded until the next pod boots.
+	stopRelay()
+	select {
+	case <-relayDone:
+	case <-shutdownCtx.Done():
+		logger.Warn("outbox relay did not stop before the shutdown deadline")
 	}
 
 	return err

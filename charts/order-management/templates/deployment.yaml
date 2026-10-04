@@ -52,6 +52,8 @@ spec:
               value: {{ .Values.config.httpAddr | quote }}
             - name: EVENT_PUBLISHER
               value: {{ .Values.config.eventPublisher | quote }}
+            - name: SHUTDOWN_DRAIN_DELAY
+              value: {{ .Values.config.shutdownDrainDelay | quote }}
             {{- if or (eq .Values.config.eventPublisher "kafka") .Values.plannedCapacity.consumerGroup }}
             - name: KAFKA_BROKERS
               value: {{ .Values.kafka.brokers | quote }}

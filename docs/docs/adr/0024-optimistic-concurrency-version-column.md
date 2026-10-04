@@ -165,19 +165,23 @@ switches to `409 Conflict`, in the same case-group as the other
 `RepromiseOrder.Execute` returns the version conflict unchanged (it is
 already an ordinary `error` return, and `allocateAndRelease`'s
 `atomically()` wrapper propagates it as-is). `RepromiseConsumer.
-handleMessage` gives it a dedicated branch, distinct from every other
-error: the message is logged but **NOT committed**, so it is safely
-redelivered (this consumer is already an at-least-once, real
-Kafka-offset-committing consumer with its own `RepromiseOrder`-internal
-idempotency gate keyed on `event_id` — reprocessing a redelivered
-message is a normal, already-supported code path, not a new failure
-mode). Every OTHER error from `handleFulfillmentEvent` is still logged
-and committed (skip-and-move-on), matching this consumer's existing
-convention for malformed/unhandleable messages — a version conflict is
-the one case that is neither "malformed" nor "permanent," so it alone
-gets the "leave it for redelivery" treatment. The consume loop itself
-does not abort on a version conflict: one order's transient conflict
-must not stop repromising every other order in the same partition.
+handleMessage` treats it as a **transient failure to retry in-process**:
+`handleWithRetry` re-runs the handler (which re-reads the order, so each
+attempt reasons about the competing writer's now-current state) with the
+same bounded, jittered backoff as every other infrastructure error
+(`maxHandlerAttempts`, ADR-0025 §6). Only if every attempt conflicts is
+the message dead-lettered (`<topic>.dlq`, raw payload + `x-dlq-*`
+headers) and its offset committed — a version conflict is **never
+swallowed**. The consume loop itself does not abort: one order's
+conflict must not stop repromising every other order in the partition.
+
+> **Correction (2026-10 ADR-conformance audit).** The original text of
+> this section had the consumer return `nil` WITHOUT committing, calling
+> that "safe redelivery". It was not: with kafka-go's `FetchMessage` the
+> reader advances in memory and the NEXT message's commit moves the
+> group offset past the uncommitted one, so the message was silently
+> skipped (redelivery only happens after a rebalance/restart that
+> occurs before any later commit). Retry-then-DLQ replaces it.
 
 ## Consequences
 
