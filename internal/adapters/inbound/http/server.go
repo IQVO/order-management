@@ -259,8 +259,10 @@ func (s *Server) handleGetPlannedCapacity(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var from *time.Time
-	if raw := r.URL.Query().Get("from"); raw != "" {
-		t, err := time.Parse(timeFormat, raw)
+	if r.URL.Query().Has("from") {
+		// Presence, not non-emptiness: `from=` is an invalid timestamp (400),
+		// never a silent "now".
+		t, err := time.Parse(timeFormat, r.URL.Query().Get("from"))
 		if err != nil {
 			writeProblem(w, http.StatusBadRequest, problemInfo{"invalid-query-parameter", "A required query parameter is missing or invalid"},
 				"query parameter \"from\" must be an RFC 3339 timestamp", r.URL.Path)

@@ -33,7 +33,16 @@ go build -o "$BIN" ./cmd/order
 # (cmd/order/main.go) defaults to the in-memory repo adapters, the log
 # event publisher, permissive (no-op) inventory/classification lookups and
 # no Kafka consumers, so the service serves its OWN REST API standalone.
-HTTP_ADDR="127.0.0.1:${PORT}" "$BIN" &
+#
+# The ONE env var set is PLANNED_CAPACITY_CONSUMER_GROUP (ADR 0031): it is the
+# planned-capacity integration's on/off switch, and without it GET
+# /planned-capacity is not registered at all, so the spec would be tested
+# against a 404. KAFKA_BROKERS stays unset, so no consumer starts (no broker is
+# dialled) and the read model is empty — exactly what the contract needs.
+HTTP_ADDR="127.0.0.1:${PORT}" \
+  PLANNED_CAPACITY_CONSUMER_GROUP="contract-test-planned-capacity" \
+  PLANNED_CAPACITY_SITE_ID="SIM1" \
+  "$BIN" &
 SERVER_PID=$!
 trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
 

@@ -189,7 +189,10 @@ every existing test are untouched.
 A read endpoint over the local model (windows of every status ending after
 `from`, default now, ordered by start) so an operator can see what order
 annotations are derived from. `site` is required (400 otherwise), `from` must
-be RFC 3339 (400 otherwise). Registered only when the integration is enabled.
+be RFC 3339 (400 otherwise, including an empty `from=`). Registered only when the
+integration is enabled (otherwise the router's 404, which the OpenAPI documents);
+`scripts/contract-test.sh` sets `PLANNED_CAPACITY_CONSUMER_GROUP` so Schemathesis
+contract-tests the route for real.
 
 ### 5. Site matching: the one honest simplification
 

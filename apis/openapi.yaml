@@ -494,6 +494,11 @@ paths:
                 status: 400
                 detail: query parameter "site" is required
                 instance: /planned-capacity
+        "404":
+          description: >
+            The planned-capacity integration is not enabled on this
+            deployment (`PLANNED_CAPACITY_CONSUMER_GROUP` unset): the route is
+            not registered, so the router's default 404 answers.
         "500":
           $ref: "#/components/responses/InternalError"
 

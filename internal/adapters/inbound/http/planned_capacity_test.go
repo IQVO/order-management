@@ -242,6 +242,12 @@ func TestGetPlannedCapacity_ErrorPaths(t *testing.T) {
 	t.Run("unparseable from is a 400 problem", func(t *testing.T) {
 		assertProblem(t, env.do(t, http.MethodGet, "/planned-capacity?site=SIM1&from=yesterday", ""), http.StatusBadRequest)
 	})
+	t.Run("an empty from is a 400 problem, not a silent now", func(t *testing.T) {
+		assertProblem(t, env.do(t, http.MethodGet, "/planned-capacity?site=SIM1&from=", ""), http.StatusBadRequest)
+	})
+	t.Run("an empty site is a 400 problem", func(t *testing.T) {
+		assertProblem(t, env.do(t, http.MethodGet, "/planned-capacity?site=", ""), http.StatusBadRequest)
+	})
 	t.Run("a read-model failure is a 500 problem", func(t *testing.T) {
 		failing := newPlannedCapacityEnv(t, pcFailingRepo{err: errors.New("db down")})
 		assertProblem(t, failing.do(t, http.MethodGet, "/planned-capacity?site=SIM1", ""), http.StatusInternalServerError)
