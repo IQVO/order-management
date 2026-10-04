@@ -14,10 +14,10 @@ const config: Config = {
     faster: true,
   },
 
-  url: 'https://claudioed.github.io',
+  url: 'https://iqvo.github.io',
   baseUrl: '/order-management/',
 
-  organizationName: 'claudioed',
+  organizationName: 'IQVO',
   projectName: 'order-management',
   deploymentBranch: 'gh-pages',
   trailingSlash: false,
@@ -44,7 +44,7 @@ const config: Config = {
         docs: {
           sidebarPath: './sidebars.ts',
           editUrl:
-            'https://github.com/claudioed/order-management/tree/main/docs/',
+            'https://github.com/IQVO/order-management/tree/main/docs/',
           docItemComponent: '@theme/ApiItem',
         },
         blog: false,
@@ -108,7 +108,7 @@ const config: Config = {
           position: 'left',
         },
         {
-          href: 'https://github.com/claudioed/order-management',
+          href: 'https://github.com/IQVO/order-management',
           label: 'GitHub',
           position: 'right',
         },
@@ -130,18 +130,18 @@ const config: Config = {
           title: 'Ecosystem',
           items: [
             {label: 'Context map', to: '/docs/ecosystem/context-map'},
-            {label: 'inventory-storage', href: 'https://github.com/claudioed/inventory-storage'},
-            {label: 'wes-work-planning', href: 'https://github.com/claudioed/wes-work-planning'},
-            {label: 'workforce-management', href: 'https://github.com/claudioed/workforce-management'},
-            {label: 'fulfillment-execution', href: 'https://github.com/claudioed/fulfillment-execution'},
-            {label: 'facility-layout', href: 'https://github.com/claudioed/facility-layout'},
+            {label: 'inventory-storage', href: 'https://github.com/IQVO/inventory-storage'},
+            {label: 'wes-work-planning', href: 'https://github.com/IQVO/wes-work-planning'},
+            {label: 'workforce-management', href: 'https://github.com/IQVO/workforce-management'},
+            {label: 'fulfillment-execution', href: 'https://github.com/IQVO/fulfillment-execution'},
+            {label: 'facility-layout', href: 'https://github.com/IQVO/facility-layout'},
           ],
         },
         {
           title: 'Source',
           items: [
-            {label: 'GitHub repository', href: 'https://github.com/claudioed/order-management'},
-            {label: 'OpenAPI spec', href: 'https://github.com/claudioed/order-management/blob/main/apis/openapi.yaml'},
+            {label: 'GitHub repository', href: 'https://github.com/IQVO/order-management'},
+            {label: 'OpenAPI spec', href: 'https://github.com/IQVO/order-management/blob/main/apis/openapi.yaml'},
           ],
         },
       ],
