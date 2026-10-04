@@ -11,7 +11,8 @@
 // parsed out of that order_ref, it recomputes the promise for the
 // affected shipment group from the CURRENT capability/capacity inputs
 // (reusing PromisePolicy.PromiseGroups — ADR 0017's real, shipped
-// recompute — not new promise math) and, if the group's promise moved,
+// recompute — not new promise math; or PromisePolicy.FeasibleBy when the
+// order carries an externally-dictated requiredShipBy, ADR 0020) and, if the group's promise moved,
 // raises OrderRepromised and persists the new group breakdown.
 package usecases
 
@@ -111,7 +112,7 @@ func (uc *RepromiseOrder) Execute(ctx context.Context, req RepromiseOrderRequest
 			return nil
 		}
 
-		freshGroups, ok := uc.Promise.PromiseGroups(uc.Clock.Now(), o)
+		freshGroups, ok := uc.freshPromiseGroups(o)
 		if !ok {
 			uc.log("repromise: no fresh promise available for this order, skipping",
 				"event_id", req.SourceEventId, "order_id", req.OrderId.String(), "line_no", req.LineNo)
@@ -139,6 +140,36 @@ func (uc *RepromiseOrder) Execute(ctx context.Context, req RepromiseOrderRequest
 			uc.Clock.Now(), o.ID(), currentGroup.Promise.CptId, freshGroup.Promise.CptId, req.Reason,
 		))
 	})
+}
+
+// freshPromiseGroups recomputes the order's promise groups from current
+// inputs, honouring an externally-dictated deadline exactly as intake
+// does (ADR 0020 §2, allocationDeps.setPromiseDate): an order carrying
+// requiredShipBy is re-promised by FeasibleBy — never by PromiseGroups,
+// whose Capability/LeadTime answer may land past the deadline and would
+// silently break a fill-or-kill commitment an external party measures
+// us on. When the deadline is no longer feasible, ok=false: the caller
+// keeps the existing promise and publishes nothing, mirroring intake,
+// which also writes no promise it already knows breaks the deadline.
+func (uc *RepromiseOrder) freshPromiseGroups(o *order.Order) ([]order.PromiseGroup, bool) {
+	now := uc.Clock.Now()
+	if deadline := o.RequiredShipBy(); deadline != nil {
+		p, ok := uc.Promise.FeasibleBy(now, o, *deadline)
+		if !ok {
+			return nil, false
+		}
+		// Network demand is ship-complete (ADR 0020 §4): one group
+		// covering every line FeasibleBy reasoned about (Allocated or
+		// already Released).
+		var lineNos []int
+		for _, l := range o.Lines() {
+			if l.Status() == order.LineAllocated || l.Status() == order.LineReleased {
+				lineNos = append(lineNos, l.LineNo())
+			}
+		}
+		return []order.PromiseGroup{{LineNos: lineNos, Promise: p}}, true
+	}
+	return uc.Promise.PromiseGroups(now, o)
 }
 
 // groupContainingLine returns the PromiseGroup in groups whose LineNos
