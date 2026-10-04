@@ -91,9 +91,15 @@ Claude Code loads each rule below automatically when you touch the matching path
 
 | When touching | Read |
 |---|---|
+| `docs/docs/adr/**` | `.claude/rules/adrs.md` |
 | `internal/adapters/inbound/http/**`, `apis/openapi*.yaml`, `apis/openapi/**` | `.claude/rules/api-contracts.md` |
 | `.github/**`, `Makefile`, `.gremlins.yaml` ... | `.claude/rules/ci-quality-gates.md` |
+| `internal/adapters/outbound/kafka/**`, `internal/adapters/outbound/kafkacatalog/**`, `internal/adapters/outbound/kafkacptschedule/**` ... | `.claude/rules/cloudevents-events.md` |
+| `internal/domain/**`, `internal/application/**`, `README.md` ... | `.claude/rules/deferred-and-known-gaps.md` |
+| `internal/domain/**`, `internal/application/**`, `features/**` | `.claude/rules/domain-model.md` |
 | `web/**` | `.claude/rules/frontend-mfe.md` |
+| `internal/**`, `cmd/**`, `migrations/**` ... | `.claude/rules/hexagonal-layout.md` |
+| `**/*_test.go`, `features/**`, `internal/architecture/**` ... | `.claude/rules/testing-standards.md` |
 
 Hooks (`scripts/harness/hook.py`, wired for Claude Code, Codex and OpenCode) block pushes to develop/main, `--no-verify`, bare `rm -rf`, and edits to generated files, and feed gofmt/vet findings back after each edit. Before saying "done" run `make check-fast`; the full gate is `make check-all`. `HARNESS_OFF=1` disables the hooks when debugging the harness itself.
 <!-- harness:scoped-rules:end -->

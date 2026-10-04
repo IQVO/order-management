@@ -4,7 +4,7 @@ description: Order Management — the warehouse-systems fleet's Open Host Servic
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
-home: https://github.com/claudioed/order-management
+home: https://github.com/IQVO/order-management
 keywords:
   - ddd
   - hexagonal-architecture
