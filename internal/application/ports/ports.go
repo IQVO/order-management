@@ -354,3 +354,36 @@ type RepromiseProcessedEvents interface {
 	// call newly recorded it.
 	MarkProcessed(ctx context.Context, eventId string) (bool, error)
 }
+
+// PlannedCapacityRepo is order-management's LOCAL read model of
+// warehouse-planning's CapacityPlans (ADR 0031): a mirror of the events
+// that service publishes, never a live lookup. It is written only by the
+// ApplyPlannedCapacity use case (inside a UnitOfWork, atomically with the
+// idempotency claim) and read by the order-annotation and
+// GET /planned-capacity use cases.
+type PlannedCapacityRepo interface {
+	// Upsert stores w under w.PlanID with last-writer-wins semantics
+	// (order.PlannedCapacityWindow.Supersedes): a stale or downgrading
+	// write is a no-op. It reports whether the row was written.
+	Upsert(ctx context.Context, w order.PlannedCapacityWindow) (applied bool, err error)
+
+	// ListByLocation returns every stored window at location (any
+	// status) whose End is after endingAfter, ordered by Start then
+	// PlanID. endingAfter is a coarse prefilter that keeps the read
+	// bounded; the authoritative overlap rule stays in the domain
+	// (PlannedCapacityWindow.Overlaps).
+	ListByLocation(ctx context.Context, location string, endingAfter time.Time) ([]order.PlannedCapacityWindow, error)
+}
+
+// PlannedCapacityProcessedEvents is ApplyPlannedCapacity's idempotency
+// gate: it records which CloudEvents ids have been applied. MarkProcessed
+// MUST be called inside the same UnitOfWork as the Upsert it guards, so a
+// rolled-back handling un-claims the id and the redelivery is processed
+// rather than silently skipped. Its own table
+// (planned_capacity_processed_events) so it never collides with
+// RepromiseProcessedEvents.
+type PlannedCapacityProcessedEvents interface {
+	// MarkProcessed records eventId if absent, returning true iff this
+	// call newly recorded it.
+	MarkProcessed(ctx context.Context, eventId string) (bool, error)
+}
