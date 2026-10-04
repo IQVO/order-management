@@ -1236,10 +1236,14 @@ components:
             LeadTime-basis promise has no departure identity.
         promise_basis:
           type: string
-          enum: [Capability, LeadTime]
+          enum: [Capability, LeadTime, Network]
           description: >-
-            Which policy produced promise_date (ADR 0014). Absent on
-            events published before this ADR.
+            Which policy produced promise_date (ADR 0014). "Network"
+            (ADR 0020) means the date was DICTATED by an external
+            party's deadline (requiredShipBy) rather than chosen by this
+            service, and is a separate bucket in the analytics promise-
+            basis distribution (ADR 0019). Absent on events published
+            before this ADR.
         lines:
           type: array
           description: Exactly the lines released in this pass (may be empty).
@@ -1277,7 +1281,7 @@ components:
             single-Promise path). Older consumers can safely ignore it.
         promise_basis:
           type: string
-          enum: [Capability, LeadTime]
+          enum: [Capability, LeadTime, Network]
           description: >-
             ADR 0017's additive per-line promise field: which policy
             produced the PromiseGroup this line belongs to. Absent under
@@ -1312,7 +1316,7 @@ components:
         path_id: { type: string }
         promise_basis:
           type: string
-          enum: [Capability, LeadTime]
+          enum: [Capability, LeadTime, Network]
           description: >-
             ADR 0014 §6 / ADR 0019's additive promise-basis-
             distribution field, mirrored from the OrderAllocated
@@ -1371,7 +1375,7 @@ components:
         backordered_lines: { type: integer, minimum: 0 }
         promise_basis:
           type: string
-          enum: [Capability, LeadTime]
+          enum: [Capability, LeadTime, Network]
           description: Same ADR 0014 §6 / ADR 0019 field as OrderAnalyticsEvent's.
         promise_cutoff_at:
           type: string

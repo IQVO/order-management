@@ -24,6 +24,7 @@ func TestAggregatePromiseHealth(t *testing.T) {
 			HourBucket:                bucket2,
 			PromiseBasisCapability:    1,
 			PromiseBasisLeadTime:      0,
+			PromiseBasisNetwork:       2,
 			OrdersSplitShipment:       0,
 			PromiseToCutoffGapSeconds: 7200,
 			PromiseToCutoffGapSamples: 1,
@@ -45,20 +46,25 @@ func TestAggregatePromiseHealth(t *testing.T) {
 	if got.PromiseBasisLeadTime != 1 {
 		t.Errorf("PromiseBasisLeadTime = %d, want 1", got.PromiseBasisLeadTime)
 	}
-	if got.OrdersAllocatedTotal != 5 {
-		t.Errorf("OrdersAllocatedTotal = %d, want 5", got.OrdersAllocatedTotal)
+	// ADR 0020: promises dictated by an external deadline have their own
+	// bucket and count toward the allocation total.
+	if got.PromiseBasisNetwork != 2 {
+		t.Errorf("PromiseBasisNetwork = %d, want 2", got.PromiseBasisNetwork)
+	}
+	if got.OrdersAllocatedTotal != 7 {
+		t.Errorf("OrdersAllocatedTotal = %d, want 7 (4 + 1 + 2)", got.OrdersAllocatedTotal)
 	}
 	if got.OrdersSplitShipment != 1 {
 		t.Errorf("OrdersSplitShipment = %d, want 1", got.OrdersSplitShipment)
 	}
-	wantSplitRate := 1.0 / 5.0
+	wantSplitRate := 1.0 / 7.0
 	if got.SplitShipmentRate != wantSplitRate {
 		t.Errorf("SplitShipmentRate = %v, want %v", got.SplitShipmentRate, wantSplitRate)
 	}
 	if got.OrdersRepromised != 2 {
 		t.Errorf("OrdersRepromised = %d, want 2", got.OrdersRepromised)
 	}
-	wantRepromiseRate := 2.0 / 5.0
+	wantRepromiseRate := 2.0 / 7.0
 	if got.RepromiseRate != wantRepromiseRate {
 		t.Errorf("RepromiseRate = %v, want %v", got.RepromiseRate, wantRepromiseRate)
 	}

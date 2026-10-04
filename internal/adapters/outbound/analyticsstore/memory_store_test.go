@@ -217,3 +217,41 @@ func TestMemoryStore_PromiseKPIs(t *testing.T) {
 		t.Errorf("OrdersRepromised = %d, want 2 (idempotent)", repromiseRow.OrdersRepromised)
 	}
 }
+
+// ADR 0019/0020: a Network-basis promise (dictated by an external deadline)
+// has its own bucket — it is neither dropped nor folded into
+// Capability/LeadTime, and contributes no promise-to-cutoff-gap sample.
+func TestMemoryStore_NetworkBasisHasItsOwnBucket(t *testing.T) {
+	base := time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC)
+	ctx := context.Background()
+	s := analyticsstore.NewMemoryStore()
+	cutoff := base.Add(2 * time.Hour)
+
+	for _, err := range []error{
+		s.ApplyOrderAllocated(ctx, "n1", "pick", base, "Network", &cutoff, false),
+		s.ApplyOrderPartiallyAllocated(ctx, "n2", "pick", base, "Network", &cutoff, false),
+		s.ApplyOrderAllocated(ctx, "n1", "pick", base, "Network", &cutoff, false), // duplicate
+		s.ApplyOrderAllocated(ctx, "c1", "pick", base, "Capability", &cutoff, false),
+	} {
+		if err != nil {
+			t.Fatalf("apply: %v", err)
+		}
+	}
+
+	rep, err := s.Query(ctx, report.ReportQuery{
+		From: base.Add(-time.Hour), To: base.Add(time.Hour), Granularity: report.GranularityHour,
+	})
+	if err != nil || len(rep.Rows) != 1 {
+		t.Fatalf("Query: rows=%v err=%v, want 1 row", rep.Rows, err)
+	}
+	row := rep.Rows[0]
+	if row.PromiseBasisNetwork != 2 {
+		t.Errorf("PromiseBasisNetwork = %d, want 2 (idempotent)", row.PromiseBasisNetwork)
+	}
+	if row.PromiseBasisCapability != 1 || row.PromiseBasisLeadTime != 0 {
+		t.Errorf("capability/leadTime = %d/%d, want 1/0", row.PromiseBasisCapability, row.PromiseBasisLeadTime)
+	}
+	if row.PromiseToCutoffGapSamples != 1 {
+		t.Errorf("gap samples = %d, want 1 (Network is excluded from the gap)", row.PromiseToCutoffGapSamples)
+	}
+}

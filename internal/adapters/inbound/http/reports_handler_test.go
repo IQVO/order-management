@@ -38,7 +38,7 @@ func TestReports_GetFunnel_OK(t *testing.T) {
 		Key:            report.RowKey{PathId: "pick", HourBucket: bucket},
 		OrdersReceived: 5, OrdersAllocated: 4, OrdersReleased: 3,
 		OrdersCancelled: 1, LinesBackordered: 2,
-		PromiseBasisCapability: 3, PromiseBasisLeadTime: 1,
+		PromiseBasisCapability: 3, PromiseBasisLeadTime: 1, PromiseBasisNetwork: 2,
 		OrdersSplitShipment: 1, OrdersRepromised: 0,
 		PromiseToCutoffGapSeconds: cutoff.Sub(bucket).Seconds(),
 	}}}}
@@ -61,6 +61,7 @@ func TestReports_GetFunnel_OK(t *testing.T) {
 			LinesBackordered          int     `json:"linesBackordered"`
 			PromiseBasisCapability    int     `json:"promiseBasisCapability"`
 			PromiseBasisLeadTime      int     `json:"promiseBasisLeadTime"`
+			PromiseBasisNetwork       int     `json:"promiseBasisNetwork"`
 			OrdersSplitShipment       int     `json:"ordersSplitShipment"`
 			OrdersRepromised          int     `json:"ordersRepromised"`
 			PromiseToCutoffGapSeconds float64 `json:"promiseToCutoffGapSeconds"`
@@ -76,7 +77,7 @@ func TestReports_GetFunnel_OK(t *testing.T) {
 	if row.PathID != "pick" || row.OrdersReceived != 5 || row.OrdersReleased != 3 || row.OrdersCancelled != 1 || row.LinesBackordered != 2 {
 		t.Errorf("row = %+v, unexpected values", row)
 	}
-	if row.PromiseBasisCapability != 3 || row.PromiseBasisLeadTime != 1 || row.OrdersSplitShipment != 1 || row.OrdersRepromised != 0 {
+	if row.PromiseBasisCapability != 3 || row.PromiseBasisLeadTime != 1 || row.PromiseBasisNetwork != 2 || row.OrdersSplitShipment != 1 || row.OrdersRepromised != 0 {
 		t.Errorf("promise KPI fields = %+v, unexpected values", row)
 	}
 	if row.PromiseToCutoffGapSeconds != cutoff.Sub(bucket).Seconds() {

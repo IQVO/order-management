@@ -47,6 +47,7 @@ type funnelRowDTO struct {
 	LinesReleased             int     `json:"linesReleased"`
 	PromiseBasisCapability    int     `json:"promiseBasisCapability"`
 	PromiseBasisLeadTime      int     `json:"promiseBasisLeadTime"`
+	PromiseBasisNetwork       int     `json:"promiseBasisNetwork"`
 	OrdersRepromised          int     `json:"ordersRepromised"`
 	OrdersSplitShipment       int     `json:"ordersSplitShipment"`
 	PromiseToCutoffGapSeconds float64 `json:"promiseToCutoffGapSeconds"`
@@ -112,6 +113,7 @@ func (h *ReportsHandlers) GetFunnel(w http.ResponseWriter, r *http.Request) {
 			LinesReleased:             row.LinesReleased,
 			PromiseBasisCapability:    row.PromiseBasisCapability,
 			PromiseBasisLeadTime:      row.PromiseBasisLeadTime,
+			PromiseBasisNetwork:       row.PromiseBasisNetwork,
 			OrdersRepromised:          row.OrdersRepromised,
 			OrdersSplitShipment:       row.OrdersSplitShipment,
 			PromiseToCutoffGapSeconds: row.PromiseToCutoffGapSeconds,

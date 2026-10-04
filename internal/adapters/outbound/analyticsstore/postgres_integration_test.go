@@ -4,23 +4,42 @@ package analyticsstore_test
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
+
+	"github.com/testcontainers/testcontainers-go"
+	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/claudioed/order-management/internal/adapters/outbound/analyticsstore"
 	"github.com/claudioed/order-management/internal/adapters/outbound/postgres"
 	"github.com/claudioed/order-management/internal/analytics/report"
 )
 
+// requireAnalyticsURL boots a throwaway Postgres (testcontainers — the test
+// owns its own database; it never reads ANALYTICS_DATABASE_URL, never skips,
+// never hardcodes localhost) and returns its connection string. The name is
+// kept so every test in this file reads as before.
 func requireAnalyticsURL(t *testing.T) string {
 	t.Helper()
-	url := os.Getenv("ANALYTICS_DATABASE_URL")
-	if url == "" {
-		t.Skip("ANALYTICS_DATABASE_URL not set, skipping analytics postgres integration test")
+	ctx := context.Background()
+	container, err := tcpostgres.Run(ctx, "postgres:16-alpine",
+		tcpostgres.WithDatabase("order_analytics"),
+		tcpostgres.WithUsername("order_analytics"),
+		tcpostgres.WithPassword("order_analytics"),
+		tcpostgres.BasicWaitStrategies(),
+	)
+	if err != nil {
+		t.Fatalf("start postgres container: %v", err)
+	}
+	t.Cleanup(func() { _ = testcontainers.TerminateContainer(container) })
+
+	url, err := container.ConnectionString(ctx, "sslmode=disable")
+	if err != nil {
+		t.Fatalf("connection string: %v", err)
 	}
 	return url
 }
+
 
 func migrateAnalytics(t *testing.T, url string) {
 	t.Helper()
@@ -250,5 +269,91 @@ func TestPostgresProjectionAndReport_PromiseKPIs(t *testing.T) {
 	}
 	if repromiseRow.OrdersRepromised != 1 {
 		t.Errorf("OrdersRepromised = %d, want 1 (idempotent)", repromiseRow.OrdersRepromised)
+	}
+}
+
+// TestPostgresProjectionAndReport_NetworkBasisBucket proves ADR 0019/0020
+// end to end against a live Postgres: a promise DICTATED by an external
+// deadline (basis "Network") lands in its own promise_basis_network
+// column — never dropped (the projector used to have no case for it) and
+// never folded into Capability/LeadTime or the promise-to-cutoff gap —
+// and survives the report query, including for an unfiltered query that
+// also synthesizes a repromise-only row (the UNION ALL column count).
+func TestPostgresProjectionAndReport_NetworkBasisBucket(t *testing.T) {
+	url := requireAnalyticsURL(t)
+	migrateAnalytics(t, url)
+
+	pool, err := analyticsstore.NewPool(context.Background(), url)
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Hour)
+	path := "pick-network-int"
+
+	proj := analyticsstore.NewPostgresProjection(pool)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("apply: %v", err)
+		}
+	}
+	cutoff := base.Add(3 * time.Hour)
+	apply := func() {
+		must(proj.ApplyOrderAllocated(ctx, "nw-alloc-1", path, base, "Network", &cutoff, false))
+		must(proj.ApplyOrderAllocated(ctx, "nw-alloc-2", path, base, "Network", &cutoff, false))
+		must(proj.ApplyOrderPartiallyAllocated(ctx, "nw-partial-1", path, base, "Network", &cutoff, false))
+		must(proj.ApplyOrderAllocated(ctx, "nw-cap-1", path, base, "Capability", &cutoff, false))
+		must(proj.ApplyOrderAllocated(ctx, "nw-lead-1", path, base, "LeadTime", nil, false))
+		must(proj.ApplyOrderRepromised(ctx, "nw-repromise-1", base))
+	}
+	apply()
+	apply() // same event ids: idempotent
+
+	rdr := analyticsstore.NewPostgresReport(pool)
+	rep, err := rdr.Query(ctx, report.ReportQuery{
+		From: base.Add(-time.Hour), To: base.Add(time.Hour), PathId: path, Granularity: report.GranularityHour,
+	})
+	if err != nil {
+		t.Fatalf("Query (path-filtered): %v", err)
+	}
+	if len(rep.Rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rep.Rows))
+	}
+	row := rep.Rows[0]
+	if row.PromiseBasisNetwork != 3 {
+		t.Errorf("PromiseBasisNetwork = %d, want 3 (2 allocated + 1 partially allocated)", row.PromiseBasisNetwork)
+	}
+	if row.PromiseBasisCapability != 1 || row.PromiseBasisLeadTime != 1 {
+		t.Errorf("capability/leadTime = %d/%d, want 1/1 (Network must not leak into them)",
+			row.PromiseBasisCapability, row.PromiseBasisLeadTime)
+	}
+	// Only the single Capability promise contributes a gap sample.
+	if row.PromiseToCutoffGapSamples != 1 || row.PromiseToCutoffGapSeconds != 3*time.Hour.Seconds() {
+		t.Errorf("gap = %vs over %d samples, want 10800s over 1 (Network is excluded)",
+			row.PromiseToCutoffGapSeconds, row.PromiseToCutoffGapSamples)
+	}
+
+	// Unfiltered: the UNION ALL branch synthesizes the repromise-only row;
+	// its placeholder column count must line up with the new column.
+	all, err := rdr.Query(ctx, report.ReportQuery{
+		From: base.Add(-time.Hour), To: base.Add(time.Hour), Granularity: report.GranularityHour,
+	})
+	if err != nil {
+		t.Fatalf("Query (unfiltered): %v", err)
+	}
+	var sawNetwork, sawRepromise bool
+	for _, r := range all.Rows {
+		if r.Key.PathId == path && r.PromiseBasisNetwork == 3 {
+			sawNetwork = true
+		}
+		if r.Key.PathId == "" && r.OrdersRepromised == 1 {
+			sawRepromise = true
+		}
+	}
+	if !sawNetwork || !sawRepromise {
+		t.Fatalf("unfiltered report network=%v repromise=%v, rows=%+v", sawNetwork, sawRepromise, all.Rows)
 	}
 }

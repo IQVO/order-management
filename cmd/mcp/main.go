@@ -261,6 +261,7 @@ func (a reportStoreAdapter) QueryPromiseHealth(ctx context.Context, from, to tim
 			HourBucket:                row.Key.HourBucket,
 			PromiseBasisCapability:    row.PromiseBasisCapability,
 			PromiseBasisLeadTime:      row.PromiseBasisLeadTime,
+			PromiseBasisNetwork:       row.PromiseBasisNetwork,
 			OrdersRepromised:          row.OrdersRepromised,
 			OrdersSplitShipment:       row.OrdersSplitShipment,
 			PromiseToCutoffGapSeconds: row.PromiseToCutoffGapSeconds,

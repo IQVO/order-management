@@ -59,6 +59,7 @@ func (a evalPromiseStore) QueryPromiseHealth(ctx context.Context, from, to time.
 			HourBucket:                row.Key.HourBucket,
 			PromiseBasisCapability:    row.PromiseBasisCapability,
 			PromiseBasisLeadTime:      row.PromiseBasisLeadTime,
+			PromiseBasisNetwork:       row.PromiseBasisNetwork,
 			OrdersRepromised:          row.OrdersRepromised,
 			OrdersSplitShipment:       row.OrdersSplitShipment,
 			PromiseToCutoffGapSeconds: row.PromiseToCutoffGapSeconds,
