@@ -33,14 +33,19 @@ type ever appears in the domain layer.
 - `internal/application/ports/`: OrderRepo, EventPublisher, Clock,
   OrderMetrics, InventoryReservationClient, ProcessPathCatalogue,
   CPTScheduleCache, ProductClassificationLookup, PathCapacity,
-  RepromiseProcessedEvents. **No `WorkReleaseClient` — deleted, ADR-0005.**
+  RepromiseProcessedEvents, PlannedCapacityRepo,
+  PlannedCapacityProcessedEvents (ADR-0031). **No `WorkReleaseClient` —
+  deleted, ADR-0005.**
 - `internal/application/usecases/`: ReceiveOrder, RetryAllocation,
-  ReleaseHeldOrder, CancelOrder, GetOrder, RepromiseOrder (Kafka-driven).
+  ReleaseHeldOrder, CancelOrder, GetOrder, RepromiseOrder (Kafka-driven),
+  ApplyPlannedCapacity (Kafka-driven), GetPlannedCapacity,
+  OrderCapacityConstraints (ADR-0031).
   AllocateOrder/ReleaseOrder were deleted as public types (ADR-0005); the
   shared allocate-then-release logic lives in `allocation.go`.
 - Inbound adapters: `inbound/http/` (chi handlers, DTOs, RFC 7807 error
   mapping, CORS), `inbound/kafka/` (RepromiseConsumer on
-  `warehouse.fulfillment.events`, ADR-0018), `inbound/mcp/` (read-only tools
+  `warehouse.fulfillment.events`, ADR-0018; PlannedCapacityConsumer on
+  `warehouse.warehouse-planning.events`, ADR-0031), `inbound/mcp/` (read-only tools
   `get_order`, `get_promise_health`).
 - Outbound adapters: `inventorystorage/` (HTTP `POST /reservations`,
   `DELETE /reservations/{id}`), `productclassification/`,

@@ -22,14 +22,16 @@ paths:
   suite, `features/*.feature`).
 - **`integration`** — `go build/vet -tags=integration ./...` then
   `go test -tags=integration ./internal/adapters/outbound/kafka` (+
-  `kafkacatalog`, `kafkacptschedule`, `kafkapathcapacity`, and
-  `./internal/adapters/inbound/kafka`) against a **Testcontainers** Kafka
-  broker (no external Kafka service in this workflow — do not write a
+  `kafkacatalog`, `kafkacptschedule`, `kafkapathcapacity`,
+  `./internal/adapters/inbound/kafka` and, since ADR-0031,
+  `./internal/adapters/outbound/postgres`) against a **Testcontainers** Kafka
+  broker (and, for the planned-capacity tests, a Testcontainers Postgres) (no external Kafka service in this workflow — do not write a
   `KAFKA_BROKERS`-skip-gated test, it silently no-ops in CI). NOTE: the
-  job provisions no Postgres either, so the `DATABASE_URL`/
-  `ANALYTICS_DATABASE_URL`-skip-gated Postgres integration tests
-  (`outbound/postgres`, `outbound/analyticsstore`) are compiled/vetted but
-  never executed in CI.
+  job provisions no external Postgres either: the Postgres tests that own a
+  Testcontainers Postgres (the `outbound/postgres` outbox and
+  planned-capacity tests) run, but any `DATABASE_URL`/
+  `ANALYTICS_DATABASE_URL`-skip-gated test (`outbound/analyticsstore`, and
+  any such test left in `outbound/postgres`) is compiled/vetted and skips.
 - **`mutation-fast`** — blocking gremlins subset over `internal/domain/order`
   only, every push/PR. Thresholds in `.gremlins.yaml` (gremlins fails when
   the measured value is `<=` the threshold, so the threshold sits strictly

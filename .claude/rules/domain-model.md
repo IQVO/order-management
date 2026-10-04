@@ -43,6 +43,13 @@ paths:
   `PromisePolicy.FeasibleBy` instead — the LATEST window at or before the
   deadline, `PromiseBasis=Network`, and NO promise (never a lead-time
   fallback) when the deadline cannot be met (ADR-0020).
+- **Planned capacity** (ADR-0031) — a LOCAL read model of
+  warehouse-planning's CapacityPlans (`order.PlannedCapacityWindow`: plan id,
+  `location` = site code, `[start, end)`, `shortage`, `status`
+  DRAFT|PUBLISHED), fed only by its CloudEvents, last-writer-wins per plan id.
+  A PUBLISHED shortage overlapping an order's `[now, promise cutoff)` at the
+  configured site ANNOTATES the order (`capacityConstraint`, derived at read
+  time). It never moves the promise, rejects an order, or touches allocation.
 - **Hold** (ADR-0020) — `releaseOnAllocation=false` at intake: the order
   allocates and stops ("allocated, not released" — deliberately NOT a new
   status), until `ReleaseHeldOrder` commits it. A held order must be

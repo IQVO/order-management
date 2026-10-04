@@ -2,7 +2,7 @@
 paths:
   - "docs/docs/adr/**"
 ---
-# Architecture Decision Records (0001-0020 summarized here; 0021-0030 exist in `docs/docs/adr/` — read the file)
+# Architecture Decision Records (0001-0020 summarized here; 0021-0031 exist in `docs/docs/adr/` — read the file)
 
 1. **0001 — Hexagonal (ports & adapters) architecture.** The dependency
    rule this whole repo enforces (`internal/architecture/` fitness test).
@@ -305,6 +305,22 @@ Other ADR-adjacent facts worth knowing without opening every file:
   non-CloudEvents. **Supersedes** the flat envelope of ADR-0005, the
   analytics Envelope v1 (`schema_version`) of ADR-0006, and the flat
   dispatch shown in ADR-0015/0018. No dual-read, no toggle.
+
+- **0031 — ACCEPTED: consume warehouse-planning's capacity plans into a
+  local planned-capacity read model; annotate, never reject or re-promise.**
+  `inbound/kafka.PlannedCapacityConsumer` (STABLE group from
+  `PLANNED_CAPACITY_CONSUMER_GROUP`, no default; the env var is also the
+  off switch) on `warehouse.warehouse-planning.events` upserts
+  `order.PlannedCapacityWindow` rows (Postgres `planned_capacity_windows`,
+  migration 0010; last-writer-wins per plan id via `Supersedes`) in ONE
+  `UnitOfWork` with the CloudEvents-id claim; poison -> `<topic>.dlq`. A
+  PUBLISHED shortage whose window overlaps `[now, promise cutoff)` (both
+  half-open) at `PLANNED_CAPACITY_SITE_ID` (default `DEFAULT_SITE_ID`) adds
+  an optional `capacityConstraint` to the order response, derived at read
+  time — promise, status, allocation, reservations and events are
+  untouched. `GET /planned-capacity?site=` reads the model. KNOWN GAP:
+  orders carry no site, so the configured one is used. Read the ADR before
+  touching `planned_capacity.go`, the consumer or `Server.orderResponse`.
 
 - Gateway API `HTTPRoute` chart template exists (`charts/order-management`
   `values.yaml` `gatewayApi:` block, `enabled: false` by default) —

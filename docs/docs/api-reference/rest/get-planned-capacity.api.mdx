@@ -1,0 +1,71 @@
+---
+id: get-planned-capacity
+title: "List a site's planned capacity windows"
+description: "Reads order-management's LOCAL read model of warehouse-planning's CapacityPlans for one site (ADR 0031): a PLANNED statement about a future window — the demand the planned capacity cannot process in it (`shortage`, in orders) — mirrored from the CloudEvents warehouse-planning publishes on `warehouse.warehouse-planning.events`. It is not live execution state and is never refreshed by calling warehouse-planning. Windows of every `status` are listed (a `DRAFT` is visible here but never influences an order; only a `PUBLISHED` plan with `shortage > 0` annotates orders — see `capacityConstraint` on the Order schema). Windows that ended before `from` are omitted. This route exists only when the integration is enabled; otherwise it is a 404."
+sidebar_label: "List a site's planned capacity windows"
+hide_title: true
+hide_table_of_contents: true
+api: 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
+sidebar_class_name: "get api-method"
+info_path: docs/api-reference/rest/order-management-api
+custom_edit_url: null
+hide_send_button: true
+---
+
+import MethodEndpoint from "@theme/ApiExplorer/MethodEndpoint";
+import ParamsDetails from "@theme/ParamsDetails";
+import RequestSchema from "@theme/RequestSchema";
+import StatusCodes from "@theme/StatusCodes";
+import OperationTabs from "@theme/OperationTabs";
+import TabItem from "@theme/TabItem";
+import Heading from "@theme/Heading";
+import Translate from "@docusaurus/Translate";
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"List a site's planned capacity windows"}
+>
+</Heading>
+
+<MethodEndpoint
+  method={"get"}
+  path={"/planned-capacity"}
+  context={"endpoint"}
+>
+  
+</MethodEndpoint>
+
+
+
+Reads order-management's LOCAL read model of warehouse-planning's CapacityPlans for one site (ADR 0031): a PLANNED statement about a future window — the demand the planned capacity cannot process in it (`shortage`, in orders) — mirrored from the CloudEvents warehouse-planning publishes on `warehouse.warehouse-planning.events`. It is not live execution state and is never refreshed by calling warehouse-planning. Windows of every `status` are listed (a `DRAFT` is visible here but never influences an order; only a `PUBLISHED` plan with `shortage > 0` annotates orders — see `capacityConstraint` on the Order schema). Windows that ended before `from` are omitted. This route exists only when the integration is enabled; otherwise it is a 404.
+
+
+<Heading
+  id={"request"}
+  as={"h2"}
+  className={"openapi-tabs__heading"}
+>
+  <Translate id="theme.openapi.request.title">Request</Translate>
+</Heading>
+
+<ParamsDetails
+  {...require("./get-planned-capacity.ParamsDetails.json")}
+>
+  
+</ParamsDetails>
+
+<RequestSchema
+  {...require("./get-planned-capacity.RequestSchema.json")}
+>
+  
+</RequestSchema>
+
+<StatusCodes
+  {...require("./get-planned-capacity.StatusCodes.json")}
+>
+  
+</StatusCodes>
+
+
+      

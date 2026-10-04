@@ -88,6 +88,7 @@ integration:
 	$(GO) test -tags=integration ./internal/adapters/outbound/kafkacptschedule
 	$(GO) test -tags=integration ./internal/adapters/outbound/kafkapathcapacity
 	$(GO) test -tags=integration ./internal/adapters/inbound/kafka
+	$(GO) test -tags=integration ./internal/adapters/outbound/postgres
 
 coverage:
 	$(GO) test ./... -race -coverprofile=$(COVERAGE_OUT) -coverpkg=$(COVERAGE_PKGS)

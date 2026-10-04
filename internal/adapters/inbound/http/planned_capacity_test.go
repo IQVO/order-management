@@ -180,7 +180,8 @@ func TestOrderResponse_ReadModelFailureOmitsTheAnnotationButServesTheOrder(t *te
 	}
 }
 
-func TestGetPlannedCapacity(t *testing.T) {
+func seededPlannedCapacityEnv(t *testing.T) *testEnv {
+	t.Helper()
 	repo := memory.NewPlannedCapacityRepo()
 	published := pcPlan("plan-0b7a", pcClockNow.Add(5*time.Hour), pcClockNow.Add(11*time.Hour))
 	draft := pcPlan("plan-draft", pcClockNow.Add(30*time.Hour), pcClockNow.Add(34*time.Hour))
@@ -193,53 +194,54 @@ func TestGetPlannedCapacity(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	env := newPlannedCapacityEnv(t, repo)
+	return newPlannedCapacityEnv(t, repo)
+}
 
-	t.Run("lists a site's windows ending after now, in start order, any status", func(t *testing.T) {
-		rec := env.do(t, http.MethodGet, "/planned-capacity?site=SIM1", "")
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+func TestGetPlannedCapacity_ListsASitesWindowsEndingAfterNowInStartOrderAnyStatus(t *testing.T) {
+	rec := seededPlannedCapacityEnv(t).do(t, http.MethodGet, "/planned-capacity?site=SIM1", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`"site":"SIM1"`, `"planId":"plan-0b7a"`, `"warehouseId":"WH-7"`, `"pathId":"pick-rebin-pack"`,
+		`"assignedDemand":12000`, `"capacityOverWindow":8000`, `"shortage":4000`, `"status":"PUBLISHED"`,
+		`"planId":"plan-draft"`, `"status":"DRAFT"`, `"asOf":"2026-08-24T21:45:10Z"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body lacks %s: %s", want, body)
 		}
-		body := rec.Body.String()
-		for _, want := range []string{
-			`"site":"SIM1"`, `"planId":"plan-0b7a"`, `"warehouseId":"WH-7"`, `"pathId":"pick-rebin-pack"`,
-			`"assignedDemand":12000`, `"capacityOverWindow":8000`, `"shortage":4000`, `"status":"PUBLISHED"`,
-			`"planId":"plan-draft"`, `"status":"DRAFT"`, `"asOf":"2026-08-24T21:45:10Z"`,
-		} {
-			if !strings.Contains(body, want) {
-				t.Fatalf("body lacks %s: %s", want, body)
-			}
-		}
-		if strings.Contains(body, "plan-past") || strings.Contains(body, "plan-sim2") {
-			t.Fatalf("a past window and another site must not be listed: %s", body)
-		}
-		if strings.Index(body, "plan-0b7a") > strings.Index(body, "plan-draft") {
-			t.Fatalf("windows must be ordered by start: %s", body)
-		}
-	})
+	}
+	if strings.Contains(body, "plan-past") || strings.Contains(body, "plan-sim2") {
+		t.Fatalf("a past window and another site must not be listed: %s", body)
+	}
+	if strings.Index(body, "plan-0b7a") > strings.Index(body, "plan-draft") {
+		t.Fatalf("windows must be ordered by start: %s", body)
+	}
+}
 
-	t.Run("from reaches back to include a window that already ended", func(t *testing.T) {
-		rec := env.do(t, http.MethodGet, "/planned-capacity?site=SIM1&from=2026-08-24T00:00:00Z", "")
-		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "plan-past") {
-			t.Fatalf("status=%d body=%s; want plan-past included", rec.Code, rec.Body.String())
-		}
-	})
+func TestGetPlannedCapacity_FromReachesBackToIncludeAnEndedWindow(t *testing.T) {
+	rec := seededPlannedCapacityEnv(t).do(t, http.MethodGet, "/planned-capacity?site=SIM1&from=2026-08-24T00:00:00Z", "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "plan-past") {
+		t.Fatalf("status=%d body=%s; want plan-past included", rec.Code, rec.Body.String())
+	}
+}
 
-	t.Run("an unknown site is an empty list, not an error", func(t *testing.T) {
-		rec := env.do(t, http.MethodGet, "/planned-capacity?site=NOPE", "")
-		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"windows":[]`) {
-			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-		}
-	})
+func TestGetPlannedCapacity_UnknownSiteIsAnEmptyListNotAnError(t *testing.T) {
+	rec := seededPlannedCapacityEnv(t).do(t, http.MethodGet, "/planned-capacity?site=NOPE", "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"windows":[]`) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
 
+func TestGetPlannedCapacity_ErrorPaths(t *testing.T) {
+	env := seededPlannedCapacityEnv(t)
 	t.Run("missing site is a 400 problem", func(t *testing.T) {
 		assertProblem(t, env.do(t, http.MethodGet, "/planned-capacity", ""), http.StatusBadRequest)
 	})
-
 	t.Run("unparseable from is a 400 problem", func(t *testing.T) {
 		assertProblem(t, env.do(t, http.MethodGet, "/planned-capacity?site=SIM1&from=yesterday", ""), http.StatusBadRequest)
 	})
-
 	t.Run("a read-model failure is a 500 problem", func(t *testing.T) {
 		failing := newPlannedCapacityEnv(t, pcFailingRepo{err: errors.New("db down")})
 		assertProblem(t, failing.do(t, http.MethodGet, "/planned-capacity?site=SIM1", ""), http.StatusInternalServerError)
