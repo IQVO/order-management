@@ -3,7 +3,8 @@ package order
 import (
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -58,20 +59,25 @@ type PlannedCapacityWindow struct {
 // when w can never be a sane statement. A shortage of exactly zero is
 // valid (a published plan with enough capacity).
 func (w PlannedCapacityWindow) Validate() error {
-	switch {
-	case w.PlanID == "":
+	if w.PlanID == "" {
 		return invalidPlanned("plan id is required")
-	case w.Location == "":
+	}
+	if w.Location == "" {
 		return invalidPlanned("location is required")
-	case w.Start.IsZero() || w.End.IsZero():
+	}
+	if w.Start.IsZero() || w.End.IsZero() {
 		return invalidPlanned("window start and end are required")
-	case !w.End.After(w.Start):
+	}
+	if !w.End.After(w.Start) {
 		return invalidPlanned("window end must be after window start")
-	case w.AssignedDemand < 0 || w.CapacityOverWindow < 0 || w.Shortage < 0:
+	}
+	if w.AssignedDemand < 0 || w.CapacityOverWindow < 0 || w.Shortage < 0 {
 		return invalidPlanned("quantities must not be negative")
-	case w.Status != PlannedCapacityDraft && w.Status != PlannedCapacityPublished:
+	}
+	if w.Status != PlannedCapacityDraft && w.Status != PlannedCapacityPublished {
 		return invalidPlanned("unknown status " + string(w.Status))
-	case w.AsOf.IsZero():
+	}
+	if w.AsOf.IsZero() {
 		return invalidPlanned("event time is required")
 	}
 	return nil
@@ -142,11 +148,11 @@ func CapacityConstraints(o *Order, now time.Time, site string, windows []Planned
 			}
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].Start.Equal(out[j].Start) {
-			return out[i].Start.Before(out[j].Start)
+	slices.SortFunc(out, func(a, b PlannedCapacityWindow) int {
+		if c := a.Start.Compare(b.Start); c != 0 {
+			return c
 		}
-		return out[i].PlanID < out[j].PlanID
+		return strings.Compare(a.PlanID, b.PlanID)
 	})
 	return out
 }

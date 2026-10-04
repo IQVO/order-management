@@ -81,7 +81,14 @@ type PlannedCapacityConsumer struct {
 	reader    messageReader
 	apply     *usecases.ApplyPlannedCapacity
 	logger    *slog.Logger
-	dlqWriter *kafkago.Writer
+	dlqWriter dlqSink
+}
+
+// dlqSink is the slice of *kafkago.Writer the consumer needs; an interface
+// so dead-lettering can be unit-tested without a broker.
+type dlqSink interface {
+	dlqMessageWriter
+	Close() error
 }
 
 // NewPlannedCapacityConsumer constructs a consumer of PlanningEventsTopic
