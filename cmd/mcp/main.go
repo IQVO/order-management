@@ -24,6 +24,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/riandyrn/otelchi"
+	otelchimetric "github.com/riandyrn/otelchi/metric"
+
 	inboundmcp "github.com/claudioed/order-management/internal/adapters/inbound/mcp"
 	"github.com/claudioed/order-management/internal/adapters/outbound/analyticsstore"
 	"github.com/claudioed/order-management/internal/adapters/outbound/memory"
@@ -103,7 +107,7 @@ func run() error {
 		PromiseHealth: promiseHealthStore,
 	}
 	server := inboundmcp.NewServer(deps)
-	handler := inboundmcp.Handler(server)
+	handler := newRouter(inboundmcp.Handler(server), serviceName)
 
 	srv := &http.Server{Addr: httpAddr, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 
@@ -121,6 +125,22 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// newRouter wraps the MCP handler so every request is traced (otelchi)
+// and metered (otelchimetric: http.server.request.duration +
+// http.server.active_requests) — ADR-0009 Tier 1 HTTP RED, same order as
+// the REST routers. The Streamable HTTP endpoint stays mounted at "/" (and
+// any sub-path; "/*" also matches "/" in chi), exactly where the binary
+// has always served it. It is unauthenticated by decision (ADR-0012).
+func newRouter(mcpHandler http.Handler, serviceName string) http.Handler {
+	r := chi.NewRouter()
+	r.Use(otelchi.Middleware(serviceName, otelchi.WithChiRoutes(r)))
+	metricCfg := otelchimetric.NewBaseConfig(serviceName)
+	r.Use(otelchimetric.NewServerRequestDuration(metricCfg))
+	r.Use(otelchimetric.NewServerActiveRequests(metricCfg))
+	r.Handle("/*", mcpHandler)
+	return r
 }
 
 // buildAdapters wires the Postgres OrderRepo when DATABASE_URL is set, or

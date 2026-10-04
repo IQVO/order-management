@@ -42,7 +42,7 @@ func TestReports_GetFunnel_OK(t *testing.T) {
 		OrdersSplitShipment: 1, OrdersRepromised: 0,
 		PromiseToCutoffGapSeconds: cutoff.Sub(bucket).Seconds(),
 	}}}}
-	srv := inboundhttp.NewReportsRouter(&inboundhttp.ReportsHandlers{Store: store}, nil)
+	srv := inboundhttp.NewReportsRouter(&inboundhttp.ReportsHandlers{Store: store}, nil, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/reports/funnel?from=2026-06-01T00:00:00Z&to=2026-06-02T00:00:00Z&pathId=pick", nil)
 	rec := httptest.NewRecorder()
@@ -88,7 +88,7 @@ func TestReports_GetFunnel_OK(t *testing.T) {
 }
 
 func TestReports_GetFunnel_MissingParams(t *testing.T) {
-	srv := inboundhttp.NewReportsRouter(&inboundhttp.ReportsHandlers{Store: &stubStore{}}, nil)
+	srv := inboundhttp.NewReportsRouter(&inboundhttp.ReportsHandlers{Store: &stubStore{}}, nil, "")
 
 	tests := []struct {
 		name string
@@ -116,7 +116,7 @@ func TestReports_GetFunnel_MissingParams(t *testing.T) {
 
 func TestReports_GetFreshness_OK(t *testing.T) {
 	store := &stubStore{lag: 90 * time.Second}
-	srv := inboundhttp.NewReportsRouter(&inboundhttp.ReportsHandlers{Store: store}, nil)
+	srv := inboundhttp.NewReportsRouter(&inboundhttp.ReportsHandlers{Store: store}, nil, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/reports/funnel/freshness", nil)
 	rec := httptest.NewRecorder()
@@ -137,7 +137,7 @@ func TestReports_GetFreshness_OK(t *testing.T) {
 }
 
 func TestReports_Healthz(t *testing.T) {
-	srv := inboundhttp.NewReportsRouter(&inboundhttp.ReportsHandlers{Store: &stubStore{}}, nil)
+	srv := inboundhttp.NewReportsRouter(&inboundhttp.ReportsHandlers{Store: &stubStore{}}, nil, "")
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)

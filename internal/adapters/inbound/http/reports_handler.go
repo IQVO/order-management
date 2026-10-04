@@ -7,9 +7,15 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/riandyrn/otelchi"
+	otelchimetric "github.com/riandyrn/otelchi/metric"
 
 	"github.com/claudioed/order-management/internal/analytics/report"
 )
+
+// DefaultReportsServiceName labels the reports service in spans/metrics
+// when the caller does not supply OTEL_SERVICE_NAME.
+const DefaultReportsServiceName = "order-reports"
 
 // ReportsHandlers is the inbound HTTP adapter for the order-management "Order
 // Funnel & Allocation Health" data product's READER. It depends only on the
@@ -159,18 +165,30 @@ func writeReportInternal(w http.ResponseWriter, r *http.Request, err error) {
 }
 
 // NewReportsRouter builds the chi router for the order-reports reader service.
-// A nil logger falls back to slog.Default().
+// A nil logger falls back to slog.Default(); an empty serviceName falls back
+// to DefaultReportsServiceName.
 //
 // Every route, including /reports/*, is reachable with no Authorization
 // header: the fleet-wide REST/MCP static-bearer auth layer has been
 // removed.
-func NewReportsRouter(h *ReportsHandlers, logger *slog.Logger) http.Handler {
+//
+// Like NewRouter, every request is traced (otelchi) and metered
+// (otelchimetric: http.server.request.duration + http.server.active_requests)
+// — ADR-0009 Tier 1 HTTP RED. The reports router previously had neither.
+func NewReportsRouter(h *ReportsHandlers, logger *slog.Logger, serviceName string) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if serviceName == "" {
+		serviceName = DefaultReportsServiceName
 	}
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
+	r.Use(otelchi.Middleware(serviceName, otelchi.WithChiRoutes(r)))
+	metricCfg := otelchimetric.NewBaseConfig(serviceName)
+	r.Use(otelchimetric.NewServerRequestDuration(metricCfg))
+	r.Use(otelchimetric.NewServerActiveRequests(metricCfg))
 	r.Use(RequestLogger(logger))
 	r.Use(middleware.Recoverer)
 

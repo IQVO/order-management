@@ -22,8 +22,13 @@ import (
 	"github.com/claudioed/order-management/internal/adapters/outbound/analyticsstore"
 	outboundkafka "github.com/claudioed/order-management/internal/adapters/outbound/kafka"
 	"github.com/claudioed/order-management/internal/adapters/outbound/postgres"
+	"github.com/claudioed/order-management/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/order-management/internal/bootretry"
 )
+
+// telemetryFlushTimeout bounds the final export attempt on shutdown,
+// matching cmd/order.
+const telemetryFlushTimeout = 5 * time.Second
 
 // errMissingAnalyticsURL is returned when ANALYTICS_DATABASE_URL is unset: the
 // projector is the writer of the analytical database and cannot start without
@@ -40,6 +45,28 @@ func main() {
 func run() error {
 	logger := newLogger(getenv("LOG_LEVEL", "info"))
 	slog.SetDefault(logger)
+
+	// ADR-0009: the projector serves an admin HTTP endpoint and runs the
+	// Kafka consumer + analytical-DB writes, so it gets the same
+	// non-blocking OTel setup as cmd/order (an unreachable Collector
+	// degrades to dropped telemetry, never a process that won't start).
+	serviceName := getenv("OTEL_SERVICE_NAME", "order-projector")
+	shutdownTelemetry, err := telemetry.Setup(
+		context.Background(),
+		serviceName,
+		getenv("SERVICE_VERSION", telemetry.DefaultServiceVersion),
+		getenv("OTEL_EXPORTER_OTLP_ENDPOINT", telemetry.DefaultEndpoint),
+	)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), telemetryFlushTimeout)
+		defer cancel()
+		if err := shutdownTelemetry(flushCtx); err != nil {
+			logger.Warn("telemetry flush failed on shutdown", "error", err)
+		}
+	}()
 
 	rootCtx := context.Background()
 
