@@ -1,3 +1,10 @@
+---
+paths:
+  - "internal/adapters/inbound/http/**"
+  - "apis/openapi*.yaml"
+  - "apis/openapi/**"
+---
+
 # API contracts
 
 ## REST API (6 routes — `apis/openapi.yaml`; ADR-0005's `/allocate` and old `/release` verbs are gone)

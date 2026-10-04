@@ -1,3 +1,13 @@
+---
+paths:
+  - ".github/**"
+  - "Makefile"
+  - ".gremlins.yaml"
+  - ".golangci.yml"
+  - "lefthook.yml"
+  - "docs/**"
+---
+
 # CI / quality gates
 
 ## GitHub Actions workflows (`.github/workflows/`)
@@ -37,10 +47,10 @@
   gen-api-docs order` in `docs/`, then `git diff --exit-code -- docs/docs/
   api-reference/rest`. **Known defect:** that step runs with
   `working-directory: docs`, so the pathspec resolves to
-  `docs/docs/docs/api-reference/rest` (nonexistent) and the check always
+  `docs/docs/docs/api-reference/rest` (nonexistent) and the check always <!-- guide-lint: ignore -->
   passes — it let ADR-0020's `releaseHeldOrder` endpoint land with no
   generated page. The working pathspec from `docs/` is
-  `docs/api-reference/rest`. Until the workflow is fixed, run the
+  `docs/api-reference/rest`. <!-- guide-lint: ignore --> Until the workflow is fixed, run the
   procedure below by hand after any `apis/openapi.yaml` change.
 - **`web`** — builds `warehouse-ui-kit` (checked out at `develop`), then
   `npm ci`, `npm run lint`, `npx tsc -b`, `npm test`, `npm run build` in
@@ -79,8 +89,8 @@ between commits before.
   **NOT** trigger on `develop` pushes or on PRs at all — only a push to
   `main` (i.e. after a release PR merges) that touches `docs/**` deploys
   the live site at `https://claudioed.github.io/order-management/`.
-- Job: `npm ci && npm run build` in `docs/`, uploads `docs/build` as a
-  Pages artifact, then deploys via `actions/deploy-pages`.
+- Job: `npm ci && npm run build` in `docs/`, uploads the built `build/`
+  directory (gitignored) as a Pages artifact, then deploys via `actions/deploy-pages`.
 - **This means a `docs/docs/api-reference/**` regeneration PR merged into
   `develop` alone does NOT redeploy the live site** — it only takes effect
   once `develop` promotes to `main` per the fleet's GitFlow release process.
@@ -141,3 +151,21 @@ in plain markdown under `docs/docs/ddd/domain-events.md`,
 event, changed payload shape), grep those narrative docs for the old
 name(s) and update them by hand — there is no automated generation or CI
 gate to catch this drift, unlike the OpenAPI case above.
+
+## Docs site and golangci-lint commands
+
+```bash
+# Docusaurus — regenerate after ANY apis/openapi.yaml change
+cd docs && npm ci
+npm run clean-api-docs order && npm run gen-api-docs order   # -> docs/docs/api-reference/rest/
+npm run typecheck && npm run build   # onBrokenLinks / onBrokenAnchors are both 'throw'
+
+# golangci-lint (CI-pinned version)
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
+```
+
+Other make targets: `make integration` (Kafka adapters against a
+Testcontainers broker), `make coverage` (go test -race -coverprofile + the 90%
+gate), `make bdd` (godog suite), `make mutation-fast` (gremlins subset on
+`internal/domain/order`, thresholds in `.gremlins.yaml`), `make vuln`
+(govulncheck).

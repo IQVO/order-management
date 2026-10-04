@@ -1,3 +1,10 @@
+---
+paths:
+  - "internal/domain/**"
+  - "internal/application/**"
+  - "README.md"
+  - ".gremlins.yaml"
+---
 # Deferred and known gaps (document them, don't skip silently)
 
 Several items originally listed as "v1 scope — explicitly deferred" have

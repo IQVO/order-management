@@ -1,3 +1,9 @@
+---
+paths:
+  - "internal/domain/**"
+  - "internal/application/**"
+  - "features/**"
+---
 # Domain model
 
 ## Ubiquitous Language (use these exact names)
