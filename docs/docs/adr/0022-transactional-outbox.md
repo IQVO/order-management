@@ -158,11 +158,12 @@ was already sent, and retries next tick. Sleep between empty passes is
 | set            | `log`               | log                      | none  |
 | set            | `kafka`             | **outbox (both topics)** | **yes** |
 
-The cluster runs the last row. Graceful shutdown stops the HTTP server
-and the `RepromiseOrder` consumer first, then cancels the relay and
-waits for its in-flight pass, so an event committed by a request that
-completed a moment before SIGTERM is not stranded until the next pod
-boots.
+The cluster runs the last row. Graceful shutdown (ADR-0025 §8) flips
+`/readyz` to not-ready, waits `SHUTDOWN_DRAIN_DELAY`, stops the HTTP
+server and the `RepromiseOrder` consumer — the only two outbox writers —
+and only then cancels the relay and waits for its final in-flight pass,
+so an event committed by a request or consumer message that completed a
+moment before SIGTERM is not stranded until the next pod boots.
 
 ### Delivery semantics (what consumers may now rely on)
 

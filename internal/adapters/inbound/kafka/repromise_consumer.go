@@ -44,7 +44,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/claudioed/order-management/internal/adapters/kafka/cloudevents"
-	"github.com/claudioed/order-management/internal/application/ports"
 	"github.com/claudioed/order-management/internal/application/usecases"
 )
 
@@ -302,28 +301,19 @@ func newRecoverBackoff() backoff.BackOff {
 // consumers' commit-and-skip-on-error convention.
 //
 // ports.ErrConcurrentModification (the version-column optimistic-
-// concurrency sentinel — see the version-column ADR) gets its OWN
-// branch, deliberately distinct from every other error
-// handleFulfillmentEvent can return: the message is logged but NOT
-// committed, so THIS message is safely redelivered on the next
-// rebalance/restart rather than silently dropped — a version conflict
-// means some OTHER writer (an HTTP retry-allocation/release call, or a
-// second repromise message for the same order) already advanced this
-// order past the version RepromiseOrder read it at, and reprocessing
-// this same message against the order's now-current state is exactly
-// the at-least-once semantics this consumer already relies on for
-// redelivered messages generally. The consume loop itself continues
-// (this is NOT treated as a fatal, abort-the-whole-consumer condition:
-// one order's transient conflict must not stop repromising every other
-// order), so an in-memory reader keeps advancing past it for the
-// remainder of THIS process's run — the message becomes due for
-// redelivery only once the process restarts or the partition
-// rebalances, which is an accepted, documented trade-off (see the ADR)
-// rather than an immediate in-process retry loop.
+// concurrency sentinel — see ADR-0024) is a transient failure like any
+// other: handleWithRetry re-runs the handler (which re-reads the order)
+// so a conflict with another writer (an HTTP retry-allocation/release
+// call, or a second repromise message for the same order) heals on
+// retry. It is NEVER returned as "handled" without a commit: a
+// persistently-conflicting message is dead-lettered after
+// maxHandlerAttempts and then committed, exactly like any other
+// exhausted failure. (Leaving it uncommitted would be a silent skip —
+// the next message's commit moves the group offset past it.)
 //
-// Every OTHER genuine infrastructure error (Processed/Orders/Events
+// Every genuine infrastructure error (Processed/Orders/Events
 // erroring, decode/lookup failures returned from
-// handleFulfillmentEvent) is retried in-process, with jittered backoff,
+// handleFulfillmentEvent, and version conflicts) is retried in-process, with jittered backoff,
 // up to maxHandlerAttempts total attempts (ADR-0025 §DLQ) — a
 // transient blip (a momentary Postgres hiccup, a lost connection) heals
 // itself without ever reaching the DLQ. Only once ALL attempts are
@@ -368,12 +358,16 @@ func (c *RepromiseConsumer) handleMessage(ctx context.Context, msg kafkago.Messa
 	}
 
 	recordSpanError(span, err)
-	if errors.Is(err, ports.ErrConcurrentModification) {
-		c.log(msgCtx, "repromise: version conflict, leaving message uncommitted for safe redelivery",
-			"topic", topic, "ce_id", e.ID(), "ce_type", e.Type(), "error", err)
-		return nil
-	}
 
+	// ports.ErrConcurrentModification is NOT special-cased here any more:
+	// handleWithRetry already retried it in-process (the use case
+	// re-reads the order on every attempt) and it is still failing, so
+	// like any other exhausted failure it is dead-lettered and then
+	// committed. The previous "return nil without committing" branch was
+	// a silent skip: kafka-go's FetchMessage reader moves on in memory,
+	// and the NEXT message's commit advances the group offset past this
+	// one, so the "uncommitted for redelivery" message was never actually
+	// redelivered (ADR-0024).
 	c.log(msgCtx, "repromise: exhausted retries, sending to dead-letter topic",
 		"topic", topic, "dlq_topic", topic+dlqTopicSuffix,
 		"ce_id", e.ID(), "ce_type", e.Type(), "attempts", maxHandlerAttempts, "error", err)
@@ -386,10 +380,11 @@ func (c *RepromiseConsumer) handleMessage(ctx context.Context, msg kafkago.Messa
 // handleWithRetry retries handleFulfillmentEvent up to maxHandlerAttempts
 // times with jittered exponential backoff (ADR-0025 §DLQ), bounded by
 // ctx's own deadline/cancellation. ports.ErrConcurrentModification is
-// NEVER retried here — handleMessage's own dedicated branch is what
-// handles it (leaving the message uncommitted for redelivery), so
-// retrying it in this loop too would just waste the retry budget on an
-// outcome this loop cannot fix.
+// retried like every other failure: RepromiseOrder.Execute runs in one
+// atomic scope that re-reads the order, so each attempt reasons about
+// the writer's now-current state and the conflict normally heals on the
+// first retry (ADR-0024). Only when every attempt conflicts does the
+// message go to the DLQ — a version conflict is never swallowed.
 func (c *RepromiseConsumer) handleWithRetry(ctx context.Context, e ce.Event) error {
 	policy := backoff.NewExponentialBackOff(
 		backoff.WithInitialInterval(retryInitialInterval),
@@ -398,11 +393,7 @@ func (c *RepromiseConsumer) handleWithRetry(ctx context.Context, e ce.Event) err
 	bounded := backoff.WithContext(backoff.WithMaxRetries(policy, maxHandlerAttempts-1), ctx)
 
 	return backoff.Retry(func() error {
-		err := c.handleFulfillmentEvent(ctx, e)
-		if err == nil || errors.Is(err, ports.ErrConcurrentModification) {
-			return backoff.Permanent(err)
-		}
-		return err
+		return c.handleFulfillmentEvent(ctx, e)
 	}, bounded)
 }
 

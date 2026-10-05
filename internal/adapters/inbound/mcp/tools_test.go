@@ -74,6 +74,7 @@ func (a reportStoreTestAdapter) QueryPromiseHealth(ctx context.Context, from, to
 			HourBucket:                row.Key.HourBucket,
 			PromiseBasisCapability:    row.PromiseBasisCapability,
 			PromiseBasisLeadTime:      row.PromiseBasisLeadTime,
+			PromiseBasisNetwork:       row.PromiseBasisNetwork,
 			OrdersRepromised:          row.OrdersRepromised,
 			OrdersSplitShipment:       row.OrdersSplitShipment,
 			PromiseToCutoffGapSeconds: row.PromiseToCutoffGapSeconds,

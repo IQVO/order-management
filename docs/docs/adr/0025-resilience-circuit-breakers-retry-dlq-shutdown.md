@@ -191,15 +191,15 @@ existing test suite unchanged. `BreakerClient.retryingFetch` calls
 `handleFulfillmentEvent` in-process, with jittered backoff
 (`cenkalti/backoff/v4`, 100ms–2s), up to `maxHandlerAttempts` (3) total
 attempts, via `handleWithRetry`. `ports.ErrConcurrentModification` (the
-optimistic-concurrency sentinel, Phase 1) is explicitly excluded from
-this retry loop via `backoff.Permanent` — it already has its OWN,
-pre-existing, separate handling: leave the message UNCOMMITTED for safe
-redelivery on the next rebalance/restart, because a version conflict
-means some OTHER writer already advanced the order and reprocessing
-this exact message against the order's now-current state is exactly
-the at-least-once semantics this consumer already relies on generally.
+optimistic-concurrency sentinel, ADR-0024) is retried like every other
+failure — the handler re-reads the order on each attempt, so a conflict
+normally heals on the first retry. (An earlier revision excluded it via
+`backoff.Permanent` and left the message uncommitted "for redelivery";
+that silently skipped the message once any later offset committed — see
+the ADR-0024 §6 correction.)
 
-Every OTHER genuine infrastructure error, once all 3 attempts are
+Every genuine infrastructure error or version conflict, once all 3
+attempts are
 exhausted, is published — raw payload byte-for-byte, plus
 `x-dlq-source-topic`/`x-dlq-error`/`x-dlq-failed-at` headers carrying
 replay/debugging context — to `<source-topic>.dlq` via a
@@ -261,19 +261,27 @@ into this order:
    liveness signal and is never flipped by shutdown) — before anything
    else stops, so a Kubernetes `readinessProbe` polling `/readyz` has a
    window to observe the flip and stop routing NEW traffic to this pod
-   before step 2 ever closes the listener.
-2. **Stop accepting new HTTP connections and drain in-flight requests**
-   — `httpServer.Shutdown(shutdownCtx)`, unchanged from before.
-3. **Stop the outbox relay and the `RepromiseConsumer` loop cleanly** —
-   cancel each one's own context (no NEW work is picked up after this)
-   and WAIT, bounded by the same `shutdownCtx`, for each goroutine to
-   actually finish in-flight work — for the Kafka consumer, this means
-   a message already being handled runs to completion INCLUDING its
+   before the listener ever closes.
+2. **Wait the drain delay** (`SHUTDOWN_DRAIN_DELAY`, default `5s`, `0`
+   disables; Helm `config.shutdownDrainDelay`) — the readiness flip is
+   only useful if the probe/endpoint controller has time to act on it.
+   Outside the 10s budget below.
+3. **Stop accepting new HTTP connections and drain in-flight requests**
+   — `httpServer.Shutdown(shutdownCtx)` (writer #1 of the outbox).
+4. **Stop the `RepromiseConsumer` loop cleanly** — cancel its context
+   (no NEW message is fetched) and WAIT, bounded by `shutdownCtx`, for a
+   message already being handled to run to completion INCLUDING its
    offset commit (`handleMessage`'s commit-before-return shape) before
-   `Run` returns — rather than merely firing the cancel and moving on.
-   This is the "final offset commit" guarantee: no message is left
-   processed-but-uncommitted by an abrupt stop.
-4. **Close the pgx pool LAST** — `closeAdapters()`/`closeCatalogue()`
+   `Run` returns (writer #2 of the outbox). This is the "final offset
+   commit" guarantee.
+5. **Stop the outbox relay LAST** — cancel it and WAIT (same
+   `shutdownCtx`) for its final pass. The relay must drain *after* every
+   outbox writer (HTTP requests, the consumer's last message) has
+   stopped; stopping it earlier — as the code did before the 2026-10
+   audit (HTTP → relay → consumer) — strands events the consumer commits
+   after the relay's last pass until the next pod boots. ADR-0022 §7 always
+   described this order; the code now matches.
+6. **Close the pgx pool LAST** — `closeAdapters()`/`closeCatalogue()`
    are `defer`red near the TOP of `run()`, so by `defer`'s LIFO order
    they run AFTER every consumer/relay goroutine (and
    `repromiseConsumer.Close()`, also deferred, closing both the Kafka
@@ -289,10 +297,14 @@ exactly as before.
 UNCHANGED, still `/healthz`, because liveness must never be flipped by
 a graceful drain or Kubernetes would SIGKILL the pod mid-drain instead
 of letting it finish. A new `terminationGracePeriodSeconds: 30` was
-added (previously unset, a confirmed gap) — the HTTP `Shutdown` budget
-(10s) plus the relay/consumer stop budget (the same 10s, reused) plus
-margin for the `readinessProbe`'s `periodSeconds: 5` to have actually
-observed the not-ready flip before traffic fully stops arriving.
+added (previously unset, a confirmed gap) — the drain delay (5s) plus
+the shared HTTP/consumer/relay stop budget (10s) plus margin.
+
+> **Correction (2026-10 ADR-conformance audit).** Step 1 was documented
+> here but `drainUnderShutdown` never actually called
+> `Readiness.SetNotReady()`, so `/readyz` never flipped and the drain
+> window (steps 1–2) did not exist. It is now implemented and covered by
+> `cmd/order/shutdown_test.go`.
 
 ## Consequences
 

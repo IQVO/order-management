@@ -144,6 +144,20 @@ autoscaling:
 config:
   httpAddr: ":8080"
   eventPublisher: "log"   # "log" or "kafka" — gates the outbound domain-event publisher only
+  # Graceful shutdown (ADR-0025 §8): after /readyz flips to not-ready the
+  # process waits this long before closing the listener, so the
+  # readinessProbe/endpoint controller stops routing new traffic first.
+  # "0" disables the wait. Must satisfy
+  # shutdownDrainDelay + 10s (shutdown budget) < terminationGracePeriodSeconds.
+  shutdownDrainDelay: "5s"
+  # ADR-0032 housekeeping sweeper (cmd/order only; rendered into the
+  # deployment env when a database is configured). HOUSEKEEPING_INTERVAL
+  # "0" disables the sweeper; TTL/retention "0" keeps that table's rows
+  # forever (the pre-ADR-0032 behaviour). Defaults mirror the binary's
+  # own fallbacks and inventory-storage's ADR-0026 knobs exactly.
+  housekeepingInterval: "1h"
+  idempotencyKeyTtl: "24h"
+  outboxRetention: "168h"
 
 database:
   url: ""
@@ -242,12 +256,12 @@ readinessProbe:
   periodSeconds: 5
 
 # Gives cmd/order/main.go's graceful shutdown sequence (readiness flip
-# -> HTTP drain -> outbox relay / repromise consumer clean stop with
-# final offset commit -> pgx pool close LAST) room to actually finish
-# before Kubernetes SIGKILLs the container. 10s (the HTTP Shutdown
-# budget) + 10s (the same budget, reused for the relay/consumer stop)
-# + margin for the readinessProbe's periodSeconds=5 to have observed
-# the not-ready flip before traffic fully stops arriving.
+# -> SHUTDOWN_DRAIN_DELAY wait -> HTTP drain -> repromise consumer clean
+# stop with final offset commit -> outbox relay final pass LAST -> pgx pool
+# close) room to actually finish before Kubernetes SIGKILLs the
+# container: config.shutdownDrainDelay (5s, so the readinessProbe's
+# periodSeconds=5 has observed the not-ready flip) + 10s (shared
+# HTTP/consumer/relay shutdown budget) + margin.
 terminationGracePeriodSeconds: 30
 
 nodeSelector: {}

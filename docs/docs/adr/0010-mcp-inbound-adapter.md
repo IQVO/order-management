@@ -10,7 +10,7 @@ description: "Expose this bounded context to the AI ecosystem via an MCP server 
 
 ## Status
 
-**Accepted.** The reference implementation and pilot for this pattern across
+**Accepted — auth section superseded by [ADR 0012](./0012-remove-rest-mcp-bearer-auth.md);** a second read-only tool, `get_promise_health`, was added by [ADR 0019](./0019-promise-kpis-on-order-funnel.md). The architecture-fitness suite this record deferred ("arch tests do not exist yet" in its original framing) now exists — see `internal/architecture`'s arch-go suite. The reference implementation and pilot for this pattern across
 the estate is `fulfillment-execution` (its own ADR-0008); this record is
 `order-management` adopting that same decision, adapted to a context whose
 read surface is a single lookup-by-id.

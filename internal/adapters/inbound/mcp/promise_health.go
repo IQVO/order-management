@@ -44,6 +44,7 @@ type PromiseHealthRow struct {
 	HourBucket                time.Time
 	PromiseBasisCapability    int
 	PromiseBasisLeadTime      int
+	PromiseBasisNetwork       int
 	OrdersRepromised          int
 	OrdersSplitShipment       int
 	PromiseToCutoffGapSeconds float64
@@ -63,12 +64,16 @@ type promiseHealthInput struct {
 // promiseHealthDTO is the tool's output: the aggregated promise KPI summary
 // across every funnel row in the requested window/path.
 type promiseHealthDTO struct {
-	// PromiseBasisCapability/PromiseBasisLeadTime/OrdersAllocatedTotal are
-	// the promise basis distribution: how many allocation-outcome events in
-	// the window carried a real capability-derived CPT promise vs. the
-	// LeadTimePolicy fallback.
+	// PromiseBasisCapability/PromiseBasisLeadTime/PromiseBasisNetwork/
+	// OrdersAllocatedTotal are the promise basis distribution: how many
+	// allocation-outcome events in the window carried a real
+	// capability-derived CPT promise, the LeadTimePolicy fallback, or a
+	// promise DICTATED by an external deadline (ADR 0020, "Network" basis —
+	// kept separate so promises we never chose do not dilute the KPIs that
+	// measure the ones we did).
 	PromiseBasisCapability int `json:"promiseBasisCapability"`
 	PromiseBasisLeadTime   int `json:"promiseBasisLeadTime"`
+	PromiseBasisNetwork    int `json:"promiseBasisNetwork"`
 	OrdersAllocatedTotal   int `json:"ordersAllocatedTotal"`
 
 	// OrdersSplitShipment/SplitShipmentRate: how many orders promised their
@@ -104,6 +109,7 @@ func aggregatePromiseHealth(rows []PromiseHealthRow) promiseHealthDTO {
 	for _, row := range rows {
 		out.PromiseBasisCapability += row.PromiseBasisCapability
 		out.PromiseBasisLeadTime += row.PromiseBasisLeadTime
+		out.PromiseBasisNetwork += row.PromiseBasisNetwork
 		out.OrdersSplitShipment += row.OrdersSplitShipment
 		out.OrdersRepromised += row.OrdersRepromised
 		if row.PromiseToCutoffGapSamples > 0 {
@@ -112,7 +118,7 @@ func aggregatePromiseHealth(rows []PromiseHealthRow) promiseHealthDTO {
 		}
 	}
 
-	out.OrdersAllocatedTotal = out.PromiseBasisCapability + out.PromiseBasisLeadTime
+	out.OrdersAllocatedTotal = out.PromiseBasisCapability + out.PromiseBasisLeadTime + out.PromiseBasisNetwork
 	if out.OrdersAllocatedTotal > 0 {
 		out.SplitShipmentRate = float64(out.OrdersSplitShipment) / float64(out.OrdersAllocatedTotal)
 		out.RepromiseRate = float64(out.OrdersRepromised) / float64(out.OrdersAllocatedTotal)

@@ -130,6 +130,7 @@ the only file that knows both a port and its implementation:
 | --- | --- | --- |
 | `HTTP_ADDR` | `:8080` | Listen address |
 | `LOG_LEVEL` | `info` | slog level |
+| `SHUTDOWN_DRAIN_DELAY` | `5s` | Wait after `/readyz` flips to not-ready before the listener closes (ADR 0025 §8); `0` disables |
 | `DATABASE_URL` | *(unset)* | If unset, the in-memory adapters are used and no database is required. |
 | `MIGRATIONS_PATH` | `migrations` | Where golang-migrate looks for SQL files |
 | `INVENTORY_STORAGE_MODE` | `permissive` | `http` or `permissive` |

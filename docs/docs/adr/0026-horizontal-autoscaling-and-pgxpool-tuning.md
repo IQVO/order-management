@@ -136,20 +136,20 @@ inheriting the CPU-derived library default (`max(4, runtime.NumCPU())`):
 | Pool | Used by | `MaxConns` | Reasoning |
 |---|---|---|---|
 | OLTP (`postgres.NewPool`) | `cmd/order` (`api`), `cmd/mcp` (`mcp`) | **10** | `api`'s HPA ceiling of 4 replicas × 10 = 40 connections, ~40% of the shared instance's `max_connections=100` for this ONE of up to 10 fleet services' OLTP path alone — the plan's stated conservative budget, deliberately leaving the remaining ~60% for the other 9 services (and this service's own mcp/projector/reports processes) sharing the same Postgres instance. |
-| Analytics writer (`analyticsstore.NewPool`) | `cmd/order-projector` | **5** | The projector has no HPA (fixed at 1 replica — see the table above) and does single-row `ON CONFLICT` upserts against one `(path_id, hour_bucket)` key at a time; a small, flat pool is enough. |
+| Analytics writer (`analyticsstore.NewPool`) | `cmd/order-projector` | **5** | The projector's HPA is capped at 2 replicas (see the table above — it is NOT fixed at 1), and does single-row `ON CONFLICT` upserts against one `(path_id, hour_bucket)` key at a time; a small, flat pool is enough (2 × 5 = 10 at its ceiling). |
 | Analytics reader (`analyticsstore.NewReadOnlyPool`) | `cmd/order-reports` | **5** (`ReportsMaxConns`) | `reports` IS HPA-scalable (max 3); at that ceiling, 3 × 5 = 15 connections against the analytical database — comfortably inside the shared ceiling alongside the OLTP path's 40. |
 
 Worst case across every workload simultaneously at its proposed HPA
-maximum (`api` 4 × 10 = 40, `projector` fixed at 1 × 5 = 5, `reports` 3
+maximum (`api` 4 × 10 = 40, `projector` 2 × 5 = 10, `reports` 3
 × 5 = 15; `mcp` has no HPA, assume 2 manually-set replicas × 10 = 20):
-40 + 5 + 15 + 20 = **80** of the shared instance's 100 connections for
+40 + 10 + 15 + 20 = **85** of the shared instance's 100 connections for
 this ONE service alone — even at every proposed HPA ceiling
 simultaneously, with **HPA still disabled by default today** (at
 `replicaCount: 1` everywhere and no HPA enabled, this service's actual
 usage is `10 (api) + 10 (mcp, if deployed) + 5 (projector) + 5
-(reports)` = at most 30 connections, 30% of the ceiling). That 80-at-
+(reports)` = at most 30 connections, 30% of the ceiling). That 85-at-
 max-scale number is presented to be honest about the ceiling, not to
-claim it's comfortable — it leaves only 20 connections, 20% of
+claim it's comfortable — it leaves only 15 connections, 15% of
 `max_connections`, for the other 9 fleet services if they were all
 simultaneously maxed too. That is a real, documented residual risk (see
 Consequences), not one this PR can fully close alone: it depends on
@@ -172,7 +172,7 @@ because their query shapes differ:
 | Pool | `statement_timeout` | Reasoning |
 |---|---|---|
 | OLTP (`postgres.StatementTimeout`) | **5s** | Every OLTP query (`ReceiveOrder`, `AllocateOrder`, `GetOrder`, the promise/repromise paths) is a single-aggregate read/write keyed by id, normally low-single-digit milliseconds. 5s is roughly 1000x that — generous headroom for real transient contention (a lock wait behind a concurrent writer) without ever being a normal-path concern, while bounding the absolute worst case tightly since this is the interactive, latency-sensitive path and also the pool with the most connections (40 at max HPA scale) to protect. |
-| Analytics writer (`analyticsstore.StatementTimeout`) | **10s** | A Kafka consumer replaying a backlog after a redeploy issues upserts in a tight loop; a transient lock wait here doesn't need to be as tight as an interactive OLTP request. Still bounded — the projector has no replica to fail over to (fixed at 1), so an unbounded query here would stall the entire analytics pipeline, not just one of several `api` pods, which is exactly why it isn't left unbounded either. |
+| Analytics writer (`analyticsstore.StatementTimeout`) | **10s** | A Kafka consumer replaying a backlog after a redeploy issues upserts in a tight loop; a transient lock wait here doesn't need to be as tight as an interactive OLTP request. Still bounded — at its HPA ceiling the projector runs at most 2 replicas, so an unbounded query here would stall half the analytics pipeline's throughput (and ALL of it at the default replicaCount of 1), not just one of several `api` pods, which is exactly why it isn't left unbounded either. |
 | Analytics reader (`analyticsstore.ReportsStatementTimeout`) | **15s** | The funnel report aggregates rows across a caller-chosen `[From, To)` time range (`postgres_report.go`) — wider than the OLTP side's always-single-aggregate-by-id shape — so it gets more headroom, but still a hard ceiling: a caller-supplied wide date range must not be able to hold a reports connection forever. |
 
 Verified with a real Postgres via testcontainers

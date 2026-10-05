@@ -10,7 +10,7 @@ description: "ADR 0018 — order-management's half of ADR 0014 §5's feedback lo
 
 ## Status
 
-> **Superseded by ADR-0030** (the flat inbound envelope shown here; the consumer now dispatches on the full CloudEvents types and dedupes on the CloudEvents `id`). Every Kafka message is now a
+> **Partially superseded (envelope only) by ADR-0030** (the flat inbound envelope shown here; the consumer now dispatches on the full CloudEvents types and dedupes on the CloudEvents `id`). Every Kafka message is now a
 > CloudEvents 1.0 event — see
 > [ADR 0030](./0030-cloudevents-mandatory-event-envelope.md). The rest of
 > this record stands.
@@ -158,10 +158,12 @@ returned.
 `Orders.Save` then `Events.Publish` run sequentially, matching this
 repo's OWN existing convention (see `allocation.go`'s
 `allocateAndRelease`) — no transactional wrapper was invented.
-**This repo has no `UnitOfWork`/transactional-outbox port at all**
-(unlike fulfillment-execution/labor-performance), and introducing one
-here would be over-engineering relative to the fleet's stated intent for
-this repo.
+**When this record was accepted the repo had no
+`UnitOfWork`/transactional-outbox port at all.** That changed with
+[ADR 0022](./0022-transactional-outbox.md): `RepromiseOrder` now saves
+and publishes inside `ports.UnitOfWork` (the store and its events commit
+atomically, drained to Kafka by the relay), so the sequential
+non-transactional shape described here is historical.
 
 ### 3. Idempotency key: `event_id` alone, not the full `(orderId, sourceEventId)` composite
 

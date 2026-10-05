@@ -548,20 +548,34 @@ components:
 
     DownstreamUnavailable:
       description: >
-        inventory-storage could not be reached, answered ambiguously, or
-        is wired in permissive (no-op) mode. Never papered over with a
-        2xx: allocating real stock must not appear to succeed when it did
-        not.
+        inventory-storage could not be reached (transport error, timeout,
+        open circuit breaker), answered with an unexpected status, or is
+        wired in permissive (no-op) mode. Problem `type` is
+        `downstream-unavailable` for an infrastructure failure and
+        `downstream-not-configured` for permissive mode. Never papered
+        over with a 2xx: allocating real stock must not appear to succeed
+        when it did not.
       content:
         application/problem+json:
           schema:
             $ref: "#/components/schemas/Problem"
-          example:
-            type: https://errors.order-management.warehouse-systems.dev/downstream-not-configured
-            title: A downstream service is running in permissive (no-op) mode
-            status: 503
-            detail: downstream client is running in permissive (no-op) mode and cannot perform this operation
-            instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/retry-allocation
+          examples:
+            unavailable:
+              summary: inventory-storage failed or answered unexpectedly
+              value:
+                type: https://errors.order-management.warehouse-systems.dev/downstream-unavailable
+                title: A downstream service is unavailable or answered unexpectedly
+                status: 503
+                detail: "downstream service is unavailable: inventory-storage: unexpected response status: 500"
+                instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/retry-allocation
+            notConfigured:
+              summary: inventory-storage client is in permissive (no-op) mode
+              value:
+                type: https://errors.order-management.warehouse-systems.dev/downstream-not-configured
+                title: A downstream service is running in permissive (no-op) mode
+                status: 503
+                detail: downstream client is running in permissive (no-op) mode and cannot perform this operation
+                instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/retry-allocation
 
     InternalError:
       description: An unexpected internal error occurred.

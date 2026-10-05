@@ -80,10 +80,13 @@ Specifically:
   the `reservationId` required to revoke on cancellation, and nothing else.
 - The contracts it consumes are exactly:
   - `POST /reservations` and `DELETE /reservations/{id}` on inventory-storage,
-  - `POST /paths/{pathId}/work-units` on wes-work-planning.
+  - `POST /paths/{pathId}/work-units` on wes-work-planning — until
+    [ADR 0005](./0005-choreographed-release-via-kafka.md) replaced that
+    synchronous call with the `OrderReleased` integration event.
 - The request and response shapes for those calls are **local mirrors** inside
-  the outbound adapters (`internal/adapters/outbound/inventorystorage`,
-  `internal/adapters/outbound/weswork`) — unexported structs that exist purely
+  the outbound adapters (`internal/adapters/outbound/inventorystorage`; the
+  wes-work mirror lived in `internal/adapters/outbound/weswork` until ADR
+  0005 deleted it) — unexported structs that exist purely
   to marshal that Supplier's JSON. Duplicating those few fields is the
   *price of autonomy*, deliberately paid.
 - **This build is 100% additive from the Suppliers' point of view.** Neither

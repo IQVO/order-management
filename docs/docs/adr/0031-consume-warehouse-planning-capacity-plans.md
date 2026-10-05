@@ -202,6 +202,13 @@ the single site the promise itself is computed for. **This does not determine th
 order's fulfillment site; it reuses the one-site assumption ADR 0014 already
 documents.** See below.
 
+This is an **accepted limitation of this decision**, not a defect to fix in
+review: the alternative (per-order fulfillment sites) is an order-model change
+that gets its own ADR when it happens (see Consequences — "THE GAP"). Until
+then, an operator whose planner publishes a `location` that differs from the
+configured site must set `PLANNED_CAPACITY_SITE_ID` accordingly or accept that
+no order is annotated.
+
 ## Consequences
 
 **Easier**

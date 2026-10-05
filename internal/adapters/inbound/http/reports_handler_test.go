@@ -38,11 +38,11 @@ func TestReports_GetFunnel_OK(t *testing.T) {
 		Key:            report.RowKey{PathId: "pick", HourBucket: bucket},
 		OrdersReceived: 5, OrdersAllocated: 4, OrdersReleased: 3,
 		OrdersCancelled: 1, LinesBackordered: 2,
-		PromiseBasisCapability: 3, PromiseBasisLeadTime: 1,
+		PromiseBasisCapability: 3, PromiseBasisLeadTime: 1, PromiseBasisNetwork: 2,
 		OrdersSplitShipment: 1, OrdersRepromised: 0,
 		PromiseToCutoffGapSeconds: cutoff.Sub(bucket).Seconds(),
 	}}}}
-	srv := inboundhttp.NewReportsRouter(&inboundhttp.ReportsHandlers{Store: store}, nil)
+	srv := inboundhttp.NewReportsRouter(&inboundhttp.ReportsHandlers{Store: store}, nil, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/reports/funnel?from=2026-06-01T00:00:00Z&to=2026-06-02T00:00:00Z&pathId=pick", nil)
 	rec := httptest.NewRecorder()
@@ -61,6 +61,7 @@ func TestReports_GetFunnel_OK(t *testing.T) {
 			LinesBackordered          int     `json:"linesBackordered"`
 			PromiseBasisCapability    int     `json:"promiseBasisCapability"`
 			PromiseBasisLeadTime      int     `json:"promiseBasisLeadTime"`
+			PromiseBasisNetwork       int     `json:"promiseBasisNetwork"`
 			OrdersSplitShipment       int     `json:"ordersSplitShipment"`
 			OrdersRepromised          int     `json:"ordersRepromised"`
 			PromiseToCutoffGapSeconds float64 `json:"promiseToCutoffGapSeconds"`
@@ -73,10 +74,13 @@ func TestReports_GetFunnel_OK(t *testing.T) {
 		t.Fatalf("rows = %d, want 1", len(body.Rows))
 	}
 	row := body.Rows[0]
-	if row.PathID != "pick" || row.OrdersReceived != 5 || row.OrdersReleased != 3 || row.OrdersCancelled != 1 || row.LinesBackordered != 2 {
+	gotFunnel := [4]int{row.OrdersReceived, row.OrdersReleased, row.OrdersCancelled, row.LinesBackordered}
+	if row.PathID != "pick" || gotFunnel != [4]int{5, 3, 1, 2} {
 		t.Errorf("row = %+v, unexpected values", row)
 	}
-	if row.PromiseBasisCapability != 3 || row.PromiseBasisLeadTime != 1 || row.OrdersSplitShipment != 1 || row.OrdersRepromised != 0 {
+	// ADR 0014 §6 / 0019 / 0020: promise basis distribution + split shipment.
+	gotKPI := [4]int{row.PromiseBasisCapability, row.PromiseBasisLeadTime, row.PromiseBasisNetwork, row.OrdersSplitShipment}
+	if gotKPI != [4]int{3, 1, 2, 1} || row.OrdersRepromised != 0 {
 		t.Errorf("promise KPI fields = %+v, unexpected values", row)
 	}
 	if row.PromiseToCutoffGapSeconds != cutoff.Sub(bucket).Seconds() {
@@ -88,7 +92,7 @@ func TestReports_GetFunnel_OK(t *testing.T) {
 }
 
 func TestReports_GetFunnel_MissingParams(t *testing.T) {
-	srv := inboundhttp.NewReportsRouter(&inboundhttp.ReportsHandlers{Store: &stubStore{}}, nil)
+	srv := inboundhttp.NewReportsRouter(&inboundhttp.ReportsHandlers{Store: &stubStore{}}, nil, "")
 
 	tests := []struct {
 		name string
@@ -116,7 +120,7 @@ func TestReports_GetFunnel_MissingParams(t *testing.T) {
 
 func TestReports_GetFreshness_OK(t *testing.T) {
 	store := &stubStore{lag: 90 * time.Second}
-	srv := inboundhttp.NewReportsRouter(&inboundhttp.ReportsHandlers{Store: store}, nil)
+	srv := inboundhttp.NewReportsRouter(&inboundhttp.ReportsHandlers{Store: store}, nil, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/reports/funnel/freshness", nil)
 	rec := httptest.NewRecorder()
@@ -137,7 +141,7 @@ func TestReports_GetFreshness_OK(t *testing.T) {
 }
 
 func TestReports_Healthz(t *testing.T) {
-	srv := inboundhttp.NewReportsRouter(&inboundhttp.ReportsHandlers{Store: &stubStore{}}, nil)
+	srv := inboundhttp.NewReportsRouter(&inboundhttp.ReportsHandlers{Store: &stubStore{}}, nil, "")
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)

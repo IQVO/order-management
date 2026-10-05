@@ -52,11 +52,20 @@ var (
 	// order_lines is touched, so a failed check leaves every row
 	// exactly as some other, concurrent writer left it). The inbound
 	// HTTP adapter maps this to 409; the Kafka-driven RepromiseOrder
-	// consumer's normal commit-and-skip-on-error handling treats it as
-	// any other infrastructure error from Orders.Save — see that
-	// consumer's own handling and the ADR for why a safe redelivery,
-	// not a dropped message, is the result.
+	// consumer retries it in-process (the handler re-reads the order)
+	// and dead-letters it only when every attempt conflicts — it is
+	// never swallowed (ADR-0024).
 	ErrConcurrentModification = errors.New("order was concurrently modified by another writer; reload and retry")
+
+	// ErrDownstreamUnavailable marks an infrastructure failure of a
+	// downstream Supplier call that is neither a business fact (409
+	// ErrInsufficientStock) nor a permissive-mode refusal
+	// (ErrDownstreamNotConfigured): a transport error, a timeout, an
+	// unexpected response status. Outbound clients wrap it (alongside the
+	// underlying cause) so the inbound HTTP adapter can answer 503
+	// instead of 500 (ADR-0003: fail closed, and say it is the
+	// downstream, not this service).
+	ErrDownstreamUnavailable = errors.New("downstream service is unavailable")
 )
 
 // OrderRepo persists and retrieves Order aggregates.

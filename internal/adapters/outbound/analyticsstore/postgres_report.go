@@ -52,7 +52,7 @@ func (r *PostgresReport) Query(ctx context.Context, q report.ReportQuery) (repor
 			f.orders_received, f.orders_allocated, f.orders_partially_allocated,
 			f.orders_allocation_failed, f.orders_released, f.orders_cancelled,
 			f.lines_allocated, f.lines_backordered, f.lines_released,
-			f.promise_basis_capability, f.promise_basis_lead_time, f.orders_split_shipment,
+			f.promise_basis_capability, f.promise_basis_lead_time, f.promise_basis_network, f.orders_split_shipment,
 			f.promise_to_cutoff_gap_seconds_sum, f.promise_to_cutoff_gap_samples,
 			COALESCE(CASE WHEN f.path_id = '' THEN rep.orders_repromised END, 0) AS orders_repromised
 		 FROM funnel_rollup f
@@ -65,7 +65,7 @@ func (r *PostgresReport) Query(ctx context.Context, q report.ReportQuery) (repor
 		 SELECT
 			'' AS path_id, rep.hour_bucket,
 			0, 0, 0, 0, 0, 0, 0, 0, 0,
-			0, 0, 0,
+			0, 0, 0, 0,
 			0, 0,
 			rep.orders_repromised
 		 FROM repromise rep
@@ -95,7 +95,7 @@ func (r *PostgresReport) Query(ctx context.Context, q report.ReportQuery) (repor
 			&row.OrdersReceived, &row.OrdersAllocated, &row.OrdersPartiallyAllocated,
 			&row.OrdersAllocationFailed, &row.OrdersReleased, &row.OrdersCancelled,
 			&row.LinesAllocated, &row.LinesBackordered, &row.LinesReleased,
-			&row.PromiseBasisCapability, &row.PromiseBasisLeadTime, &row.OrdersSplitShipment,
+			&row.PromiseBasisCapability, &row.PromiseBasisLeadTime, &row.PromiseBasisNetwork, &row.OrdersSplitShipment,
 			&gapSecondsSum, &gapSamples,
 			&row.OrdersRepromised,
 		); err != nil {

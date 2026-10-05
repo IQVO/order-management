@@ -56,6 +56,15 @@ func idempotencyKeyFor(req ports.ReservationRequest) string {
 // as a backorder.
 var ErrUnexpectedStatus = errors.New("inventory-storage: unexpected response status")
 
+// unavailable tags a transport/timeout/decode failure of a call to
+// inventory-storage as ports.ErrDownstreamUnavailable while keeping the
+// cause (context.Canceled / DeadlineExceeded, net errors) reachable
+// through errors.Is/As — the circuit breaker's own IsExcluded check
+// relies on the latter. The inbound HTTP adapter answers 503 for it.
+func unavailable(cause error) error {
+	return fmt.Errorf("%w: %w", ports.ErrDownstreamUnavailable, cause)
+}
+
 // HTTPDoer is the subset of *http.Client this adapter depends on, so unit
 // tests can substitute a fake transport without a real server.
 type HTTPDoer interface {
@@ -127,7 +136,7 @@ func (c *Client) Reserve(ctx context.Context, req ports.ReservationRequest) (por
 
 	resp, err := c.doer.Do(httpReq)
 	if err != nil {
-		return ports.ReservationResult{}, err
+		return ports.ReservationResult{}, unavailable(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -135,16 +144,16 @@ func (c *Client) Reserve(ctx context.Context, req ports.ReservationRequest) (por
 	case http.StatusCreated, http.StatusOK:
 		var decoded reservationResponse
 		if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
-			return ports.ReservationResult{}, err
+			return ports.ReservationResult{}, unavailable(err)
 		}
 		if decoded.ID == "" {
-			return ports.ReservationResult{}, fmt.Errorf("%w: 2xx response carried no reservation id", ErrUnexpectedStatus)
+			return ports.ReservationResult{}, fmt.Errorf("%w: %w: 2xx response carried no reservation id", ports.ErrDownstreamUnavailable, ErrUnexpectedStatus)
 		}
 		return ports.ReservationResult{ReservationID: decoded.ID}, nil
 	case http.StatusConflict:
 		return ports.ReservationResult{}, ports.ErrInsufficientStock
 	default:
-		return ports.ReservationResult{}, fmt.Errorf("%w: %d", ErrUnexpectedStatus, resp.StatusCode)
+		return ports.ReservationResult{}, fmt.Errorf("%w: %w: %d", ports.ErrDownstreamUnavailable, ErrUnexpectedStatus, resp.StatusCode)
 	}
 }
 
@@ -175,7 +184,7 @@ func (c *Client) RevokeReservation(ctx context.Context, reservationID string) er
 
 	resp, err := c.doer.Do(httpReq)
 	if err != nil {
-		return err
+		return unavailable(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -183,6 +192,6 @@ func (c *Client) RevokeReservation(ctx context.Context, reservationID string) er
 	case http.StatusNoContent, http.StatusOK, http.StatusNotFound:
 		return nil
 	default:
-		return fmt.Errorf("%w: %d", ErrUnexpectedStatus, resp.StatusCode)
+		return fmt.Errorf("%w: %w: %d", ports.ErrDownstreamUnavailable, ErrUnexpectedStatus, resp.StatusCode)
 	}
 }

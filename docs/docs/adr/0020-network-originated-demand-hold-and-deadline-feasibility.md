@@ -279,6 +279,21 @@ re-promises, and a deadline that did not survive the round trip would
 silently drop back to the ordinary earliest-window promise and break the
 external commitment with no trace.
 
+#### Amendment (2026-10, ADR-conformance audit): re-promise honours the deadline too
+
+The routing above was applied at intake and in `RetryAllocation`, but
+`RepromiseOrder` (ADR 0018) called `PromiseGroups` unconditionally. A
+`Network`-basis order hit by `TaskCPTMissed`/`PackageManifested` was
+therefore re-promised on the Capability/LeadTime basis — possibly past
+the deadline, and silently flipping `promiseBasis` away from `Network`.
+`RepromiseOrder` now routes exactly like `setPromiseDate`: an order with
+a persisted `requiredShipBy` is recomputed by `FeasibleBy` (single
+ship-complete group, `Network` basis, latest qualifying window at or
+before the deadline). When the deadline is no longer feasible
+(`FeasibleBy` → `false`), the existing promise is **kept** and no
+`OrderRepromised` is published — the same "no promise we know breaks the
+deadline" outcome as intake.
+
 ### 3. `PromiseBasis` gains a third value: `Network`
 
 ```go
@@ -408,6 +423,18 @@ statement it checks against.
 - Site modelling. ADR 0014 §"SiteId is a known simplification" still
   stands — every promise is computed against one configured site, and
   `FeasibleBy` inherits that unchanged.
+
+> **Accepted deferral (2026-10 ADR-conformance audit).** The audit
+> re-flagged the missing orphaned-hold sweeper. It is **deliberately not
+> implemented in order-management**: a hold's lifetime is bounded by the
+> acknowledgement clock `network-fulfillment` owns, so the sweeper's
+> correct trigger and timeout live there, and a second, independent TTL
+> here would race it. Until a sweeper exists, an orphaned hold keeps its
+> inventory reservations until someone calls `DELETE /orders/{id}`
+> (BR6-legal while nothing is released) or `POST /orders/{id}/release`.
+> Tracking: open a follow-up in `network-fulfillment` ("sweep orphaned
+> holds past the acknowledgement window by calling order-management's
+> cancel") — this is an accepted limitation, not an unowned one.
 
 ## Rollout
 
