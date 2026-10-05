@@ -96,10 +96,15 @@ func (PathSelectionPolicy) Select(
 ) (shared.PathId, bool)
 ```
 
-`shared.ActivePathCandidate` is a domain-owned mirror of `ports.ActivePath`
-(same reasoning as `shared.Eligibility` already mirroring
+`shared.ActivePathCandidate` is a domain-owned mirror of the port's
+catalogue entry (same reasoning as `shared.Eligibility` already mirroring
 `process-path-management`'s own value object independently — the domain
-layer must not import the application layer's port types).
+layer must not import the application layer's port types). **Naming
+note, fixed after review:** the port sketch above shows a ports-local
+`ports.ActivePath`; what shipped is simpler — `ProcessPathCatalogue.
+ListActive` returns `[]shared.ActivePathCandidate` directly (see
+`ports.go`), so the domain interface and the catalogue adapter share one
+type and no mirror conversion exists.
 
 The rule, evaluated in this order:
 

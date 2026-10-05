@@ -61,17 +61,31 @@ Concretely:
   decision, not a formatting concern.
 - `internal/application/ports/` declares the **outbound interfaces** the
   application needs: `OrderRepo`, `EventPublisher`, `Clock`,
-  `InventoryReservationClient`, `WorkReleaseClient`. They are owned by the
+  `InventoryReservationClient` — plus, since
+  [ADR 0005](./0005-choreographed-release-via-kafka.md) deleted the
+  synchronous release call, the ports that replaced `WorkReleaseClient`
+  (`UnitOfWork` from [ADR 0022](./0022-transactional-outbox.md), the
+  catalogue/capacity lookups of ADR 0014/0015/0016, and others; see
+  `ports.go`). They are owned by the
   application and expressed in *this* context's types — never in a Supplier's
   types (see [ADR 0002](./0002-http-consumer-of-inventory-and-wes-not-shared-code.md)).
 - `internal/application/usecases/` holds **one struct per use case**, with
   collaborators as plain fields. No use case imports an adapter package.
 - `internal/adapters/` implements the ports: `inbound/http` (chi, DTOs, RFC
-  7807 error mapping), `outbound/inventorystorage`, `outbound/weswork`,
-  `outbound/postgres`, `outbound/memory`, `outbound/events`.
-- `cmd/order/main.go` is the **only** composition root — the only file that
-  reads environment variables and the only file that knows both a port and its
-  implementation.
+  7807 error mapping), `outbound/inventorystorage`,
+  `outbound/postgres`, `outbound/memory`, `outbound/events` — plus, added
+  by later ADRs, `outbound/kafka` (ADR 0005), `outbound/kafkacatalogue`/
+  `kafkacptschedule`/`kafkapathcapacity` (ADR 0014/0015) and
+  `outbound/productclassification` (ADR 0016). (`outbound/weswork` was
+  deleted by [ADR 0005](./0005-choreographed-release-via-kafka.md).)
+- `cmd/order/main.go` is the **only** composition root for the write-side
+  service — the only file that knows both a port and its implementation.
+  When this record was written it was also the only `cmd/` binary and the
+  only env reader. The fleet has since grown four composition roots
+  (`cmd/order`, `cmd/mcp`, `cmd/order-reports`, `cmd/order-projector`),
+  each the sole env reader for its own process, with `cmd/order/main.go`'s
+  `wiring.go`/`planned_capacity.go` companions and `internal/telemetry`'s
+  `Setup` reading their own env seams — the same rule, applied per binary.
 
 `Clock` is a port for the same reason the repository is: the promise date is a
 *domain* output computed from "now", so time is injected rather than read from
@@ -97,9 +111,11 @@ instead of tolerance-based.
 - **The wire contract and the model evolve independently.** DTOs live in the
   HTTP adapter; an `orderResponse` is not an `order.Order`. The derived
   `status` field is computed at serialisation time from the aggregate.
-- **The deferred work is additive.** Kafka publishing is a second
-  `EventPublisher`; a real carrier-rate promise date is a second
-  `LeadTimePolicy`. Neither touches a use case.
+- **The deferred work is additive — and it happened that way.** Kafka
+  publishing became a second `EventPublisher` (ADR 0005) and the
+  capability-derived promise became `order.PromisePolicy` with
+  `LeadTimePolicy` as its explicit fallback (ADR 0014) — neither touched
+  a use case's shape.
 
 ### Harder
 
@@ -116,6 +132,9 @@ instead of tolerance-based.
   `AllocateOrder` must persist partial progress *before* it returns a hard
   error. Nothing in the compiler enforces that ordering; the tests do.
 - **The rule is easy to violate under deadline pressure.** Nothing stops a use
-  case importing `net/http`. The sibling services close that gap with arch-go
-  fitness tests; adopting them here is deferred (see the README), and until
-  then the rule is upheld by review.
+  case importing `net/http` — except the arch-go fitness tests that now
+  exist (`internal/architecture`): when this record was written they were
+  deferred and the rule was upheld by review alone; the suite has since
+  been adopted (see `internal/architecture/architecture_test.go`,
+  `fitness_test.go`, `events_fitness_test.go`), closing the gap the same
+  way the sibling services did.

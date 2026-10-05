@@ -10,7 +10,9 @@ description: "ADR 0016 — order.PathSelectionPolicy evaluates a line's product 
 
 ## Status
 
-Accepted.
+Accepted — extended by [ADR 0021](./0021-multi-path-attribute-driven-routing.md),
+which made the eligibility rules this record sketched attribute-driven
+and multi-path.
 
 ## Context
 

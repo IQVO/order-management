@@ -91,8 +91,10 @@ so the domain stays free of Kafka and HTTP:
 - `ports.ProcessPathCatalogue` widened from `IsActive(pathId)` to also
   return `CycleTimeP95` and `Eligibility` per path (the fields PPM ADR
   0010 adds; ADR 0013 explicitly left this widening for this phase).
-- `ports.CPTSchedule` — `NextCutoffs(siteId, from, n)`, backed by the
-  same Kafka-fed local cache, decoding `CPTScheduleChanged`.
+- `ports.CPTScheduleCache` — `NextCutoffs(siteId, from, n)`, backed by
+  the same Kafka-fed local cache, decoding `CPTScheduleChanged`. (The
+  port shipped as `CPTScheduleCache`, not the `CPTSchedule` name sketched
+  here, to read as what it is — a cache — beside `ProcessPathCatalogue`.)
 - `ports.PathCapacity` — `Remaining(pathId, cptId) (units, known bool)`.
   Until wes-work-planning publishes capacity this port has one
   implementation, `unknown`, which always reports `known=false`.
@@ -238,7 +240,7 @@ before merge, in this order:
    events). This service's `kafkacatalog` decoder is proven tolerant of
    the new event type and fields before that merges.
 2. **This service, step A:** widen `ProcessPathCatalogue`, add the
-   `CPTSchedule` cache and the `unknown` capacity adapter, introduce
+   `CPTScheduleCache` and the `unknown` capacity adapter, introduce
    `Promise` and `PromisePolicy`, tag `basis`, additive wire fields.
    Behaviour change is visible only where a schedule exists.
 3. **wes-work-planning:** read `promise_cpt_id` when present; publish

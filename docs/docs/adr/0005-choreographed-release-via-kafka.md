@@ -10,7 +10,7 @@ description: ADR 0005 — replace the public /allocate and /release REST verbs a
 
 ## Status
 
-> **Superseded by ADR-0030** (the flat `event_id`/`event_type`/`occurred_at`/`source`/`data` integration envelope described here). Every Kafka message is now a
+> **Partially superseded (envelope only) by ADR-0030** (the flat `event_id`/`event_type`/`occurred_at`/`source`/`data` integration envelope described here). Every Kafka message is now a
 > CloudEvents 1.0 event — see
 > [ADR 0030](./0030-cloudevents-mandatory-event-envelope.md). The rest of
 > this record stands.
@@ -210,9 +210,12 @@ default, never caller-supplied.**
   `event_id`, as inventory-storage's own consumers already do) — and this
   service has no visibility into whether that consumption succeeded. See
   the fire-and-forget note above.
-- **No ordering guarantee across events on the topic** (no partition
-  key), matching inventory-storage's own documented limitation for the
-  identical reason.
+- **No ordering guarantee across events on the topic** originally (no
+  partition key), matching inventory-storage's own documented limitation
+  for the identical reason — **resolved for the integration topic by
+  [ADR 0027](./0027-kafka-integration-publisher-partition-key.md)**,
+  which keys the integration publisher's messages on `OrderId` so all
+  events for one order land on one partition, in order.
 - **The frozen `WorkUnitID` formula is now a coordination point with zero
   wire-level enforcement.** Nothing catches a drift between this service's
   formula and wes-work-planning's independently-reconstructed one except
@@ -224,11 +227,18 @@ default, never caller-supplied.**
   inspect allocation before authorising release) has lost that lever —
   no v1 caller exercised it, and none was ever the point of the original
   public verbs, but it is a real behavioural change worth naming.
-- **Two envelope generations coexist across the fleet**, same as
-  inventory-storage's own documented state: this adapter emits the
-  established flat envelope (`event_id`/`event_type`/`occurred_at`/`source`/`data`),
-  not a CloudEvents-shaped one — consistent with the sibling service, not
-  yet migrated.
+- **Two envelope generations coexisted across the fleet** until
+  [ADR 0030](./0030-cloudevents-mandatory-event-envelope.md) made
+  CloudEvents 1.0 the single mandatory envelope; this adapter emitted the
+  established flat envelope
+  (`event_id`/`event_type`/`occurred_at`/`source`/`data`) at the time,
+  consistent with the sibling service then. The banner above covers the
+  migration.
+
+Downstream consumers also receive more than this record originally
+described: the topic now carries `OrderRepromised` (forwarded here since
+[ADR 0018](./0018-repromise-order-consumer-and-order-repromised.md)),
+not just the release events this ADR introduced.
 
 ## Verification
 

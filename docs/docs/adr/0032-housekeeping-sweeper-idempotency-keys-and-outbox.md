@@ -1,4 +1,5 @@
 ---
+id: 0032-housekeeping-sweeper-idempotency-keys-and-outbox
 slug: /adr/0032-housekeeping-sweeper-idempotency-keys-and-outbox
 title: "0032. Housekeeping sweeper for idempotency keys and published outbox rows"
 sidebar_label: "32. Housekeeping sweeper"
