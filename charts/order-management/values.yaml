@@ -150,6 +150,14 @@ config:
   # "0" disables the wait. Must satisfy
   # shutdownDrainDelay + 10s (shutdown budget) < terminationGracePeriodSeconds.
   shutdownDrainDelay: "5s"
+  # ADR-0032 housekeeping sweeper (cmd/order only; rendered into the
+  # deployment env when a database is configured). HOUSEKEEPING_INTERVAL
+  # "0" disables the sweeper; TTL/retention "0" keeps that table's rows
+  # forever (the pre-ADR-0032 behaviour). Defaults mirror the binary's
+  # own fallbacks and inventory-storage's ADR-0026 knobs exactly.
+  housekeepingInterval: "1h"
+  idempotencyKeyTtl: "24h"
+  outboxRetention: "168h"
 
 database:
   url: ""

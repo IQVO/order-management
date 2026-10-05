@@ -242,12 +242,11 @@ body replays the identical `422` body rather than re-validating.
   repos adopting this pattern) should extend it rather than re-invent
   a parallel tx-in-context mechanism, or reach for it directly instead
   of importing the postgres adapter package from inbound code.
-- **Known follow-up, explicitly deferred:** no TTL/cleanup job exists
-  yet for old `idempotency_keys` rows. The table grows unboundedly
-  today; `idx_idempotency_keys_created_at` exists specifically so a
-  future scheduled job (e.g. `DELETE ... WHERE created_at < now() -
-  interval '30 days'`) can find old rows without a full table scan.
-  Building that job is out of scope for this change.
+- **Known follow-up, now closed by [ADR 0032](./0032-housekeeping-sweeper-idempotency-keys-and-outbox.md):**
+  no TTL/cleanup job existed for old `idempotency_keys` rows when this
+  ADR was accepted. `idx_idempotency_keys_created_at` existed
+  specifically so the future scheduled job could find old rows without
+  a full table scan; ADR 0032 built that job (a 24h TTL sweeper).
 - The two `{id}`-scoped mutating routes
   (`retry-allocation`, `release`) remain unprotected by this
   middleware; they are naturally safer (caller-supplied id) but still
