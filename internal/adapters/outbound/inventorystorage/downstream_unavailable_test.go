@@ -15,83 +15,81 @@ import (
 // circuit) carries ports.ErrDownstreamUnavailable so the HTTP adapter can
 // answer 503. A 409 stays the insufficient-stock business fact and must
 // NEVER be tagged unavailable.
-func TestInfrastructureFailuresAreTaggedDownstreamUnavailable(t *testing.T) {
-	req := ports.ReservationRequest{SKU: "SKU-1", Quantity: 1, DemandRef: "ord-1"}
 
-	t.Run("unexpected status on Reserve", func(t *testing.T) {
-		var got captured
-		srv := newServer(t, http.StatusInternalServerError, "", &got)
-		_, err := inventorystorage.NewClient(srv.URL, nil).Reserve(context.Background(), req)
-		if !errors.Is(err, ports.ErrDownstreamUnavailable) || !errors.Is(err, inventorystorage.ErrUnexpectedStatus) {
-			t.Fatalf("err = %v, want both ErrDownstreamUnavailable and ErrUnexpectedStatus", err)
-		}
-	})
+var unavailableReq = ports.ReservationRequest{SKU: "SKU-1", Quantity: 1, DemandRef: "ord-1"}
 
-	t.Run("unexpected status on RevokeReservation", func(t *testing.T) {
-		var got captured
-		srv := newServer(t, http.StatusBadGateway, "", &got)
-		err := inventorystorage.NewClient(srv.URL, nil).RevokeReservation(context.Background(), "res-1")
-		if !errors.Is(err, ports.ErrDownstreamUnavailable) || !errors.Is(err, inventorystorage.ErrUnexpectedStatus) {
-			t.Fatalf("err = %v, want both ErrDownstreamUnavailable and ErrUnexpectedStatus", err)
-		}
-	})
+func TestReserveFailuresAreTaggedDownstreamUnavailable(t *testing.T) {
+	tests := []struct {
+		name         string
+		status       int
+		responseBody string
+		wantStatusEr bool // also wraps ErrUnexpectedStatus
+	}{
+		{"unexpected status", http.StatusInternalServerError, "", true},
+		{"2xx without a reservation id", http.StatusCreated, `{}`, true},
+		{"undecodable 2xx body", http.StatusCreated, `not json`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got captured
+			srv := newServer(t, tt.status, tt.responseBody, &got)
+			_, err := inventorystorage.NewClient(srv.URL, nil).Reserve(context.Background(), unavailableReq)
+			if !errors.Is(err, ports.ErrDownstreamUnavailable) {
+				t.Fatalf("err = %v, want ErrDownstreamUnavailable", err)
+			}
+			if tt.wantStatusEr && !errors.Is(err, inventorystorage.ErrUnexpectedStatus) {
+				t.Fatalf("err = %v, want it to also wrap ErrUnexpectedStatus", err)
+			}
+		})
+	}
+}
 
-	t.Run("2xx without a reservation id", func(t *testing.T) {
-		var got captured
-		srv := newServer(t, http.StatusCreated, `{}`, &got)
-		_, err := inventorystorage.NewClient(srv.URL, nil).Reserve(context.Background(), req)
-		if !errors.Is(err, ports.ErrDownstreamUnavailable) {
-			t.Fatalf("err = %v, want ErrDownstreamUnavailable", err)
-		}
-	})
+func TestRevokeUnexpectedStatusIsTaggedDownstreamUnavailable(t *testing.T) {
+	var got captured
+	srv := newServer(t, http.StatusBadGateway, "", &got)
+	err := inventorystorage.NewClient(srv.URL, nil).RevokeReservation(context.Background(), "res-1")
+	if !errors.Is(err, ports.ErrDownstreamUnavailable) || !errors.Is(err, inventorystorage.ErrUnexpectedStatus) {
+		t.Fatalf("err = %v, want both ErrDownstreamUnavailable and ErrUnexpectedStatus", err)
+	}
+}
 
-	t.Run("undecodable 2xx body", func(t *testing.T) {
-		var got captured
-		srv := newServer(t, http.StatusCreated, `not json`, &got)
-		_, err := inventorystorage.NewClient(srv.URL, nil).Reserve(context.Background(), req)
-		if !errors.Is(err, ports.ErrDownstreamUnavailable) {
-			t.Fatalf("err = %v, want ErrDownstreamUnavailable", err)
-		}
-	})
+func TestTransportErrorIsTaggedAndKeepsItsCauseReachable(t *testing.T) {
+	boom := errors.New("connection refused")
+	client := inventorystorage.NewClient("http://example.invalid", errDoer{err: boom})
 
-	t.Run("transport error keeps its cause reachable", func(t *testing.T) {
-		boom := errors.New("connection refused")
-		client := inventorystorage.NewClient("http://example.invalid", errDoer{err: boom})
+	_, err := client.Reserve(context.Background(), unavailableReq)
+	if !errors.Is(err, ports.ErrDownstreamUnavailable) || !errors.Is(err, boom) {
+		t.Fatalf("Reserve err = %v, want ErrDownstreamUnavailable wrapping %v", err, boom)
+	}
+	err = client.RevokeReservation(context.Background(), "res-1")
+	if !errors.Is(err, ports.ErrDownstreamUnavailable) || !errors.Is(err, boom) {
+		t.Fatalf("RevokeReservation err = %v, want ErrDownstreamUnavailable wrapping %v", err, boom)
+	}
+}
 
-		_, err := client.Reserve(context.Background(), req)
-		if !errors.Is(err, ports.ErrDownstreamUnavailable) || !errors.Is(err, boom) {
-			t.Fatalf("Reserve err = %v, want ErrDownstreamUnavailable wrapping %v", err, boom)
-		}
-		err = client.RevokeReservation(context.Background(), "res-1")
-		if !errors.Is(err, ports.ErrDownstreamUnavailable) || !errors.Is(err, boom) {
-			t.Fatalf("RevokeReservation err = %v, want ErrDownstreamUnavailable wrapping %v", err, boom)
-		}
-	})
+func TestInsufficientStock409IsNeverTaggedUnavailable(t *testing.T) {
+	var got captured
+	srv := newServer(t, http.StatusConflict, `{}`, &got)
+	_, err := inventorystorage.NewClient(srv.URL, nil).Reserve(context.Background(), unavailableReq)
+	if !errors.Is(err, ports.ErrInsufficientStock) || errors.Is(err, ports.ErrDownstreamUnavailable) {
+		t.Fatalf("err = %v, want ErrInsufficientStock only", err)
+	}
+}
 
-	t.Run("409 is never tagged unavailable", func(t *testing.T) {
-		var got captured
-		srv := newServer(t, http.StatusConflict, `{}`, &got)
-		_, err := inventorystorage.NewClient(srv.URL, nil).Reserve(context.Background(), req)
-		if !errors.Is(err, ports.ErrInsufficientStock) || errors.Is(err, ports.ErrDownstreamUnavailable) {
-			t.Fatalf("err = %v, want ErrInsufficientStock only", err)
-		}
-	})
+func TestOpenCircuitIsUnavailableAndStillNotConfigured(t *testing.T) {
+	boom := errors.New("connection refused")
+	client := inventorystorage.NewBreakerClient(
+		inventorystorage.NewClient("http://example.invalid", errDoer{err: boom}), &recordingRecorder{})
+	for i := 0; i < 5; i++ { // 5 consecutive failures trip the breaker
+		_, _ = client.Reserve(context.Background(), unavailableReq)
+	}
 
-	t.Run("open circuit is unavailable AND still not-configured", func(t *testing.T) {
-		boom := errors.New("connection refused")
-		client := inventorystorage.NewBreakerClient(
-			inventorystorage.NewClient("http://example.invalid", errDoer{err: boom}), &recordingRecorder{})
-		for i := 0; i < 5; i++ {
-			_, _ = client.Reserve(context.Background(), req)
-		}
-
-		_, err := client.Reserve(context.Background(), req)
-		if !errors.Is(err, ports.ErrDownstreamUnavailable) || !errors.Is(err, ports.ErrDownstreamNotConfigured) {
-			t.Fatalf("Reserve while open: err = %v, want ErrDownstreamUnavailable + ErrDownstreamNotConfigured", err)
-		}
-		err = client.RevokeReservation(context.Background(), "res-1")
-		if !errors.Is(err, ports.ErrDownstreamUnavailable) || !errors.Is(err, ports.ErrDownstreamNotConfigured) {
-			t.Fatalf("RevokeReservation while open: err = %v, want ErrDownstreamUnavailable + ErrDownstreamNotConfigured", err)
-		}
-	})
+	_, err := client.Reserve(context.Background(), unavailableReq)
+	if !errors.Is(err, ports.ErrDownstreamUnavailable) || !errors.Is(err, ports.ErrDownstreamNotConfigured) {
+		t.Fatalf("Reserve while open: err = %v, want ErrDownstreamUnavailable + ErrDownstreamNotConfigured", err)
+	}
+	err = client.RevokeReservation(context.Background(), "res-1")
+	if !errors.Is(err, ports.ErrDownstreamUnavailable) || !errors.Is(err, ports.ErrDownstreamNotConfigured) {
+		t.Fatalf("RevokeReservation while open: err = %v, want ErrDownstreamUnavailable + ErrDownstreamNotConfigured", err)
+	}
 }

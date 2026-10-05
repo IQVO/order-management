@@ -74,10 +74,13 @@ func TestReports_GetFunnel_OK(t *testing.T) {
 		t.Fatalf("rows = %d, want 1", len(body.Rows))
 	}
 	row := body.Rows[0]
-	if row.PathID != "pick" || row.OrdersReceived != 5 || row.OrdersReleased != 3 || row.OrdersCancelled != 1 || row.LinesBackordered != 2 {
+	gotFunnel := [4]int{row.OrdersReceived, row.OrdersReleased, row.OrdersCancelled, row.LinesBackordered}
+	if row.PathID != "pick" || gotFunnel != [4]int{5, 3, 1, 2} {
 		t.Errorf("row = %+v, unexpected values", row)
 	}
-	if row.PromiseBasisCapability != 3 || row.PromiseBasisLeadTime != 1 || row.PromiseBasisNetwork != 2 || row.OrdersSplitShipment != 1 || row.OrdersRepromised != 0 {
+	// ADR 0014 §6 / 0019 / 0020: promise basis distribution + split shipment.
+	gotKPI := [4]int{row.PromiseBasisCapability, row.PromiseBasisLeadTime, row.PromiseBasisNetwork, row.OrdersSplitShipment}
+	if gotKPI != [4]int{3, 1, 2, 1} || row.OrdersRepromised != 0 {
 		t.Errorf("promise KPI fields = %+v, unexpected values", row)
 	}
 	if row.PromiseToCutoffGapSeconds != cutoff.Sub(bucket).Seconds() {

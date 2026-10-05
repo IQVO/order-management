@@ -42,31 +42,39 @@ func main() {
 	}
 }
 
-func run() error {
-	logger := newLogger(getenv("LOG_LEVEL", "info"))
-	slog.SetDefault(logger)
-
-	// ADR-0009: the projector serves an admin HTTP endpoint and runs the
-	// Kafka consumer + analytical-DB writes, so it gets the same
-	// non-blocking OTel setup as cmd/order (an unreachable Collector
-	// degrades to dropped telemetry, never a process that won't start).
-	serviceName := getenv("OTEL_SERVICE_NAME", "order-projector")
-	shutdownTelemetry, err := telemetry.Setup(
+// setupTelemetry wires OTel (ADR-0009): the projector serves an admin HTTP
+// endpoint and runs the Kafka consumer + analytical-DB writes, so it gets
+// the same non-blocking setup as cmd/order (an unreachable Collector
+// degrades to dropped telemetry, never a process that won't start). The
+// returned func flushes on shutdown, bounded by telemetryFlushTimeout.
+func setupTelemetry(logger *slog.Logger) (func(), error) {
+	shutdown, err := telemetry.Setup(
 		context.Background(),
-		serviceName,
+		getenv("OTEL_SERVICE_NAME", "order-projector"),
 		getenv("SERVICE_VERSION", telemetry.DefaultServiceVersion),
 		getenv("OTEL_EXPORTER_OTLP_ENDPOINT", telemetry.DefaultEndpoint),
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer func() {
+	return func() {
 		flushCtx, cancel := context.WithTimeout(context.Background(), telemetryFlushTimeout)
 		defer cancel()
-		if err := shutdownTelemetry(flushCtx); err != nil {
+		if err := shutdown(flushCtx); err != nil {
 			logger.Warn("telemetry flush failed on shutdown", "error", err)
 		}
-	}()
+	}, nil
+}
+
+func run() error {
+	logger := newLogger(getenv("LOG_LEVEL", "info"))
+	slog.SetDefault(logger)
+
+	flushTelemetry, err := setupTelemetry(logger)
+	if err != nil {
+		return err
+	}
+	defer flushTelemetry()
 
 	rootCtx := context.Background()
 

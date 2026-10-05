@@ -40,7 +40,6 @@ func requireAnalyticsURL(t *testing.T) string {
 	return url
 }
 
-
 func migrateAnalytics(t *testing.T, url string) {
 	t.Helper()
 	if err := postgres.RunMigrations(url, "../../../../migrations/analytics"); err != nil {
