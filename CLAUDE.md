@@ -54,6 +54,14 @@ docs-site regeneration and local run: `.claude/rules/ci-quality-gates.md` and
     `id`, and DLQ/skip (never crash, never parse a legacy shape) anything
     failing validation.
   - Attribute list, header, consumed types: `.claude/rules/cloudevents-events.md`; ADR-0030.
+- **Planned capacity is advisory (ADR-0031):** `warehouse-planning`'s CapacityPlan events feed a LOCAL
+  read model (`order.PlannedCapacityWindow`, Postgres `planned_capacity_windows`; never a live call to
+  that service). A PUBLISHED shortage overlapping an order's `[now, promise cutoff)` at
+  `PLANNED_CAPACITY_SITE_ID` only ANNOTATES the order response (`capacityConstraint`, derived at read
+  time): it MUST NOT move a promise, reject/hold an order, change `Status`, or touch allocation or
+  reservations (ADR-0003/0017 fill-or-kill is unchanged). The consumer group id comes from
+  `PLANNED_CAPACITY_CONSUMER_GROUP` (no default; unset = feature off). Read the ADR before touching
+  `internal/domain/order/planned_capacity.go` or `inbound/kafka/planned_capacity_consumer.go`.
 - **Tests:** never hit a real network in a unit test. Kafka `-tags=integration`
   tests use testcontainers, never a skip-gated `KAFKA_BROKERS` check. One
   httptest per REST endpoint (success + error path). Every named invariant in
