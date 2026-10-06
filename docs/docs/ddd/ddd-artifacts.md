@@ -34,8 +34,7 @@ Related pages: [Subdomain Classification](./subdomain-classification.md),
   `internal/**`, `cmd/**` or `migrations/**`, the code is right and the
   page is stale.
 - **Contracts:** `apis/openapi.yaml` (REST) and `apis/asyncapi.yaml`
-  (Kafka, CloudEvents 1.0). Known gap: `GET /readyz` is served but not in
-  the OpenAPI spec.
+  (Kafka, CloudEvents 1.0).
 - **Decisions:** the [ADRs](/docs/adr). An ADR body records the
   decision at the time; later ADRs that supersede or extend it are noted in
   its Status line.

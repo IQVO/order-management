@@ -227,7 +227,7 @@ changes a promise.
 | `DELETE` | `/orders/{id}` | CancelOrder |
 | `GET` | `/planned-capacity` | GetPlannedCapacity (ADR 0031) |
 | `GET` | `/healthz` | Liveness probe |
-| `GET` | `/readyz` | Readiness probe (registered, not in `apis/openapi.yaml`) |
+| `GET` | `/readyz` | Readiness probe (200 `ready`, 503 `not_ready` once shutdown starts) |
 
 `POST /orders/{id}/allocate` no longer exists, and the pre-ADR-0005
 general-purpose release endpoint is gone. The current `/release` path is
