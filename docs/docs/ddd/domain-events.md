@@ -1,196 +1,223 @@
 ---
 title: Domain Events
 sidebar_label: Domain Events
-description: The past-tense domain events this context raises, and which three are forwarded to Kafka as integration events.
+sidebar_position: 2
+description: Every event order-management publishes and consumes — full CloudEvents type, topic, partition key, payload fields, producing use case and known consumers.
 ---
 
 # Domain Events
 
-Ten past-tense events (`internal/domain/shared/events.go`): the nine in
-the catalog below plus the operational-visibility event
-`OrderAllocationPartiallyFailed` (see the end of this page), raised by the
-`Order` aggregate's use cases (plus
-`RepromiseOrder`, a use case that reacts to an inbound event rather than
-an order lifecycle transition). Every event is
-published through `ports.EventPublisher`, which — since
-[ADR 0005](/docs/adr/0005-choreographed-release-via-kafka) — has TWO real
-implementations selected by the `EVENT_PUBLISHER` env var:
+This context declares **ten** past-tense domain events in
+`internal/domain/shared/events.go` and consumes **ten** CloudEvents types
+from four sibling contexts. Every Kafka message, in and out, is a
+CloudEvents 1.0 event in **structured** content mode
+([ADR 0030](/docs/adr/0030-cloudevents-mandatory-event-envelope)), built and
+parsed only by `internal/adapters/kafka/cloudevents`:
 
-- **`log`** (default): every event is logged as JSON, in-process only.
-- **`kafka`**: the SAME events are logged/persisted locally as before, but
-  `OrderAllocated`, `OrderPartiallyAllocated`, and — since
-  [ADR 0018](/docs/adr/0018-repromise-order-consumer-and-order-repromised)
-  — `OrderRepromised` are ADDITIONALLY
-  forwarded to the shared Kafka broker, topic
-  `warehouse.order-management.events`, for `wes-work-planning` (or any
-  other subscriber) to consume. ALL ten events are also fanned out to a
-  separate topic, `warehouse.order-management.analytics`, for the
-  analytics data product
-  ([ADR 0006](/docs/adr/0006-analytical-data-product)).
+- `specversion` `1.0`; `id` a UUID minted when the event is encoded (and
+  stored in the outbox row, so a redelivery keeps it); `source`
+  `/warehouse/order-management`; `type`
+  `com.warehouse.wes.order-management.order.<EventName>`; `subject` the
+  order id; `time` the domain occurred-at (UTC); `datacontenttype`
+  `application/json`; `dataschema`
+  `urn:warehouse:order-management:<events|analytics>:<EventName>:v1`.
+- Kafka header `content-type: application/cloudevents+json; charset=UTF-8`;
+  W3C trace context in `traceparent`/`tracestate`.
+- Kafka key = the order id on both outbound topics, with the `Hash`
+  balancer, so one order's events stay on one partition
+  ([ADR 0027](/docs/adr/0027-kafka-integration-publisher-partition-key)).
 
-```go
-// internal/domain/shared/events.go
-type DomainEvent interface {
-	EventName() string
-	OccurredAt() time.Time
+## How events leave the service
+
+`ports.EventPublisher` is selected by `EVENT_PUBLISHER` in `cmd/order`:
+
+| Configuration | Publisher | Delivery |
+| --- | --- | --- |
+| `EVENT_PUBLISHER=log` (default) | `events.LogPublisher` | JSON log line only |
+| `kafka` with `DATABASE_URL` | `postgres.OutboxPublisher` + `postgres.OutboxRelay` | one `outbox_events` row per (event x topic) in the same transaction as the `Order` save, drained to Kafka by the relay ([ADR 0022](/docs/adr/0022-transactional-outbox)) |
+| `kafka` without `DATABASE_URL` | `kafka.FanOutPublisher` | written directly to both topics |
+
+Two encoders decide what goes where: `kafka.Publisher` (integration topic)
+accepts only `OrderAllocated`, `OrderPartiallyAllocated` and
+`OrderRepromised`; `kafka.AnalyticsPublisher` (analytics topic) accepts all
+ten.
+
+## Published events
+
+| Event | Full CloudEvents type | Topics | Producing use case | Known consumers |
+| --- | --- | --- | --- | --- |
+| OrderReceived | `com.warehouse.wes.order-management.order.OrderReceived` | analytics | ReceiveOrder | order-projector |
+| OrderLineAllocated | `com.warehouse.wes.order-management.order.OrderLineAllocated` | analytics | allocation pass | order-projector |
+| OrderLineBackordered | `com.warehouse.wes.order-management.order.OrderLineBackordered` | analytics | allocation pass, reconfirm before release | order-projector |
+| OrderAllocated | `com.warehouse.wes.order-management.order.OrderAllocated` | integration + analytics | allocation pass when the order ends `Allocated` or `Released` | wes-work-planning, order-projector |
+| OrderPartiallyAllocated | `com.warehouse.wes.order-management.order.OrderPartiallyAllocated` | integration + analytics | allocation pass when the order ends `PartiallyAllocated` or `PartiallyReleased` | wes-work-planning, order-projector |
+| OrderAllocationPartiallyFailed | `com.warehouse.wes.order-management.order.OrderAllocationPartiallyFailed` | analytics | allocation pass, hard failure after some lines allocated | order-projector |
+| OrderCancelled | `com.warehouse.wes.order-management.order.OrderCancelled` | analytics | CancelOrder | order-projector |
+| OrderRepromised | `com.warehouse.wes.order-management.order.OrderRepromised` | integration + analytics | RepromiseOrder | order-projector; no integration consumer known from this repo |
+| OrderLineReleased | `com.warehouse.wes.order-management.order.OrderLineReleased` | analytics (if raised) | **none — declared, never raised** | order-projector handles it |
+| OrderReleased | `com.warehouse.wes.order-management.order.OrderReleased` | analytics (if raised) | **none — declared, never raised** | order-projector handles it |
+
+Topics: integration = `warehouse.order-management.events`, analytics =
+`warehouse.order-management.analytics`. "Allocation pass" is the shared
+`allocateAndRelease` flow run by ReceiveOrder, RetryAllocation and
+ReleaseHeldOrder. Release is announced only through
+`OrderAllocated`/`OrderPartiallyAllocated` and their `lines[]`; the
+`OrderLineReleased`/`OrderReleased` types exist in code, AsyncAPI and the
+projector but no use case publishes them, so the funnel's
+`ordersReleased`/`linesReleased` stay at zero.
+
+### Integration payloads (`warehouse.order-management.events`)
+
+`OrderAllocated` and `OrderPartiallyAllocated` share one `data` shape
+(`allocationData` in `internal/adapters/outbound/kafka/publisher.go`):
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `order_id` | string | |
+| `promise_date` | RFC 3339 | latest cutoff across promise groups |
+| `promise_cpt_id` | string, omitted when empty | absent for a `LeadTime` promise |
+| `promise_basis` | `Capability`, `LeadTime` or `Network`, omitted when empty | |
+| `lines[]` | array | lines released **in this pass** (empty for a held order) |
+| `lines[].line_no`, `sku`, `path_id`, `gift_wrap` | | the original four frozen fields wes-work-planning decodes |
+| `lines[].fulfillment_class` | `SINGLE`, `SAME_SKU_MULTI`, `MULTI_LINE_MULTI` | additive, ADR 0008 |
+| `lines[].promise_cpt_id`, `promise_basis`, `promise_cutoff_at` | omitted when empty | per-line group attribution, ADR 0017 |
+
+`OrderPartiallyAllocated`'s `allocated_lines`/`backordered_lines` counts
+travel only on the analytics topic; on the integration topic both events
+have exactly the fields above.
+
+```json
+{
+  "order_id": "ord-a1b2c3d4-0000-0000-0000-000000000001",
+  "promise_date": "2026-08-27T12:00:00Z",
+  "promise_cpt_id": "sp1-1200",
+  "promise_basis": "Capability",
+  "lines": [
+    {"line_no": 1, "sku": "SKU-1", "path_id": "pick", "gift_wrap": false,
+     "fulfillment_class": "SINGLE", "promise_cpt_id": "sp1-1200",
+     "promise_basis": "Capability", "promise_cutoff_at": "2026-08-27T12:00:00Z"}
+  ]
 }
 ```
 
-## The catalog
+`OrderRepromised` (`repromisedData`): `order_id`, `cpt_id_old` and
+`cpt_id_new` (each omitted when that side is a `LeadTime` promise), and
+`reason` (`TaskCPTMissed` or `PackageManifested`).
 
-| Event | Raised when | Forwarded to Kafka? |
-| --- | --- | --- |
-| `OrderReceived` | `ReceiveOrder` accepts a new order into `Received` status | No — local only |
-| `OrderLineAllocated` | inventory-storage's `POST /reservations` succeeds for a line | No — local only |
-| `OrderLineBackordered` | inventory-storage returns `409` for a line (a business fact) | No — local only |
-| `OrderAllocated` | Every line on the order is `Allocated`, and the lines eligible for release in this pass WERE released | **Yes** — `lines[]` payload |
-| `OrderPartiallyAllocated` | Some lines allocated, some backordered, on an order that allows partial shipment; the eligible lines WERE released | **Yes** — `lines[]` payload |
-| `OrderLineReleased` | A line transitioned to `Released` (pure domain fact — no longer tied to a synchronous wes-work-planning call) | No — local only |
-| `OrderReleased` | Every line on the order has been released | No — local only |
-| `OrderCancelled` | `CancelOrder` succeeds, revoking every allocated line's reservation | No — local only |
-| `OrderRepromised` | `RepromiseOrder` (ADR 0018) reacts to a fulfillment-execution `TaskCPTMissed`/`PackageManifested` fact and finds the affected shipment group's promise moved | **Yes** — `{cpt_id_old, cpt_id_new, reason}` payload |
+wes-work-planning never receives a work-unit id: it rebuilds
+`{order_id}-line-{line_no}` itself, and this repo's `usecases.WorkUnitID`
+must produce the byte-identical string. `usecases.ParseWorkUnitID` reverses
+it for the re-promise consumer.
 
-Three of them are integration events — mirroring
-`inventory-storage`'s own precedent of forwarding only a subset of its
-several domain events (`StockReserved`, `ReservationRevoked`). The other
-six stay local: `OrderReceived` through `OrderLineBackordered` are
-intake/allocation progress this service's own callers already see
-synchronously in the HTTP response; `OrderLineReleased`/`OrderReleased`/
-`OrderCancelled` are equally local concerns with no cross-context
-subscriber today.
+### Analytics payloads (`warehouse.order-management.analytics`)
 
-## The Kafka integration contract
+Built by `AnalyticsPublisher.marshalData`, enriched with a `path_id` looked
+up through `OrderRepo`:
 
-See [ADR 0005](/docs/adr/0005-choreographed-release-via-kafka) for the
-full allocation/release decision, and
-[ADR 0018](/docs/adr/0018-repromise-order-consumer-and-order-repromised)
-for the re-promise feedback loop. In short:
+| Event | `data` fields |
+| --- | --- |
+| OrderReceived | `order_id`, `path_id` (first line), `line_count` |
+| OrderAllocated | `order_id`, `path_id` (first released line, else first line), `promise_basis`, `promise_cutoff_at` (Capability basis only), `split_shipment` |
+| OrderPartiallyAllocated | as OrderAllocated plus `allocated_lines`, `backordered_lines` |
+| OrderAllocationPartiallyFailed | `order_id`, `path_id`, `allocated_lines`, `remaining_lines` |
+| OrderCancelled | `order_id`, `path_id`, `revoked_reservations` |
+| OrderLineAllocated | `order_id`, `line_no`, `path_id` (that line), `sku` |
+| OrderLineBackordered | `order_id`, `line_no`, `path_id` (that line), `sku` |
+| OrderRepromised | `order_id`, `cpt_id_old`, `cpt_id_new`, `reason` |
+| OrderLineReleased | `order_id`, `line_no`, `path_id`, `work_unit_id` |
+| OrderReleased | `order_id`, `path_id` |
 
-- **Outbound topic:** `warehouse.order-management.events`
-- **Inbound topic (ADR 0018 only):** `warehouse.fulfillment.events` —
-  fulfillment-execution's shared/fan-out topic, consumed ONLY for
-  `TaskCPTMissed`/`PackageManifested`.
-- **Inbound topic (ADR 0031, opt-in):** `warehouse.warehouse-planning.events` —
-  warehouse-planning's `CapacityPlanCreated`/`CapacityPlanPublished`/
-  `CapacityShortageDetected` (and `BottleneckDetected`, recognised and
-  ignored) feed a local planned-capacity read model; a published shortage
-  overlapping an order's promise annotates the order response. No event is
-  published in return and no promise moves. Enabled only when
-  `PLANNED_CAPACITY_CONSUMER_GROUP` is set.
-- **Envelope:** CloudEvents 1.0, structured content mode, mandatory on
-  every topic ([ADR 0030](/docs/adr/0030-cloudevents-mandatory-event-envelope)):
-  `{specversion, id, source: /warehouse/order-management, type:
-  com.warehouse.wes.order-management.order.<EventName>, subject: <order id>,
-  time, datacontenttype, dataschema, data}`; Kafka header
-  `content-type: application/cloudevents+json; charset=UTF-8`
-- **`data` shape** for `OrderAllocated`/`OrderPartiallyAllocated`
-  (frozen — shared verbatim with `wes-work-planning`'s Kafka consumer):
+The sole consumer is `cmd/order-projector`
+(`inbound/kafka.AnalyticsConsumer`, group `order-management-analytics`,
+from the first offset), which de-duplicates on the CloudEvents `id`; see
+[Order Funnel report](/docs/analytics/order-funnel-report).
 
-  ```json
-  {
-    "order_id": "ord-a1b2c3d4-0000-0000-0000-000000000001",
-    "promise_date": "2026-08-27T09:00:00Z",
-    "promise_cpt_id": "sp1-1200",
-    "promise_basis": "Capability",
-    "lines": [
-      {"line_no": 1, "sku": "SKU-1", "path_id": "pick", "gift_wrap": false,
-       "fulfillment_class": "SINGLE", "promise_cpt_id": "sp1-1200",
-       "promise_basis": "Capability", "promise_cutoff_at": "2026-08-27T12:00:00Z"}
-    ]
-  }
-  ```
+## Consumed events
 
-  The original four line fields are frozen; everything else is additive
-  and optional — `fulfillment_class`
-  ([ADR 0008](/docs/adr/0008-fulfillment-class-demand-shape-classifier)), the
-  order-level and per-line `promise_cpt_id`/`promise_basis`/
-  `promise_cutoff_at` (ADR 0014/0017; omitted for a `LeadTime`-basis
-  promise). `apis/asyncapi.yaml` is the authoritative schema.
+| Producer | Full CloudEvents type | Topic | Payload fields read | Adapter, group | Effect |
+| --- | --- | --- | --- | --- | --- |
+| fulfillment-execution | `com.warehouse.wes.fulfillment-execution.task.TaskCPTMissed` | `warehouse.fulfillment.events` | `task_id`, `order_ref`, `task_type`, `cpt` | `inbound/kafka.RepromiseConsumer`, stable group `order-management-repromise` | RepromiseOrder |
+| fulfillment-execution | `com.warehouse.wes.fulfillment-execution.package.PackageManifested` | `warehouse.fulfillment.events` | `package_id`, `order_ref` | same | RepromiseOrder |
+| process-path-management | `com.warehouse.wes.process-path-management.processpath.ProcessPathCreated` | `warehouse.process-path-management.events` | `path_id`, `match_prefix`, `cycle_time_p95`, `eligibility` (`max_units_per_line`, `required_product_attributes`, `excluded_product_attributes`, `non_sortable`), `destination_location_role` | `outbound/kafkacatalog`, per-process group `order-management-process-path-catalogue-*` | upsert catalogue cache |
+| process-path-management | `com.warehouse.wes.process-path-management.processpath.ProcessPathUpdated` | same | same | same | upsert catalogue cache |
+| process-path-management | `com.warehouse.wes.process-path-management.processpath.ProcessPathDeactivated` | same | `path_id` | same | remove from catalogue cache |
+| process-path-management | `com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged` | same | `site_id`, `timezone`, `cutoffs[]` (`cpt_id`, `local_time`, `days_of_week`, `ship_method`, `eligible_path_ids`) | `outbound/kafkacptschedule`, per-process group `order-management-cpt-schedule-*` | replace site CPT schedule |
+| wes-work-planning | `com.warehouse.wes.work-planning.workpool.PathCapacityChanged` | `warehouse.work-planning.events` | `path_id`, `cutoff_at`, `remaining_units`, `known` | `outbound/kafkapathcapacity`, per-process group `order-management-path-capacity-*` | remaining capacity keyed by path and cutoff |
+| warehouse-planning | `com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanCreated` | `warehouse.warehouse-planning.events` | `plan_id`, `warehouse_id`, `location`, `path_id`, `window_start`, `window_end`, `assigned_demand`, `capacity_over_window`, `shortage`, `bottleneck_step` | `inbound/kafka.PlannedCapacityConsumer`, group from `PLANNED_CAPACITY_CONSUMER_GROUP` | upsert window as `DRAFT` |
+| warehouse-planning | `com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanPublished` | same | same | same | upsert window as `PUBLISHED` |
+| warehouse-planning | `com.warehouse.wes.warehouse-planning.capacityplan.CapacityShortageDetected` | same | same | same | upsert window as `PUBLISHED` |
 
-- **`data` shape** for `OrderRepromised` (ADR 0018, additive):
+`com.warehouse.wes.warehouse-planning.capacityplan.BottleneckDetected` is
+recognised and ignored. Unknown types are ignored on every consumer.
 
-  ```json
-  {
-    "order_id": "ord-a1b2c3d4-0000-0000-0000-000000000001",
-    "cpt_id_old": "sp1-1200",
-    "cpt_id_new": "sp1-1800",
-    "reason": "TaskCPTMissed"
-  }
-  ```
+Delivery guarantees by consumer:
 
-  `cpt_id_old`/`cpt_id_new` are both omitted (never present-and-empty)
-  for a `LeadTime`-basis promise on that side — see `order.Promise`'s
-  doc comment for why a `LeadTime`-basis promise has no CPT departure
-  identity.
+- **RepromiseConsumer** and **PlannedCapacityConsumer** — stable shared
+  groups, idempotent on the CloudEvents `id` (`repromise_processed_events`,
+  `planned_capacity_processed_events`), up to 3 attempts, then the raw
+  message goes to the `.dlq` topic (`warehouse.fulfillment.events.dlq`,
+  `warehouse.warehouse-planning.events.dlq`) with `x-dlq-*` headers and the
+  offset is committed
+  ([ADR 0025](/docs/adr/0025-resilience-circuit-breakers-retry-dlq-shutdown)).
+  A non-CloudEvents message is dead-lettered immediately.
+- **Catalogue, CPT-schedule and path-capacity caches** — run only with
+  `PATH_CATALOGUE_SOURCE=kafka`, each under a fresh per-process group that
+  replays from the first offset; `cmd/order` waits up to 60s for each to
+  catch up before serving. Undecodable messages are logged and skipped.
 
-- **The deterministic work-unit id.** `wes-work-planning`'s consumer
-  independently reconstructs `{order_id}-line-{line_no}` from the payload
-  above (see `usecases.WorkUnitID` in this repo) — this id is never
-  transmitted on the wire, both sides derive it the same way, and it MUST
-  match byte-for-byte or idempotent redelivery breaks. ADR 0018's
-  `RepromiseOrder` consumer reverses the SAME formula
-  (`usecases.ParseWorkUnitID`) to recover `(OrderId, LineNo)` from
-  fulfillment-execution's `order_ref`, which is itself sourced from
-  wes-work-planning's `WorkUnitId` at task-creation time.
-- **Fire-and-forget, deliberately.** v1 has NO release-confirmation reply
-  event from `wes-work-planning` back to this service — see the README's
-  "Deferred (v1)" section.
-
-## Why choreography, not the old synchronous call
-
-Pre-redesign, release meant a synchronous
-`POST /paths/{pathId}/work-units` call to `wes-work-planning`. That made
-this service's release path depend on that Supplier's availability at the
-exact moment of release, and gave this platform zero real integration
-events despite being explicitly designed to integrate with
-`wes-work-planning`. ADR 0005 replaces it with the SAME choreography
-pattern `inventory-storage`'s own ADR 0004 already established for the
-identical problem shape.
+`order_ref` on the fulfillment events is a work-unit id
+(`{orderId}-line-{lineNo}`), not a bare order id; a value that does not
+parse is logged and skipped.
 
 ## Which use case emits what
 
 ```mermaid
 flowchart LR
   RO["ReceiveOrder"] --> E1["OrderReceived"]
-  RO --> AR["allocateAndRelease<br/>(shared)"]
+  RO --> AR["allocateAndRelease"]
   RA["RetryAllocation"] --> AR
+  RH["ReleaseHeldOrder"] --> AR
   AR --> E2["OrderLineAllocated"]
   AR --> E3["OrderLineBackordered"]
   AR --> E4["OrderAllocated"]
   AR --> E5["OrderPartiallyAllocated"]
-  RH["ReleaseHeldOrder"] --> AR
-  AR --> E6["OrderLineReleased / OrderReleased"]
+  AR --> E6["OrderAllocationPartiallyFailed"]
   CO["CancelOrder"] --> E8["OrderCancelled"]
   RP["RepromiseOrder"] --> E9["OrderRepromised"]
 
-  E1 & E2 & E3 & E4 & E5 & E6 & E8 & E9 --> LOG["ports.EventPublisher<br/>log or Postgres (EVENT_PUBLISHER=log, default)"]
-  E4 & E5 & E9 --> KAFKA["Kafka topic<br/>warehouse.order-management.events<br/>(EVENT_PUBLISHER=kafka)"]
+  E1 & E2 & E3 & E4 & E5 & E6 & E8 & E9 --> AN["warehouse.order-management.analytics"]
+  E4 & E5 & E9 --> INT["warehouse.order-management.events"]
+  INT --> WP["wes-work-planning"]
+  AN --> PJ["cmd/order-projector"]
 
-  classDef local fill:#94a3b8,stroke:#475569,color:#0f172a;
-  classDef kafka fill:#38bdf8,stroke:#0369a1,color:#0f172a;
-  class LOG local;
-  class KAFKA kafka;
+  classDef ev fill:#f6a04d,stroke:#9a5b1c,color:#1f1300;
+  classDef topic fill:#38bdf8,stroke:#0369a1,color:#0f172a;
+  class E1,E2,E3,E4,E5,E6,E8,E9 ev;
+  class AN,INT topic;
 ```
 
-## The operational-visibility event
-
-[ADR 0003](/docs/adr/0003-ship-complete-default-and-fail-closed-allocation)
-documents one further event, `OrderAllocationPartiallyFailed`: raised when
-the shared allocation pass hits a hard, non-business (non-409) failure
-partway through. The lines that genuinely succeeded before the failure are
-kept `Allocated` — discarding them would strand real reservations inside
-inventory-storage — and the event exists purely so that partial-progress
-outcome is operationally visible rather than only discoverable by reading
-a source comment. It is never forwarded to Kafka.
+Source: `internal/application/usecases/*.go`,
+`internal/adapters/outbound/kafka/publisher.go`,
+`analytics_publisher.go`. Omits: the outbox hop (diagram 9 on
+[Sequence Diagrams](./sequence-diagrams.md)) and the two declared but
+never-raised release events.
 
 ## Naming and payload shape
 
-Every event embeds an `occurredAt` from the injected `Clock` port — never
-wall-clock time read directly — so ordering is a domain fact, not an
-infrastructure artefact. Payloads carry the minimum needed to make the
-event self-describing: `OrderLineAllocated`, for example, carries
-`OrderID`, `LineNo`, `SKU`, `Quantity`, and the Supplier's
-`ReservationID` reference, but never a full `Order` snapshot.
-`OrderAllocated`/`OrderPartiallyAllocated` are the exception: they now
-carry a `Lines []ReleasedLine` slice specifically because that is the
-integration payload a downstream consumer needs.
+Every event embeds an `occurredAt` from the injected `Clock` port, so
+ordering is a domain fact, not an infrastructure artefact. Payloads carry
+the minimum needed to make the event self-describing — `OrderLineAllocated`
+carries `OrderID`, `LineNo`, `SKU`, `Quantity` and the Supplier's
+`ReservationID`, never an `Order` snapshot. `OrderAllocated`/
+`OrderPartiallyAllocated` carry `Lines []ReleasedLine` because that is the
+integration payload wes-work-planning needs.
+
+## Why choreography, not a synchronous call
+
+Before [ADR 0005](/docs/adr/0005-choreographed-release-via-kafka) release
+was a synchronous `POST /paths/{pathId}/work-units` call to
+wes-work-planning, which made release depend on that Supplier's
+availability at the exact moment of release. Release is now a published
+fact that wes-work-planning consumes on its own schedule. It is
+fire-and-forget: there is no confirmation event back (see the README's
+Deferred list).

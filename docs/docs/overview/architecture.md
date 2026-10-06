@@ -29,17 +29,25 @@ internal/
     processpath/              process-path definitions
     shared/                   value objects: OrderId, SKU, PathId, events, errors
   application/
-    ports/                    OUT: OrderRepo, EventPublisher, Clock, OrderMetrics,
-                               InventoryReservationClient, ProcessPathCatalogue,
-                               CPTScheduleCache, ProductClassificationLookup,
-                               PathCapacity, RepromiseProcessedEvents
+    ports/                    OUT: OrderRepo, EventPublisher, UnitOfWork, Clock,
+                               OrderMetrics, InventoryReservationClient,
+                               ProcessPathCatalogue, CPTScheduleCache,
+                               ProductClassificationLookup, PathCapacity,
+                               RepromiseProcessedEvents, PlannedCapacityRepo,
+                               PlannedCapacityProcessedEvents
     usecases/                 ReceiveOrder, RetryAllocation, CancelOrder,
-                               GetOrder, ReleaseHeldOrder, RepromiseOrder
+                               GetOrder, ReleaseHeldOrder, RepromiseOrder,
+                               ApplyPlannedCapacity, GetPlannedCapacity,
+                               OrderCapacityConstraints
                                (allocation + release folded into allocateAndRelease)
   adapters/
-    inbound/http/             chi handlers, DTOs, RFC 7807 error mapping
-    inbound/kafka/            RepromiseConsumer (warehouse.fulfillment.events)
+    inbound/http/             chi handlers, DTOs, RFC 7807 error mapping,
+                               Idempotency-Key middleware, readiness gate
+    inbound/kafka/            RepromiseConsumer (warehouse.fulfillment.events),
+                               PlannedCapacityConsumer (warehouse.warehouse-planning.events),
+                               AnalyticsConsumer (cmd/order-projector)
     inbound/mcp/              MCP tools
+    kafka/cloudevents/        the only CloudEvents 1.0 New/Decode helper (ADR 0030)
     outbound/inventorystorage/  HTTP client: POST /reservations,
                                  DELETE /reservations/{id}
     outbound/productclassification/  HTTP client: GET /products/{sku}/classification
@@ -48,11 +56,14 @@ internal/
     outbound/kafkacptschedule/  CPT schedule cache (Kafka)
     outbound/kafkapathcapacity/ path capacity cache (Kafka)
     outbound/pathcapacity/    "unknown capacity" default
-    outbound/postgres/        pgxpool repo, transactional event publisher
+    outbound/postgres/        pgxpool repos, transactional outbox + relay,
+                               unit of work, housekeeping sweeper
     outbound/memory/          in-memory repos + clocks
     outbound/events/          log publisher (default EVENT_PUBLISHER=log)
     outbound/analyticsstore/  analytics projection + report queries
-    outbound/telemetry/       OpenTelemetry metrics
+    outbound/telemetry/       OpenTelemetry metrics and traces (OTLP push)
+  analytics/report/           analytical read model (depends on nothing internal)
+  bootretry/, resilience/, pgtx/  boot retry, circuit breakers, tx-in-context
 migrations/                   golang-migrate SQL files (+ migrations/analytics)
 apis/openapi.yaml, apis/asyncapi.yaml
 docs/docs/adr/                Architecture Decision Records
@@ -63,8 +74,8 @@ docs/docs/adr/                Architecture Decision Records
 ```mermaid
 flowchart TB
   HTTP["inbound/http<br/>chi handlers, DTOs, RFC 7807"]
-  KIN["inbound/kafka<br/>RepromiseConsumer"]
-  UC["application/usecases<br/>ReceiveOrder, RetryAllocation, CancelOrder,<br/>GetOrder, ReleaseHeldOrder, RepromiseOrder"]
+  KIN["inbound/kafka<br/>RepromiseConsumer · PlannedCapacityConsumer"]
+  UC["application/usecases<br/>ReceiveOrder, RetryAllocation, CancelOrder,<br/>GetOrder, ReleaseHeldOrder, RepromiseOrder,<br/>ApplyPlannedCapacity, GetPlannedCapacity"]
   P["application/ports<br/>OrderRepo · EventPublisher · Clock<br/>InventoryReservationClient · ProcessPathCatalogue<br/>CPTScheduleCache · PathCapacity · ..."]
   D["domain<br/>order · processpath · shared"]
   PG["outbound/postgres · memory"]
@@ -112,6 +123,8 @@ The rule is enforced by `internal/architecture` (the `arch-test` CI job).
 | `CPTScheduleCache` | Site CPT schedule (ADR 0014) | `outbound/kafkacptschedule` |
 | `PathCapacity` | Remaining path capacity per cutoff (ADR 0015) | `outbound/kafkapathcapacity`, `pathcapacity.Unknown` |
 | `RepromiseProcessedEvents` | Idempotency gate for the re-promise consumer (ADR 0018) | `postgres`, `memory` |
+| `PlannedCapacityRepo` | Local read model of warehouse-planning's capacity windows (ADR 0031) | `postgres`, `memory` |
+| `PlannedCapacityProcessedEvents` | Idempotency gate for the planned-capacity consumer (ADR 0031) | `postgres`, `memory` |
 
 Both inventory-storage ports are env-selected `MODE=http|permissive`
 (defaulting to `permissive`, so unit tests never hit the network). The
@@ -123,26 +136,36 @@ deployment.
 
 ## Composition root
 
-`cmd/order/main.go` is the only file that reads environment variables and
-the only file that knows both a port and its implementation:
+`cmd/order/main.go` (with its siblings `wiring.go` and
+`planned_capacity.go`) is the composition root: the only place that knows
+both a port and its implementation. Apart from `CORS_ALLOWED_ORIGINS` (read
+by the HTTP adapter) and `ENVIRONMENT` (read by `telemetry`), every
+environment variable is read there:
 
 | Env var | Default | Effect |
 | --- | --- | --- |
 | `HTTP_ADDR` | `:8080` | Listen address |
 | `LOG_LEVEL` | `info` | slog level |
 | `SHUTDOWN_DRAIN_DELAY` | `5s` | Wait after `/readyz` flips to not-ready before the listener closes (ADR 0025 §8); `0` disables |
-| `DATABASE_URL` | *(unset)* | If unset, the in-memory adapters are used and no database is required. |
+| `DATABASE_URL` | *(unset)* | If unset, the in-memory adapters are used and no database is required (no `Idempotency-Key` middleware, no outbox, no sweeper). |
+| `MIGRATIONS_DATABASE_URL` | `DATABASE_URL` | Direct (non-PgBouncer) DSN for the migration step only (ADR 0029) |
 | `MIGRATIONS_PATH` | `migrations` | Where golang-migrate looks for SQL files |
 | `INVENTORY_STORAGE_MODE` | `permissive` | `http` or `permissive` |
 | `INVENTORY_STORAGE_BASE_URL` | *(unset)* | Required when mode is `http`; also used by the classification lookup |
 | `PRODUCT_CLASSIFICATION_MODE` | `permissive` | `http` or `permissive` (ADR 0016) |
-| `EVENT_PUBLISHER` | `log` | `kafka` adds the integration + analytics topics |
-| `KAFKA_BROKERS` | `localhost:9092` when publishing; unset disables the re-promise consumer | Comma-separated brokers |
+| `EVENT_PUBLISHER` | `log` | `kafka` adds the integration + analytics topics (through the outbox when `DATABASE_URL` is set) |
+| `KAFKA_BROKERS` | `localhost:9092` when publishing; unset disables the re-promise and planned-capacity consumers | Comma-separated brokers |
+| `OUTBOX_RELAY_INTERVAL` | `1s` | Outbox relay poll interval (ADR 0022) |
+| `HOUSEKEEPING_INTERVAL`, `IDEMPOTENCY_KEY_TTL`, `OUTBOX_RETENTION` | `1h`, `24h`, `168h` | Housekeeping sweeper (ADR 0032); `HOUSEKEEPING_INTERVAL=0` disables it |
 | `PATH_CATALOGUE_SOURCE` | `none` | `kafka` enables the catalogue, CPT-schedule and path-capacity caches (capability promise); `none` = lead-time promise only |
+| `DEFAULT_SITE_ID` | `site-1` | Site whose CPT schedule the promise reads |
 | `PROMISE_DEFAULT_LEAD_TIME` | `48h` | Lead-time fallback for any unlisted path |
 | `PROMISE_PATH_LEAD_TIMES` | *(unset)* | Per-path overrides, e.g. `pick=24h,singles=6h` |
-| `CORS_ALLOWED_ORIGINS` | *(unset)* | Console / MFE origins (ADR 0007) |
-| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME` | *(unset)* | OpenTelemetry export |
+| `PLANNED_CAPACITY_CONSUMER_GROUP` | *(unset)* | Turns on the warehouse-planning consumer and `GET /planned-capacity` (ADR 0031) |
+| `PLANNED_CAPACITY_SITE_ID` | `DEFAULT_SITE_ID` | Site matched against planned-capacity windows |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:5181` | Console / MFE origins (ADR 0007) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME` | `localhost:4317`, `order-management` | OpenTelemetry OTLP/gRPC export (no `/metrics` scrape route) |
+| `SERVICE_VERSION`, `ENVIRONMENT` | `dev`, `local` | OpenTelemetry resource attributes |
 
 The in-memory fallback is deliberate: `go run ./cmd/order` with no
 environment at all starts a fully functional service, which is what makes
@@ -155,17 +178,21 @@ the `httptest` suite cheap to run.
 | Job | What it enforces |
 | --- | --- |
 | `lint` | `golangci-lint` against the committed `.golangci.yml` |
+| `guide-lint` | Agent-guide and harness sensors (`scripts/harness/`) |
+| `complexity` | Cyclomatic/cognitive/nesting/function-size linters only |
 | `test` | Unit tests with `-race`; coverage gate on `internal/domain/...,internal/application/...` |
 | `bdd` | godog/Gherkin acceptance tests (`TestFeatures`) |
-| `integration` | Kafka adapters against Testcontainers Kafka |
+| `contract` | Schemathesis over `apis/openapi.yaml` (`scripts/contract-test.sh`) |
+| `evals-tests` | MCP evals E1–E3 (`internal/adapters/inbound/mcp`) |
+| `integration` | Kafka and Postgres adapters against Testcontainers |
 | `mutation-fast` | gremlins on the domain layer, thresholds in `.gremlins.yaml` |
 | `vuln` | `govulncheck` |
 | `api-lint` | Spectral on `apis/openapi.yaml` / `apis/asyncapi.yaml` |
 | `arch-test` | The hexagonal dependency rule (`internal/architecture`) |
 | `docs-api-drift` | Regenerates the REST reference and diffs it |
-| `helm-lint` | `charts/order-management` |
 | `web` | The MFE: lint, typecheck, test, build |
-| `trivy-scan`, `docker-publish`, `release` | Image scan, publish, GitFlow release |
+| `helm-lint`, `trivy-scan` | `charts/order-management`, image scan — PRs into `main` only |
+| `docker-publish`, `release` | Image publish, GitFlow release — pushes to `main` only |
 
 `mutation` (full) and `drift` run only on schedule / manual dispatch. This
 documentation site is built and deployed by a separate workflow,

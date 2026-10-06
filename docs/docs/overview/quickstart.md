@@ -66,13 +66,19 @@ curl -s localhost:8080/healthz
 
 **ReceiveOrder** — `allowPartialShipment` defaults to `false`
 (ship-complete). There is no `pathId` in the request: the path is chosen
-by `PathSelectionPolicy` (today always `pick`, ADR 0013/0016). Intake
-runs allocation and release in the same call (ADR 0005), so the response
-already reflects that pass:
+by `PathSelectionPolicy` (the eligible active path with the shortest known
+cycle time, or the default `pick` when no catalogue is configured —
+ADR 0013/0016/0021). Intake runs allocation and release in the same call
+(ADR 0005), so the response already reflects that pass. With
+`DATABASE_URL` set, `POST /orders` also requires an `Idempotency-Key`
+header (ADR 0023; `400 idempotency-key-required` without it, `422
+idempotency-key-reused` for the same key with a different body); the
+in-memory Option A does not enforce it:
 
 ```bash
 curl -s -X POST localhost:8080/orders \
   -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(uuidgen)" \
   -d '{
         "allowPartialShipment": false,
         "lines": [
@@ -114,14 +120,16 @@ deadline cannot be met):
 ```bash
 curl -s -X POST localhost:8080/orders \
   -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(uuidgen)" \
   -d '{"releaseOnAllocation": false,
        "requiredShipBy": "2026-10-01T18:00:00Z",
        "lines": [{"sku": "SKU-1", "quantity": 1}]}'
 
 curl -s -X POST localhost:8080/orders/$ORDER_ID/release
 # 200 OK — the allocated lines are released
-# 409 order-not-held if the order was never held;
-# 409 ship-complete-blocked while a line is still unallocated (BR3)
+# 409 order-not-held if the order was never held.
+# A ship-complete order with a line that is no longer allocated (BR3)
+# releases nothing and still answers 200 with the unchanged order.
 ```
 
 **CancelOrder** — revokes every allocated line's reservation, then
@@ -158,4 +166,4 @@ go tool cover -func=coverage.out
 
 `make check` runs `fmt-check`, `vet`, `build`, `lint`, `test` in one pass —
 the same feedback CI gives you post-push, available locally pre-commit. See
-the [Quality gate section of the README](https://github.com/claudioed/order-management#quality-gate).
+the [Quality gate section of the README](https://github.com/IQVO/order-management#quality-gate).

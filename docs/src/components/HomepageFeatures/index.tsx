@@ -25,7 +25,7 @@ const FeatureList: FeatureItem[] = [
   },
   {
     title: 'Fail-Closed Allocation',
-    to: '/docs/ddd/aggregates-and-invariants',
+    to: '/docs/ddd/aggregate-design-canvas',
     description: (
       <>
         The allocation pass inside <code>ReceiveOrder</code> and{' '}
@@ -50,7 +50,7 @@ const FeatureList: FeatureItem[] = [
   },
   {
     title: 'Cancellation Boundary at Release',
-    to: '/docs/ddd/aggregates-and-invariants',
+    to: '/docs/ddd/aggregate-design-canvas',
     description: (
       <>
         <code>CancelOrder</code> is legal only while no line has reached{' '}
