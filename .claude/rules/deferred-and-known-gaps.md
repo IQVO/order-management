@@ -33,15 +33,15 @@ Still deferred, as of the last verified pass:
   path-level match (planning's `path_id` is its own label), pushing the
   promise on a shortage (a shortage is a quantity, not a delay) and an
   `OrderCapacityConstrained` event.
-- **Multi-path selection.** `PathSelectionPolicy` evaluates eligibility
-  (ADR-0016) but can only choose `shared.DefaultPathId`:
-  `ports.ProcessPathCatalogue` has no "list active paths" method.
 - **Sweeping an orphaned hold (ADR-0020).** Nothing here expires an order
   held with `releaseOnAllocation=false` that its caller never releases or
   cancels — it keeps real inventory reservations until someone does.
-- **A dedicated problem type for `ErrHeldOrderMustBeShipComplete`.** It
-  maps to 422 in `statusFor` but has no `problemFor` case, so its RFC 7807
-  `type` is `internal-error`.
+- **`OrderLineReleased` / `OrderReleased` are declared but never raised.**
+  `shared.NewOrderLineReleased`/`NewOrderReleased` exist and the analytics
+  publisher/projector handle both types, but no use case publishes them
+  (release is announced only via `OrderAllocated`/
+  `OrderPartiallyAllocated`), so the funnel's `ordersReleased`/
+  `linesReleased` columns stay at zero.
 - **Kafka release-confirmation reply events from wes-work-planning.**
   v1 (ADR-0005) ships fire-and-forget: this service publishes
   `OrderAllocated`/`OrderPartiallyAllocated` and never learns whether

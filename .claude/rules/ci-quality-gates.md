@@ -15,6 +15,16 @@ paths:
 ### `ci.yml` — triggers on push/PR to `main`, `develop` (+ weekly schedule for `mutation`)
 
 - **`lint`** — golangci-lint v2.13.1, `--timeout=5m`.
+- **`guide-lint`** — `scripts/harness/guide_lint.py`, `repo_lint.py` and
+  the two harness self-tests (agent guides load, references resolve,
+  context budget).
+- **`complexity`** — golangci-lint with only gocyclo, cyclop, gocognit,
+  nestif and funlen enabled (thresholds in `.golangci.yml`), plus an
+  informational gocyclo report.
+- **`contract`** — Schemathesis (pinned) over `apis/openapi.yaml` via
+  `scripts/contract-test.sh` (same as `make contract`).
+- **`evals-tests`** — MCP evals E1–E3:
+  `go test ./internal/adapters/inbound/mcp/... -race -run '^TestEval|^TestMCPEvalSuite'`.
 - **`test`** — build, vet, gofmt check, `go test ./... -race
   -coverprofile=coverage.out -coverpkg=./internal/domain/...,./internal/application/...`,
   then a 90% coverage gate on that coverprofile.

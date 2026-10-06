@@ -61,7 +61,7 @@ Typos, broken links and formatting are of course fair game.
 | # | Title | Status |
 | --- | --- | --- |
 | [0001](./0001-hexagonal-ports-and-adapters.md) | Hexagonal (ports & adapters) architecture | Accepted |
-| [0002](./0002-http-consumer-of-inventory-and-wes-not-shared-code.md) | HTTP consumer of inventory-storage and wes-work-planning, not shared code | Accepted |
+| [0002](./0002-http-consumer-of-inventory-and-wes-not-shared-code.md) | HTTP consumer of inventory-storage and wes-work-planning, not shared code | Accepted; release portion partially superseded by ADR 0005 |
 | [0003](./0003-ship-complete-default-and-fail-closed-allocation.md) | Ship-complete by default and fail-closed allocation | Accepted |
 | [0004](./0004-cancellation-boundary-at-release.md) | The cancellation boundary is release | Accepted, with a documented known gap |
 | [0005](./0005-choreographed-release-via-kafka.md) | Choreographed release via Kafka, folded allocate-then-release, and pathId goes internal-only | Accepted; envelope superseded by ADR 0030 |
@@ -69,16 +69,16 @@ Typos, broken links and formatting are of course fair game.
 | [0007](./0007-adopt-fleet-micro-frontend-console.md) | Adopt the fleet's micro-frontend console architecture (`order-mgmt-mfe`) | Accepted |
 | [0008](./0008-fulfillment-class-demand-shape-classifier.md) | FulfillmentClass — a demand-shape classifier, not a process-path name | Accepted |
 | [0009](./0009-standard-metrics-convention.md) | Standard metrics convention across the fleet (telemetry.Setup, otelchi, Tier-2 business-metric naming) | Accepted |
-| [0010](./0010-mcp-inbound-adapter.md) | Model Context Protocol as an inbound adapter, not a new service | Accepted |
+| [0010](./0010-mcp-inbound-adapter.md) | Model Context Protocol as an inbound adapter, not a new service | Accepted; auth section superseded by ADR 0012 |
 | [0011](./0011-adopt-fleet-rest-identity.md) | Adopt the fleet REST identity (static bearer keys, read/read-write scopes) | Superseded by ADR 0012 |
 | [0012](./0012-remove-rest-mcp-bearer-auth.md) | Remove the REST/MCP bearer auth layer | Accepted |
-| [0013](./0013-process-path-selection-as-a-domain-policy.md) | Process-path selection as a real domain policy, validated against a live catalogue | Accepted |
+| [0013](./0013-process-path-selection-as-a-domain-policy.md) | Process-path selection as a real domain policy, validated against a live catalogue | Accepted; extended by ADR 0021 |
 | [0014](./0014-promise-derived-from-fulfillment-capability.md) | The delivery promise is a CPT window derived from fulfillment capability, not a configured lead time | Accepted |
 | [0015](./0015-wes-work-planning-path-capacity-changed-wired.md) | wes-work-planning's PathCapacityChanged is wired as the real PathCapacity adapter | Accepted; flat-envelope dispatch superseded by ADR 0030 |
-| [0016](./0016-eligibility-driven-process-path-selection.md) | Eligibility-driven process-path selection (ADR 0014 step B, routing only) | Accepted |
+| [0016](./0016-eligibility-driven-process-path-selection.md) | Eligibility-driven process-path selection (ADR 0014 step B, routing only) | Accepted; extended by ADR 0021 |
 | [0017](./0017-per-shipment-group-promising.md) | Per-shipment-group promising (ADR 0014 step B, the second half) | Accepted |
 | [0018](./0018-repromise-order-consumer-and-order-repromised.md) | RepromiseOrder consumer and OrderRepromised — closing ADR 0014's feedback loop | Accepted; flat inbound envelope superseded by ADR 0030 |
-| [0019](./0019-promise-kpis-on-order-funnel.md) | Promise KPIs on the Order Funnel data product (ADR 0014 §6, order-management half) | Accepted |
+| [0019](./0019-promise-kpis-on-order-funnel.md) | Promise KPIs on the Order Funnel data product (ADR 0014 §6, order-management half) | Accepted; amended 2026-10 (Network basis bucket) |
 | [0020](./0020-network-originated-demand-hold-and-deadline-feasibility.md) | Network-originated demand — release-on-allocation, deadline feasibility, and the Network promise basis | Accepted |
 | [0021](./0021-multi-path-attribute-driven-routing.md) | Multi-path attribute-driven routing — closes ADR-0013's original deferral | Accepted |
 | [0022](./0022-transactional-outbox.md) | Transactional outbox for order-management's dual-topic event publishing | Accepted |
