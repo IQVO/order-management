@@ -450,6 +450,6 @@ sequenceDiagram
 Source: `internal/adapters/outbound/postgres/outbox_relay.go`,
 `outbox_publisher.go`, `internal/adapters/outbound/kafka/relay_sink.go`,
 `writer_config.go`. Omits: the housekeeping sweeper that later deletes
-published rows (ADR 0032) and the `order.outbox.lag_seconds` gauge.
+published rows and the `order.outbox.lag_seconds` gauge (both ADR 0032).
 `OrderRepromised` is also written to the integration topic; no consumer of
 it is known from this repository.

@@ -68,16 +68,46 @@ this repo's own `cmd/order-projector`, so it is not a context edge.
 
 ## Relationship patterns (ddd-crew)
 
-| Upstream | Downstream | Pattern (upstream side) | Pattern (downstream side) | Channel | Evidence |
-| --- | --- | --- | --- | --- | --- |
-| inventory-storage | order-management | Open Host Service, Published Language (`apis/openapi.yaml` there) | Customer/Supplier, Anti-Corruption Layer | HTTP `POST /reservations`, `DELETE /reservations/{id}`, `GET /products/{sku}/classification` | `outbound/inventorystorage`, `outbound/productclassification` |
-| order-management | wes-work-planning | Published Language (CloudEvents, `apis/asyncapi.yaml`) | Conformist on the frozen four line fields | Kafka `warehouse.order-management.events` | `outbound/kafka.Publisher` |
-| process-path-management | order-management | Published Language | Anti-Corruption Layer (local read model) | Kafka `warehouse.process-path-management.events` | `outbound/kafkacatalog`, `outbound/kafkacptschedule` |
-| wes-work-planning | order-management | Published Language | Anti-Corruption Layer (local read model) | Kafka `warehouse.work-planning.events` | `outbound/kafkapathcapacity` |
-| fulfillment-execution | order-management | Published Language | Anti-Corruption Layer | Kafka `warehouse.fulfillment.events` | `inbound/kafka.RepromiseConsumer` |
-| warehouse-planning | order-management | Published Language | Anti-Corruption Layer (local read model) | Kafka `warehouse.warehouse-planning.events` | `inbound/kafka.PlannedCapacityConsumer` |
-| order-management | network-fulfillment | Open Host Service (`apis/openapi.yaml`) | Customer/Supplier; network-fulfillment is the ACL to the external network | HTTP `POST /orders`, `/release`, `DELETE` | ADR 0020 |
-| order-management | warehouse-ops-agent, order-mgmt-mfe | Open Host Service | Conformist | HTTP | ADR 0007 |
+```mermaid
+flowchart LR
+  INV["inventory-storage"]
+  PPM["process-path-management"]
+  WP["wes-work-planning"]
+  FE["fulfillment-execution"]
+  WPL["warehouse-planning"]
+  OM["order-management"]
+  NF["network-fulfillment"]
+  CON["warehouse-ops-agent and order-mgmt-mfe"]
+
+  INV -->|"U OHS/PL -> D C/S ACL<br/>REST POST /reservations, DELETE /reservations/id,<br/>GET /products/sku/classification"| OM
+  PPM -->|"U PL -> D ACL<br/>Kafka processpath.ProcessPath* and cptschedule.CPTScheduleChanged"| OM
+  WP -->|"U PL -> D ACL<br/>Kafka workpool.PathCapacityChanged"| OM
+  FE -->|"U PL -> D ACL<br/>Kafka task.TaskCPTMissed, package.PackageManifested"| OM
+  WPL -.->|"U PL -> D ACL, opt-in<br/>Kafka capacityplan.CapacityPlan*"| OM
+  OM -->|"U PL -> D CF<br/>Kafka order.OrderAllocated, order.OrderPartiallyAllocated"| WP
+  OM -->|"U OHS -> D C/S<br/>REST POST /orders, POST /orders/id/release, DELETE /orders/id"| NF
+  OM -->|"U OHS -> D CF<br/>REST GET /orders/id, MCP get_order"| CON
+```
+
+Source: `internal/adapters/outbound/{inventorystorage,productclassification,kafka,kafkacatalog,kafkacptschedule,kafkapathcapacity}`,
+`internal/adapters/inbound/{kafka,http,mcp}`, `cmd/order/main.go`.
+Omits: the analytics topic (internal to this repo), the
+`OrderRepromised` integration event (published, no known consumer), and the
+CloudEvents type prefix `com.warehouse.wes.<context>.` on every Kafka label.
+Arrows point from upstream to downstream; `id` and `sku` stand for the path
+parameters.
+
+| Upstream | Downstream | Pattern (upstream side) | Pattern (downstream side) | Channel | Status | Evidence |
+| --- | --- | --- | --- | --- | --- | --- |
+| inventory-storage | order-management | Open Host Service, Published Language | Customer/Supplier, Anti-Corruption Layer | REST `POST /reservations`, `DELETE /reservations/{id}`, `GET /products/{sku}/classification` | live with `INVENTORY_STORAGE_MODE=http`, `PRODUCT_CLASSIFICATION_MODE=http` | `outbound/inventorystorage`, `outbound/productclassification` |
+| order-management | wes-work-planning | Published Language (CloudEvents, `apis/asyncapi.yaml`) | Conformist on the frozen four line fields | Kafka `warehouse.order-management.events` | live with `EVENT_PUBLISHER=kafka` | `outbound/kafka.Publisher` |
+| process-path-management | order-management | Published Language | Anti-Corruption Layer (local read model) | Kafka `warehouse.process-path-management.events` | live with `PATH_CATALOGUE_SOURCE=kafka` | `outbound/kafkacatalog`, `outbound/kafkacptschedule` |
+| wes-work-planning | order-management | Published Language | Anti-Corruption Layer (local read model) | Kafka `warehouse.work-planning.events` | live with `PATH_CATALOGUE_SOURCE=kafka` | `outbound/kafkapathcapacity` |
+| fulfillment-execution | order-management | Published Language | Anti-Corruption Layer | Kafka `warehouse.fulfillment.events` | live whenever `KAFKA_BROKERS` is set | `inbound/kafka/repromise_consumer.go` |
+| warehouse-planning | order-management | Published Language | Anti-Corruption Layer (local read model) | Kafka `warehouse.warehouse-planning.events` | opt-in, `PLANNED_CAPACITY_CONSUMER_GROUP` | `inbound/kafka/planned_capacity_consumer.go` |
+| order-management | network-fulfillment | Open Host Service (`apis/openapi.yaml`) | Customer/Supplier; network-fulfillment is the ACL to the external network | REST `POST /orders`, `POST /orders/{id}/release`, `DELETE /orders/{id}` | live | ADR 0020 |
+| order-management | warehouse-ops-agent, order-mgmt-mfe | Open Host Service | Conformist | REST, MCP `get_order` | live | ADR 0007, ADR 0010 |
+| order-management | wes-work-planning (synchronous) | — | — | REST `POST /paths/{pathId}/work-units` | deliberately absent since ADR 0005 | ADR 0005 |
 
 No Shared Kernel and no Partnership: no Go code or schema is shared with any
 sibling context (ADR 0002). Every downstream decode lands in a struct local
