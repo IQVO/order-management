@@ -7,7 +7,7 @@ paths:
 
 # API contracts
 
-## REST API (8 routes in `server.go`; 7 declared in `apis/openapi.yaml` — `/readyz` is not; ADR-0005's `/allocate` and old `/release` verbs are gone)
+## REST API (8 routes in `server.go`, all 8 declared in `apis/openapi.yaml`; ADR-0005's `/allocate` and old `/release` verbs are gone)
 
 - `POST   /orders`                       → `receiveOrder` — intake; folds
   allocation-then-release into the same call (ADR-0005). 201 always, even

@@ -119,8 +119,8 @@ paths:
 | `OrderAllocated` | Every line `Allocated`, eligible lines released in the same pass | **Yes** — enriched `lines[]` |
 | `OrderPartiallyAllocated` | Some lines allocated/released, some backordered, `AllowPartialShipment=true` | **Yes** — enriched `lines[]` |
 | `OrderAllocationPartiallyFailed` | Hard (non-409) failure mid-allocation; already-succeeded lines kept | No — operational visibility only |
-| `OrderLineReleased` | Declared, never raised today (no use case publishes it; see `deferred-and-known-gaps.md`) | No |
-| `OrderReleased` | Declared, never raised today | No |
+| `OrderLineReleased` | `allocateAndRelease` moves a line Allocated -> Released (one per line released in that pass; ADR-0034) | No — analytics topic only |
+| `OrderReleased` | That pass leaves every line of the order Released (ADR-0034) | No — analytics topic only |
 | `OrderCancelled` | `CancelOrder` succeeds | No |
 | `OrderRepromised` | `RepromiseOrder` (ADR-0018) finds a shipment group's promise moved after an inbound `TaskCPTMissed`/`PackageManifested` | **Yes** — `{cpt_id_old, cpt_id_new, reason}` |
 
