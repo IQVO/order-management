@@ -63,7 +63,7 @@ type ever appears in the domain layer.
 - Migrations: `migrations/` (OLTP) and `migrations/analytics/` (analytics
   store), both golang-migrate SQL.
 - Contracts: `apis/openapi.yaml` (REST: 5 order endpoints +
-  `/planned-capacity` + `/healthz`; `/readyz` is served but not declared),
+  `/planned-capacity` + `/healthz` + `/readyz`),
   `apis/asyncapi.yaml` (Kafka, CloudEvents 1.0, ADR-0030).
 
 ## Run locally

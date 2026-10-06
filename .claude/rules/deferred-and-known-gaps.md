@@ -36,12 +36,6 @@ Still deferred, as of the last verified pass:
 - **Sweeping an orphaned hold (ADR-0020).** Nothing here expires an order
   held with `releaseOnAllocation=false` that its caller never releases or
   cancels — it keeps real inventory reservations until someone does.
-- **`OrderLineReleased` / `OrderReleased` are declared but never raised.**
-  `shared.NewOrderLineReleased`/`NewOrderReleased` exist and the analytics
-  publisher/projector handle both types, but no use case publishes them
-  (release is announced only via `OrderAllocated`/
-  `OrderPartiallyAllocated`), so the funnel's `ordersReleased`/
-  `linesReleased` columns stay at zero.
 - **Kafka release-confirmation reply events from wes-work-planning.**
   v1 (ADR-0005) ships fire-and-forget: this service publishes
   `OrderAllocated`/`OrderPartiallyAllocated` and never learns whether
