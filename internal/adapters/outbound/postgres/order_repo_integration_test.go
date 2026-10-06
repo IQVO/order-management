@@ -1,16 +1,16 @@
 //go:build integration
 
 // Integration tests for the OLTP Postgres adapters (OrderRepo and the
-// Postgres EventPublisher) against a real Postgres 16, gated behind the
-// `integration` build tag. They are driven by CI's integration job (two
-// postgres:16 service containers — one per database this repo owns) or run
-// locally against `docker compose up -d` with DATABASE_URL exported; when
-// DATABASE_URL is not set they skip, so `make test` stays hermetic.
+// Postgres OutboxPublisher) against a real Postgres 16, gated behind the
+// `integration` build tag. Testcontainers-only: every test boots its own
+// disposable, fully-migrated Postgres through outboxDB (see
+// outbox_integration_test.go) — never an external DATABASE_URL, never
+// t.Skip — so CI's integration job (which provisions no database) actually
+// runs them instead of silently skipping (audit 2026-10-05, F1).
 package postgres_test
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -22,27 +22,11 @@ import (
 	"github.com/claudioed/order-management/internal/domain/shared"
 )
 
-func requireDatabaseURL(t *testing.T) string {
-	t.Helper()
-	url := os.Getenv("DATABASE_URL")
-	if url == "" {
-		t.Skip("DATABASE_URL not set, skipping OLTP postgres integration test")
-	}
-	return url
-}
-
+// newPool returns a pool on a throwaway, fully-migrated testcontainers
+// Postgres owned by the calling test.
 func newPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := requireDatabaseURL(t)
-	if err := postgres.RunMigrations(url, "../../../../migrations"); err != nil {
-		t.Fatalf("migrate OLTP: %v", err)
-	}
-	pool, err := postgres.NewPool(context.Background(), url)
-	if err != nil {
-		t.Fatalf("NewPool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return outboxDB(t)
 }
 
 func TestOrderRepo_SaveAndFindByID_RoundTrip(t *testing.T) {
