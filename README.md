@@ -26,7 +26,9 @@ it announces release to `wes-work-planning`
 ([ADR 0005](docs/docs/adr/0005-choreographed-release-via-kafka.md)) and
 consumes capability, CPT-schedule, capacity and fulfillment facts from
 `process-path-management`, `wes-work-planning` and `fulfillment-execution`
-(ADR 0013–0018). `network-fulfillment` calls it over HTTP to raise held,
+(ADR 0013–0018), plus — opt-in — `warehouse-planning`'s capacity plans
+([ADR 0031](docs/docs/adr/0031-consume-warehouse-planning-capacity-plans.md)).
+`network-fulfillment` calls it over HTTP to raise held,
 deadline-constrained orders
 ([ADR 0020](docs/docs/adr/0020-network-originated-demand-hold-and-deadline-feasibility.md)).
 It imports no Go code from any sibling repository and has no write access
@@ -58,29 +60,43 @@ internal/
     processpath/                  process-path definitions
     shared/                       OrderId, SKU, PathId, domain events, errors
   application/
-    ports/                        OUT: OrderRepo, EventPublisher, Clock,
+    ports/                        OUT: OrderRepo, EventPublisher, UnitOfWork,
+                                  Clock, OrderMetrics,
                                   InventoryReservationClient,
                                   ProcessPathCatalogue, CPTScheduleCache,
                                   PathCapacity, ProductClassificationLookup,
-                                  RepromiseProcessedEvents, OrderMetrics
+                                  RepromiseProcessedEvents,
+                                  PlannedCapacityRepo,
+                                  PlannedCapacityProcessedEvents
     usecases/                     ReceiveOrder (allocates+releases
                                   implicitly), RetryAllocation (retries+
                                   releases), ReleaseHeldOrder, CancelOrder,
-                                  GetOrder, RepromiseOrder (Kafka-driven)
+                                  GetOrder, RepromiseOrder (Kafka-driven),
+                                  ApplyPlannedCapacity (Kafka-driven),
+                                  GetPlannedCapacity, OrderCapacityConstraints
   adapters/
-    inbound/http/                 chi handlers, DTOs, RFC 7807 error mapping
-    inbound/kafka/                re-promise consumer (warehouse.fulfillment.events)
+    inbound/http/                 chi handlers, DTOs, RFC 7807 error mapping,
+                                  Idempotency-Key middleware, /readyz gate
+    inbound/kafka/                re-promise consumer (warehouse.fulfillment.events),
+                                  planned-capacity consumer
+                                  (warehouse.warehouse-planning.events),
+                                  analytics consumer (cmd/order-projector)
     inbound/mcp/                  MCP tools
+    kafka/cloudevents/            the only CloudEvents 1.0 New/Decode helper
     outbound/inventorystorage/    POST /reservations, DELETE /reservations/{id}
     outbound/productclassification/ GET /products/{sku}/classification
     outbound/kafkacatalog/, kafkacptschedule/, kafkapathcapacity/
                                   capability caches (PATH_CATALOGUE_SOURCE=kafka)
-    outbound/postgres/            pgxpool repo + golang-migrate runner
+    outbound/pathcapacity/        "unknown capacity" default
+    outbound/postgres/            pgxpool repo, transactional outbox + relay,
+                                  housekeeping sweeper, golang-migrate runner
     outbound/memory/              in-memory repo + clocks for tests
     outbound/events/              log publisher (default, EVENT_PUBLISHER=log)
     outbound/kafka/               integration + analytics publishers
                                   (EVENT_PUBLISHER=kafka)
     outbound/analyticsstore/      analytics projection + report queries
+    outbound/telemetry/           OpenTelemetry (OTLP) metrics and traces
+  analytics/report/               analytical read model (depends on nothing internal)
 migrations/                       golang-migrate SQL files (+ analytics/)
 apis/openapi.yaml, asyncapi.yaml  REST and Kafka contracts
 docker-compose.kafka.yml          Local Kafka broker (KRaft, single node)
@@ -161,16 +177,27 @@ Release no longer calls any Supplier synchronously — see
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `HTTP_ADDR` | `:8080` | Listen address. |
-| `DATABASE_URL` | *(unset)* | Postgres DSN. Unset ⇒ in-memory adapters. |
+| `DATABASE_URL` | *(unset)* | Postgres DSN. Unset ⇒ in-memory adapters (and no `Idempotency-Key` middleware, no outbox, no sweeper). |
+| `MIGRATIONS_DATABASE_URL` | `DATABASE_URL` | Direct (non-PgBouncer) DSN used only by the migration step (ADR 0029). |
 | `MIGRATIONS_PATH` | `migrations` | golang-migrate source directory. |
+| `DEFAULT_SITE_ID` | `site-1` | Site whose CPT schedule the promise uses (ADR 0014). |
 | `INVENTORY_STORAGE_MODE` | `permissive` | `http` or `permissive`. |
 | `INVENTORY_STORAGE_BASE_URL` | *(unset)* | Required when mode is `http`; also the product-classification base URL. |
 | `PRODUCT_CLASSIFICATION_MODE` | `permissive` | `http` or `permissive` — eligibility lookup for path selection (ADR 0016); fails open. |
 | `PATH_CATALOGUE_SOURCE` | `none` | `kafka` enables the process-path catalogue, CPT-schedule and path-capacity caches that drive the capability-derived promise (ADR 0013–0015); `none` ⇒ lead-time promise only. |
-| `EVENT_PUBLISHER` | `log` | `log` (default, in-memory/Postgres publisher) or `kafka` — forwards `OrderAllocated`/`OrderPartiallyAllocated`/`OrderRepromised` to the integration topic **and** fans every domain event out to the analytics topic (ADR 0006). |
-| `KAFKA_BROKERS` | `localhost:9092` | Comma-separated broker addresses, read by the Kafka publishers and caches. When set, `cmd/order` also runs the re-promise consumer (ADR 0018). |
-| `CORS_ALLOWED_ORIGINS` | *(unset)* | Console / MFE origins (ADR 0007). |
-| `ANALYTICS_DATABASE_URL` | *(unset)* | Analytical Postgres DSN. **Required** by `cmd/order-projector` (writer) and `cmd/order-reports` (read-only reader); never read by the OLTP binary. |
+| `EVENT_PUBLISHER` | `log` | `log` (default, structured-log publisher) or `kafka` — forwards `OrderAllocated`/`OrderPartiallyAllocated`/`OrderRepromised` to the integration topic **and** fans every domain event out to the analytics topic (ADR 0006). With `DATABASE_URL` set, `kafka` goes through the transactional outbox (`outbox_events` + in-process relay, ADR 0022); without it, events are written to Kafka directly. |
+| `KAFKA_BROKERS` | `localhost:9092` for the publishers; unset disables the consumers | Comma-separated broker addresses. When set, `cmd/order` also runs the re-promise consumer (ADR 0018) and, if enabled, the planned-capacity consumer (ADR 0031). |
+| `OUTBOX_RELAY_INTERVAL` | `1s` | Outbox relay poll interval (ADR 0022). |
+| `HOUSEKEEPING_INTERVAL` | `1h` | Sweeper period; `0` disables it (ADR 0032). |
+| `IDEMPOTENCY_KEY_TTL` | `24h` | Age after which `idempotency_keys` rows are swept (ADR 0032). |
+| `OUTBOX_RETENTION` | `168h` | Age after which PUBLISHED `outbox_events` rows are swept (ADR 0032). |
+| `PLANNED_CAPACITY_CONSUMER_GROUP` | *(unset)* | Stable consumer group for warehouse-planning's capacity plans; unset ⇒ the feature is off and `GET /planned-capacity` is not registered (ADR 0031). |
+| `PLANNED_CAPACITY_SITE_ID` | `DEFAULT_SITE_ID` | Site whose planned-capacity windows annotate orders (ADR 0031). |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:5181` | Console / MFE origins (ADR 0007). |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OTLP/gRPC endpoint for metrics and traces (ADR 0009); there is no `/metrics` scrape route. |
+| `OTEL_SERVICE_NAME` | `order-management` | Service name on telemetry (per binary: `order-management-mcp`, `order-projector`, `order-reports`). |
+| `SERVICE_VERSION`, `ENVIRONMENT` | `dev`, `local` | OpenTelemetry resource attributes. |
+| `ANALYTICS_DATABASE_URL` | *(unset)* | Analytical Postgres DSN. **Required** by `cmd/order-projector` (writer) and `cmd/order-reports` (read-only reader); optional for `cmd/mcp` (`get_promise_health` reports empty KPIs without it); never read by the OLTP binary. |
 | `ANALYTICS_MIGRATIONS_PATH` | `migrations/analytics` | Analytical golang-migrate source directory (writer only). |
 | `ADMIN_ADDR` | `:8091` | `cmd/order-projector` admin/health listen address. |
 | `MCP_ADDR` | `:8090` | `cmd/mcp` listen address. |
@@ -223,7 +250,18 @@ subscriber) consumes independently:
   (`PathCapacityChanged`) feed local caches when
   `PATH_CATALOGUE_SOURCE=kafka`; `warehouse.fulfillment.events`
   (`TaskCPTMissed`, `PackageManifested`) drives the re-promise consumer
-  (group `order-management-repromise`) whenever `KAFKA_BROKERS` is set.
+  (group `order-management-repromise`) whenever `KAFKA_BROKERS` is set;
+  `warehouse.warehouse-planning.events` (`CapacityPlanCreated`,
+  `CapacityPlanPublished`, `CapacityShortageDetected`) feeds the
+  planned-capacity read model when `PLANNED_CAPACITY_CONSUMER_GROUP` is set
+  (ADR 0031). Poison messages on the two stable-group consumers go to
+  `<topic>.dlq` (ADR 0025).
+- **Transactional outbox.** With `DATABASE_URL` set, every Kafka-bound
+  event is written to `outbox_events` in the same transaction as the
+  `Order` save and drained by an in-process relay
+  ([ADR 0022](docs/docs/adr/0022-transactional-outbox.md)); messages are
+  keyed by `OrderId` with a hash balancer
+  ([ADR 0027](docs/docs/adr/0027-kafka-integration-publisher-partition-key.md)).
 
 ## Analytics data product
 
@@ -293,17 +331,20 @@ authentication.
 
 ## API
 
-Five endpoints plus a liveness probe. The full contract, including the RFC 7807
-error schema, is in [`apis/openapi.yaml`](apis/openapi.yaml).
+Five order endpoints, an opt-in planned-capacity read, and liveness/readiness
+probes. The full contract, including the RFC 7807 error schema, is in
+[`apis/openapi.yaml`](apis/openapi.yaml).
 
 | Method | Path | Use case |
 | --- | --- | --- |
-| `POST` | `/orders` | ReceiveOrder — allocates and releases automatically. Requires an `Idempotency-Key` request header (ADR 0023); a request without one gets `400`. |
+| `POST` | `/orders` | ReceiveOrder — allocates and releases automatically. With `DATABASE_URL` set it requires an `Idempotency-Key` request header (ADR 0023); a request without one gets `400`. |
 | `GET` | `/orders/{id}` | GetOrder |
 | `POST` | `/orders/{id}/retry-allocation` | RetryAllocation — retries and releases automatically |
 | `POST` | `/orders/{id}/release` | ReleaseHeldOrder — releases an order received with `releaseOnAllocation: false` (ADR 0020) |
 | `DELETE` | `/orders/{id}` | CancelOrder |
+| `GET` | `/planned-capacity?site=` | GetPlannedCapacity — registered only when `PLANNED_CAPACITY_CONSUMER_GROUP` is set (ADR 0031) |
 | `GET` | `/healthz` | Liveness probe |
+| `GET` | `/readyz` | Readiness probe — flips to `503` first on shutdown (ADR 0025); not declared in `apis/openapi.yaml` |
 
 `POST /orders/{id}/allocate` and the old general-purpose
 `POST /orders/{id}/release` were removed by
@@ -328,10 +369,12 @@ curl -s localhost:8080/healthz
 ```
 
 **ReceiveOrder** — allocates and releases automatically, in the same call.
-`pathId` is never part of the request (every line gets the internal
-default); `allowPartialShipment` defaults to `false` (ship-complete).
+`pathId` is never part of the request (each line's path is resolved by
+`PathSelectionPolicy` — the shortest-cycle-time eligible active path, or the
+default `pick` when no catalogue is configured, ADR 0021);
+`allowPartialShipment` defaults to `false` (ship-complete).
 This is the one route that creates a NEW resource with a
-server-generated id, so it requires a caller-supplied `Idempotency-Key`
+server-generated id, so (with Postgres) it requires a caller-supplied `Idempotency-Key`
 header (ADR 0023): a retried request with the SAME key and the SAME body
 replays the original response instead of creating a second order; the
 same key with a DIFFERENT body is rejected with `422`; a missing key is
@@ -433,8 +476,12 @@ lefthook install
 ```
 
 CI mirrors the local gate and the fleet's sensor set (same shape as
-wes-work-planning's CI): **`lint`**, **`test`** (+ coverage gate), **`bdd`**
-(godog/Gherkin acceptance suite under `features/`), **`integration`**
+wes-work-planning's CI): **`lint`**, **`guide-lint`** (agent-guide and
+harness sensors under `scripts/harness/`), **`complexity`** (gocyclo/
+cyclop/gocognit/nestif/funlen only), **`test`** (+ coverage gate), **`bdd`**
+(godog/Gherkin acceptance suite under `features/`), **`contract`**
+(Schemathesis over `apis/openapi.yaml`, `scripts/contract-test.sh`),
+**`evals-tests`** (MCP evals E1–E3), **`integration`**
 (`-tags=integration` Kafka and Postgres adapter suites; every test boots its
 own Testcontainers broker/database, so the job needs only Docker — no
 `services:` container, no `DATABASE_URL`), **`mutation-fast`** (gremlins on
@@ -446,8 +493,9 @@ exhaustive weekly **`mutation`** run on schedule, **`vuln`**
 Docusaurus API reference from the spec; its diff step currently checks the
 wrong path and cannot fail — see `.claude/rules/ci-quality-gates.md`),
 **`web`** (MFE lint/typecheck/test/build) — plus the packaging/security/
-publish jobs (`helm-lint`, `trivy-scan`, `docker-publish`, `release`) and the
-advisory scheduled **`drift`** job.
+publish jobs (`helm-lint` and `trivy-scan` on PRs into `main`;
+`docker-publish` and `release` on pushes to `main`) and the advisory
+scheduled **`drift`** job.
 
 ## Operator micro-frontend (`web/`)
 
@@ -520,8 +568,6 @@ above — have been removed from it.)
   derived from fulfillment capability (ADR 0014), with `LeadTimePolicy` as the
   tagged fallback — it ends at the building's door. There is no live carrier
   integration, and no such service exists in this fleet to call.
-- **Multi-path selection.** `PathSelectionPolicy` checks eligibility
-  (ADR 0016) but can only choose the default `pick` path.
 - **Sweeping an orphaned hold.** Nothing expires an order held with
   `releaseOnAllocation: false` that its caller never releases or cancels
   (ADR 0020); it keeps its inventory reservations until someone does.
@@ -550,7 +596,7 @@ All ADRs under `docs/docs/adr/` are wired into the sidebar's
 "Architecture Decision Records" category alongside the `adr/about.md`
 index page. `.github/workflows/docs.yml` builds and deploys the site to
 GitHub Pages on every push to `main` that touches `docs/**`, publishing to
-**https://claudioed.github.io/order-management/**.
+**https://iqvo.github.io/order-management/**.
 
 ## Architecture Decision Records
 
@@ -574,6 +620,19 @@ GitHub Pages on every push to `main` that touches `docs/**`, publishing to
 18. [0018 — RepromiseOrder consumer and OrderRepromised](docs/docs/adr/0018-repromise-order-consumer-and-order-repromised.md)
 19. [0019 — Promise KPIs on the Order Funnel data product](docs/docs/adr/0019-promise-kpis-on-order-funnel.md)
 20. [0020 — Network-originated demand: release-on-allocation, deadline feasibility, Network promise basis](docs/docs/adr/0020-network-originated-demand-hold-and-deadline-feasibility.md)
+21. [0021 — Multi-path attribute-driven routing](docs/docs/adr/0021-multi-path-attribute-driven-routing.md)
+22. [0022 — Transactional outbox for dual-topic event publishing](docs/docs/adr/0022-transactional-outbox.md)
+23. [0023 — Transactional Idempotency-Key middleware for POST /orders](docs/docs/adr/0023-idempotency-key-middleware.md)
+24. [0024 — Optimistic concurrency (version column) for the Order aggregate](docs/docs/adr/0024-optimistic-concurrency-version-column.md)
+25. [0025 — Per-dependency circuit breakers, read-only retry, Kafka DLQ, graceful shutdown](docs/docs/adr/0025-resilience-circuit-breakers-retry-dlq-shutdown.md)
+26. [0026 — Per-workload HorizontalPodAutoscaler and pgxpool tuning](docs/docs/adr/0026-horizontal-autoscaling-and-pgxpool-tuning.md)
+27. [0027 — Partition key (OrderId) on the integration publisher's Kafka messages](docs/docs/adr/0027-kafka-integration-publisher-partition-key.md)
+28. [0028 — Send Idempotency-Key on POST /reservations](docs/docs/adr/0028-inventory-storage-reservations-idempotency-key.md)
+29. [0029 — Run golang-migrate against a direct Postgres connection, not PgBouncer](docs/docs/adr/0029-migrations-direct-postgres-connection.md)
+30. [0030 — CloudEvents 1.0 as the mandatory event envelope](docs/docs/adr/0030-cloudevents-mandatory-event-envelope.md)
+31. [0031 — Consume warehouse-planning's capacity plans into a local planned-capacity read model](docs/docs/adr/0031-consume-warehouse-planning-capacity-plans.md)
+32. [0032 — Housekeeping sweeper for idempotency keys and published outbox rows](docs/docs/adr/0032-housekeeping-sweeper-idempotency-keys-and-outbox.md)
+33. [0033 — Boot-time first-dial retry, synchronous-writer BatchTimeout/acks, and DLQ topic-create retry](docs/docs/adr/0033-bootretry-and-kafka-writer-tuning.md)
 
 ## License
 

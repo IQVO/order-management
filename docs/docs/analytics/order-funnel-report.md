@@ -38,6 +38,14 @@ lifecycle at OrderLine granularity.
 
 Each metric counts events per `(path_id, hour_bucket)`.
 
+:::note[ordersReleased and linesReleased stay at zero today]
+The projector handles `OrderReleased` and `OrderLineReleased`, but no use
+case in `internal/application/usecases` raises either event: release is
+announced only through `OrderAllocated` / `OrderPartiallyAllocated` (see
+[Domain Events](/docs/ddd/domain-events)). Until a use case publishes
+them, these two columns are always `0`.
+:::
+
 ### Promise KPIs (ADR 0019)
 
 [ADR 0019](/docs/adr/0019-promise-kpis-on-order-funnel) adds promise-quality
@@ -61,9 +69,13 @@ analytics event type is acknowledged and ignored.
 
 Order-level events do not carry a process path, but the report is keyed by one.
 The analytics publisher enriches each event with its path via an `OrderRepo`
-lookup: an order's path is its first line's path (a v1 simplification that is
-exact because intake places every line on the same default path), and
-`OrderLineReleased` carries its line's path directly.
+lookup: an order's path is its first line's path (or, for
+`OrderAllocated`/`OrderPartiallyAllocated`, the first released line's path),
+and `OrderLineAllocated`/`OrderLineBackordered`/`OrderLineReleased` carry
+their own line's path. Since multi-path routing
+([ADR 0021](/docs/adr/0021-multi-path-attribute-driven-routing)) lines of
+one order can resolve to different paths, so order-level counters are
+attributed to the first line's path — an approximation, not an exact split.
 
 ## REST API
 

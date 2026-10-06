@@ -21,19 +21,34 @@ hand-transcribed, so they cannot drift from the spec the service ships.
 
 ## Endpoint matrix
 
-All 6 routes registered in `internal/adapters/inbound/http/server.go` are
-documented. There is no `/orders/{id}/allocate` any more: allocation and
+`internal/adapters/inbound/http/server.go` registers 8 routes; 7 of them are
+declared in `apis/openapi.yaml` (`GET /readyz` is not — see the note below
+the table). There is no `/orders/{id}/allocate` any more: allocation and
 release are folded into `POST /orders` and `retry-allocation`
 ([ADR 0005](/docs/adr/0005-choreographed-release-via-kafka)).
 
 | Method | Path | Operation | Tag | Success | Errors |
 | --- | --- | --- | --- | --- | --- |
 | `GET` | `/healthz` | `getHealthz` | Health | `200` | — |
+| `GET` | `/readyz` | *(not in spec)* | — | `200` `{"status":"ready"}` | `503` `{"status":"not_ready"}` once shutdown starts (ADR 0025) |
 | `POST` | `/orders` | `receiveOrder` | Orders | `201` | `400` `422` `500` |
 | `GET` | `/orders/{id}` | `getOrder` | Orders | `200` | `400` `404` `500` |
 | `DELETE` | `/orders/{id}` | `cancelOrder` | Orders | `204` | `400` `404` `409` `503` `500` |
 | `POST` | `/orders/{id}/release` | `releaseHeldOrder` | Allocation | `200` | `404` `409` `503` `500` |
 | `POST` | `/orders/{id}/retry-allocation` | `retryAllocation` | Allocation | `200` | `400` `404` `409` `503` `500` |
+| `GET` | `/planned-capacity` | `getPlannedCapacity` | PlannedCapacity | `200` | `400` `500` |
+
+`GET /planned-capacity` is registered only when
+`PLANNED_CAPACITY_CONSUMER_GROUP` is set
+([ADR 0031](/docs/adr/0031-consume-warehouse-planning-capacity-plans)).
+`POST /orders` is wrapped by the `Idempotency-Key` middleware
+([ADR 0023](/docs/adr/0023-idempotency-key-middleware)) whenever the
+service runs with `DATABASE_URL`: a missing key is `400
+idempotency-key-required`, the same key with a different body is `422
+idempotency-key-reused`, and a replay returns the stored response. The
+header is not declared as a parameter in `apis/openapi.yaml`. A
+version-guard conflict on any write (ADR 0024) is `409
+concurrent-modification`.
 
 ## Status-code conventions
 
@@ -44,7 +59,7 @@ release are folded into `POST /orders` and `retry-allocation`
 | `204 No Content` | A state transition with nothing useful to return | `DELETE /orders/{id}` |
 | `400 Bad Request` | Malformed or missing input | empty SKU, unparseable JSON |
 | `404 Not Found` | The addressed resource does not exist | unknown order |
-| `409 Conflict` | Well-formed and addressable, but conflicts with current state | order already released (cancel), ship-complete blocked or order not held (release), no backordered lines (retry) |
+| `409 Conflict` | Well-formed and addressable, but conflicts with current state | order already released (cancel), order not held (release), no backordered lines (retry), concurrent modification |
 | `422 Unprocessable Entity` | Well-formed but semantically invalid *values* | quantity ≤ 0; a line ineligible for its resolved path; a held order with `allowPartialShipment: true` |
 | `503 Service Unavailable` | A downstream Supplier could not be reached, answered ambiguously, or is wired in permissive (no-op) mode | any non-409 failure from inventory-storage during retry/release/cancel |
 
@@ -85,15 +100,24 @@ other services in this platform emit:
 | `empty-sku` | 400 | a line's SKU is empty |
 | `order-without-lines` | 400 | the order has no lines |
 | `unknown-process-path` | 400 | the resolved path is not active in the process-path catalogue (ADR 0013) |
+| `malformed-request-body` | 400 | the body is not valid JSON, or a field is explicitly `null` |
+| `idempotency-key-required` | 400 | `POST /orders` without an `Idempotency-Key` header (ADR 0023) |
+| `invalid-query-parameter` | 400 | `GET /planned-capacity` without `site`, or a non-RFC 3339 `from` |
 | `non-positive-quantity` | 422 | a line's quantity is not greater than zero |
-| `line-ineligible-for-resolved-path` | 422 | a line's product attributes are not eligible for its resolved path (ADR 0016) |
+| `line-ineligible-for-resolved-path` | 422 | a line's product attributes are not eligible for any active path (ADR 0016/0021) |
+| `held-order-must-be-ship-complete` | 422 | `releaseOnAllocation: false` combined with `allowPartialShipment: true` (ADR 0020) |
+| `idempotency-key-reused` | 422 | the same `Idempotency-Key` sent with a different body (ADR 0023) |
 | `order-already-released` | 409 | `CancelOrder` when any line is `Released` (BR6) |
-| `ship-complete-blocked` | 409 | release of a ship-complete order with an unallocated line (BR3) |
+| `ship-complete-blocked` | 409 | mapped for `ErrShipCompleteBlocked`, but not reachable over HTTP today: the release leg treats a BR3-blocked ship-complete order as "nothing to release" and answers `200` |
 | `no-backordered-lines` | 409 | `RetryAllocation` on an order with nothing backordered |
 | `order-not-held` | 409 | `ReleaseHeldOrder` on an order that was not held at intake (ADR 0020) |
+| `concurrent-modification` | 409 | the order's `version` changed between read and save (ADR 0024) |
 | `downstream-not-configured` | 503 | a Supplier client is running in permissive (no-op) mode |
-| `downstream-unavailable` | 503 | inventory-storage failed (transport error, timeout, open circuit breaker, unexpected status) on `POST /orders/{id}/retry-allocation` or `DELETE /orders/{id}` (ADR 0003) |
-| `internal-error` | 500 | anything unmapped — currently including `ErrHeldOrderMustBeShipComplete`, which returns status 422 but has no dedicated `type` yet |
+| `downstream-unavailable` | 503 | inventory-storage failed (transport error, timeout, open circuit breaker, unexpected status) on `POST /orders/{id}/retry-allocation`, `POST /orders/{id}/release` or `DELETE /orders/{id}` (ADR 0003, ADR 0025) |
+| `internal-error` | 500 | anything unmapped |
+
+The reports binary (`cmd/order-reports`) uses its own two types,
+`invalid-report-query` (400) and `report-store-error` (500).
 
 `problemFor` in `internal/adapters/inbound/http/errors.go` also maps
 line-state guard errors (`order-line-not-found` 400;
