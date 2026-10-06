@@ -127,8 +127,9 @@ curl -s -X POST localhost:8080/orders \
 
 curl -s -X POST localhost:8080/orders/$ORDER_ID/release
 # 200 OK — the allocated lines are released
-# 409 order-not-held if the order was never held;
-# 409 ship-complete-blocked while a line is still unallocated (BR3)
+# 409 order-not-held if the order was never held.
+# A ship-complete order with a line that is no longer allocated (BR3)
+# releases nothing and still answers 200 with the unchanged order.
 ```
 
 **CancelOrder** — revokes every allocated line's reservation, then

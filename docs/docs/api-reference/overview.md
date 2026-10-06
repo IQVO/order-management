@@ -59,7 +59,7 @@ concurrent-modification`.
 | `204 No Content` | A state transition with nothing useful to return | `DELETE /orders/{id}` |
 | `400 Bad Request` | Malformed or missing input | empty SKU, unparseable JSON |
 | `404 Not Found` | The addressed resource does not exist | unknown order |
-| `409 Conflict` | Well-formed and addressable, but conflicts with current state | order already released (cancel), ship-complete blocked or order not held (release), no backordered lines (retry) |
+| `409 Conflict` | Well-formed and addressable, but conflicts with current state | order already released (cancel), order not held (release), no backordered lines (retry), concurrent modification |
 | `422 Unprocessable Entity` | Well-formed but semantically invalid *values* | quantity ≤ 0; a line ineligible for its resolved path; a held order with `allowPartialShipment: true` |
 | `503 Service Unavailable` | A downstream Supplier could not be reached, answered ambiguously, or is wired in permissive (no-op) mode | any non-409 failure from inventory-storage during retry/release/cancel |
 
@@ -108,7 +108,7 @@ other services in this platform emit:
 | `held-order-must-be-ship-complete` | 422 | `releaseOnAllocation: false` combined with `allowPartialShipment: true` (ADR 0020) |
 | `idempotency-key-reused` | 422 | the same `Idempotency-Key` sent with a different body (ADR 0023) |
 | `order-already-released` | 409 | `CancelOrder` when any line is `Released` (BR6) |
-| `ship-complete-blocked` | 409 | release of a ship-complete order with an unallocated line (BR3) |
+| `ship-complete-blocked` | 409 | mapped for `ErrShipCompleteBlocked`, but not reachable over HTTP today: the release leg treats a BR3-blocked ship-complete order as "nothing to release" and answers `200` |
 | `no-backordered-lines` | 409 | `RetryAllocation` on an order with nothing backordered |
 | `order-not-held` | 409 | `ReleaseHeldOrder` on an order that was not held at intake (ADR 0020) |
 | `concurrent-modification` | 409 | the order's `version` changed between read and save (ADR 0024) |
