@@ -38,6 +38,18 @@ lifecycle at OrderLine granularity.
 
 Each metric counts events per `(path_id, hour_bucket)`.
 
+:::note[ordersReleased and linesReleased]
+`OrderLineReleased` is raised once per line released and `OrderReleased`
+once when a pass leaves every line of the order released, both at the same
+release transition inside `allocateAndRelease`
+([ADR 0034](/docs/adr/0034-raise-order-line-released-and-order-released)).
+Before that change no use case raised them and these two columns were always
+`0`; orders released earlier have no such events, so the columns only count
+releases from that deploy onwards. A partial-shipment order raises
+`OrderLineReleased` per pass and `OrderReleased` only when its last
+backordered line is retried and released.
+:::
+
 ### Promise KPIs (ADR 0019)
 
 [ADR 0019](/docs/adr/0019-promise-kpis-on-order-funnel) adds promise-quality
@@ -61,9 +73,13 @@ analytics event type is acknowledged and ignored.
 
 Order-level events do not carry a process path, but the report is keyed by one.
 The analytics publisher enriches each event with its path via an `OrderRepo`
-lookup: an order's path is its first line's path (a v1 simplification that is
-exact because intake places every line on the same default path), and
-`OrderLineReleased` carries its line's path directly.
+lookup: an order's path is its first line's path (or, for
+`OrderAllocated`/`OrderPartiallyAllocated`, the first released line's path),
+and `OrderLineAllocated`/`OrderLineBackordered`/`OrderLineReleased` carry
+their own line's path. Since multi-path routing
+([ADR 0021](/docs/adr/0021-multi-path-attribute-driven-routing)) lines of
+one order can resolve to different paths, so order-level counters are
+attributed to the first line's path — an approximation, not an exact split.
 
 ## REST API
 
