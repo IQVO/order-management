@@ -27,10 +27,10 @@ flowchart TB
         INV["<b>inventory-storage</b><br/>Core subdomain"]
     end
     subgraph WES["WES tier"]
-        PPM["<b>process-path-management</b>"]
+        PPM["<b>process-path-management</b><br/>Generic subdomain"]
         WP["<b>wes-work-planning</b><br/>Core subdomain"]
         FE["<b>fulfillment-execution</b><br/>Core subdomain"]
-        WPL["<b>warehouse-planning</b><br/>Supporting subdomain"]
+        WPL["<b>warehouse-planning</b><br/>Core subdomain"]
     end
     subgraph CONSOLE["Fleet console (ADR-0007)"]
         BFF["<b>warehouse-ops-agent</b><br/>console-bff"]
@@ -52,8 +52,8 @@ flowchart TB
     classDef supp fill:#6d28d9,stroke:#4c1d95,color:#fff;
     classDef console fill:#0f766e,stroke:#134e4a,color:#fff,stroke-dasharray: 3 3;
     class OM this;
-    class INV,WP,FE core;
-    class PPM,NF,WPL supp;
+    class INV,WP,FE,WPL core;
+    class PPM,NF supp;
     class BFF,MFE console;
 ```
 
