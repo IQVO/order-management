@@ -16,6 +16,9 @@ data:
   PLANNED_CAPACITY_SITE_ID: {{ .Values.plannedCapacity.siteId | quote }}
   {{- end }}
   {{- end }}
+  {{- if .Values.demandProjection.siteId }}
+  DEMAND_PROJECTION_SITE_ID: {{ .Values.demandProjection.siteId | quote }}
+  {{- end }}
   INVENTORY_STORAGE_MODE: {{ .Values.inventoryStorage.mode | quote }}
   {{- if .Values.inventoryStorage.baseUrl }}
   INVENTORY_STORAGE_BASE_URL: {{ .Values.inventoryStorage.baseUrl | quote }}

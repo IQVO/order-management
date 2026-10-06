@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -116,6 +117,72 @@ func TestOutbox_ReceiveOrder_CommitsAggregateAndBothTopicRowsTogether(t *testing
 		t.Fatalf("expected order persisted, got %v err=%v", found, err)
 	}
 }
+
+// TestOutbox_SiteSkuDemandChanged_CommitsWithOrderSaveInOneTransaction
+// pins the Phase-1 site/SKU demand projection's atomicity claim: with the
+// static demand-site scope enabled, ReceiveOrder's allocation pass emits
+// SiteSkuDemandChanged, and the row on the INTEGRATION topic (the event's
+// real destination — its CloudEvents key/subject is the line-scoped
+// "<order>/line/<n>", not the bare order id) is enqueued in the SAME
+// transaction as the Order save. A rollback of the receive must take the
+// demand row with it.
+func TestOutbox_SiteSkuDemandChanged_CommitsWithOrderSaveInOneTransaction(t *testing.T) {
+	pool := outboxDB(t)
+	ctx := context.Background()
+
+	orders := postgres.NewOrderRepo(pool)
+	writer := outboundkafka.NewPublisher(nil)
+	analytics := &outboundkafka.AnalyticsPublisher{Orders: orders, NewID: func() string { return "evt-demand" }}
+	outbox := postgres.NewOutboxPublisher(pool, writer, analytics)
+	uow := postgres.NewUnitOfWork(pool)
+
+	demandType := "com.warehouse.wes.order-management.siteskudemand.SiteSkuDemandChanged"
+
+	uc := &usecases.ReceiveOrder{
+		Orders: orders, Events: outbox, Clock: fixedClock{t: time.Now().UTC().Truncate(time.Microsecond)},
+		Inventory: allocatingInventory{}, UnitOfWork: uow,
+		DemandProjection: usecases.DemandProjectionPolicy{
+			SiteID: "SIM1", AssignmentVersion: usecases.StaticDemandAssignmentVersion,
+		},
+	}
+	o, err := uc.Execute(ctx, []usecases.NewLine{{SKU: "sku-1", Quantity: 3, PathID: "pick"}}, true)
+	if err != nil {
+		t.Fatalf("receive: %v", err)
+	}
+
+	if got := countOutboxWhereTopic(t, pool, outboundkafka.Topic, demandType); got != 1 {
+		t.Fatalf("expected 1 integration-topic SiteSkuDemandChanged row, got %d", got)
+	}
+	var key, value []byte
+	if err := pool.QueryRow(ctx,
+		`SELECT key, value FROM outbox_events WHERE topic = $1 AND event_type = $2`, outboundkafka.Topic, demandType,
+	).Scan(&key, &value); err != nil {
+		t.Fatalf("read demand row: %v", err)
+	}
+	wantKey := o.ID().String() + "/line/1"
+	if string(key) != wantKey {
+		t.Fatalf("outbox key = %q, want the line-scoped subject %q", key, wantKey)
+	}
+	if !strings.Contains(string(value), `"state":"ACTIVE"`) {
+		t.Fatalf("demand row value misses the ACTIVE state: %s", value)
+	}
+
+	// The analytics topic is NOT part of this event's contract: the
+	// projector's funnel does not consume a site demand fact.
+	if got := countOutboxWhereTopic(t, pool, outboundkafka.AnalyticsTopic, demandType); got != 0 {
+		t.Fatalf("expected 0 analytics-topic SiteSkuDemandChanged rows, got %d", got)
+	}
+}
+
+// allocatingInventory always succeeds, so ReceiveOrder's implicit
+// allocation pass genuinely allocates the line (and raises the demand
+// projection) inside the outbox transaction.
+type allocatingInventory struct{}
+
+func (allocatingInventory) Reserve(context.Context, ports.ReservationRequest) (ports.ReservationResult, error) {
+	return ports.ReservationResult{ReservationID: "res-demand-1"}, nil
+}
+func (allocatingInventory) RevokeReservation(context.Context, string) error { return nil }
 
 func countOutboxWhereTopic(t *testing.T, pool *pgxpool.Pool, topic, eventType string) int {
 	t.Helper()

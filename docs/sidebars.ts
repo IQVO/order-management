@@ -117,6 +117,7 @@ const sidebars: SidebarsConfig = {
         'adr/0032-housekeeping-sweeper-idempotency-keys-and-outbox',
         'adr/0033-bootretry-and-kafka-writer-tuning',
         'adr/0034-raise-order-line-released-and-order-released',
+        'adr/0035-site-sku-demand-projection-event',
       ],
     },
   ],

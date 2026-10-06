@@ -199,6 +199,19 @@ plannedCapacity:
   # to the binary's DEFAULT_SITE_ID, i.e. the site the promise is computed for.
   siteId: ""
 
+# Site/SKU demand projection (ADR 0035). When siteId is set, every order
+# line that allocates, re-allocates, or is re-promised emits an additive,
+# PII-free SiteSkuDemandChanged integration event on
+# warehouse.order-management.events (keyed by
+# <order_id>/line/<line_no>), and a legal cancellation emits REMOVED for
+# the lines it actually removes. EMPTY (the default) renders no env at
+# all: the projection is off and the event is never emitted.
+demandProjection:
+  # DEMAND_PROJECTION_SITE_ID: the static site every line's demand
+  # projects to (assignment_version static-site-v1). Application
+  # configuration, never an Order field.
+  siteId: ""
+
 # inventory-storage is this service's outbound HTTP dependency for per-line
 # stock allocation (POST/DELETE /reservations). Defaults to "permissive"
 # (no-op — AllocateOrder/CancelOrder refuse rather than fabricate a fake

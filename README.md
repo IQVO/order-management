@@ -193,6 +193,7 @@ Release no longer calls any Supplier synchronously — see
 | `OUTBOX_RETENTION` | `168h` | Age after which PUBLISHED `outbox_events` rows are swept (ADR 0032). |
 | `PLANNED_CAPACITY_CONSUMER_GROUP` | *(unset)* | Stable consumer group for warehouse-planning's capacity plans; unset ⇒ the feature is off and `GET /planned-capacity` is not registered (ADR 0031). |
 | `PLANNED_CAPACITY_SITE_ID` | `DEFAULT_SITE_ID` | Site whose planned-capacity windows annotate orders (ADR 0031). |
+| `DEMAND_PROJECTION_SITE_ID` | *(unset)* | Static demand-site scope for the additive, PII-free `SiteSkuDemandChanged` integration event (keyed `<order_id>/line/<line_no>`, assignment_version `static-site-v1`); unset ⇒ the projection is off and the event is never emitted (ADR 0035). |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:5181` | Console / MFE origins (ADR 0007). |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OTLP/gRPC endpoint for metrics and traces (ADR 0009); there is no `/metrics` scrape route. |
 | `OTEL_SERVICE_NAME` | `order-management` | Service name on telemetry (per binary: `order-management-mcp`, `order-projector`, `order-reports`). |
@@ -214,8 +215,9 @@ announced as a Kafka integration event, which that service (or any other
 subscriber) consumes independently:
 
 - **Topic:** `warehouse.order-management.events`
-- **Forwarded events:** `OrderAllocated`, `OrderPartiallyAllocated` and
-  (ADR 0018) `OrderRepromised` — every other domain event
+- **Forwarded events:** `OrderAllocated`, `OrderPartiallyAllocated`,
+  (ADR 0018) `OrderRepromised`, and (ADR 0035) the additive, PII-free
+  `SiteSkuDemandChanged` projection — every other domain event
   (`OrderReceived`, `OrderLineAllocated`, `OrderLineBackordered`,
   `OrderLineReleased`, `OrderReleased`, `OrderCancelled`,
   `OrderAllocationPartiallyFailed`) stays off the integration topic,

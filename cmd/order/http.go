@@ -30,12 +30,14 @@ func buildInboundServer(
 	uow ports.UnitOfWork,
 	dbPool *pgxpool.Pool,
 	readiness *inboundhttp.Readiness,
+	logger *slog.Logger,
 ) *inboundhttp.Server {
+	demand := buildDemandProjection(logger)
 	return &inboundhttp.Server{
-		ReceiveOrder:    &usecases.ReceiveOrder{Orders: orders, Events: publisher, Clock: clock, Inventory: inventory, Promise: promise, Catalogue: catalogue, Classification: classification, Metrics: orderMetrics, UnitOfWork: uow},
+		ReceiveOrder:    &usecases.ReceiveOrder{Orders: orders, Events: publisher, Clock: clock, Inventory: inventory, Promise: promise, Catalogue: catalogue, Classification: classification, Metrics: orderMetrics, DemandProjection: demand, UnitOfWork: uow},
 		ReleaseHeld:     &usecases.ReleaseHeldOrder{Orders: orders, Events: publisher, Clock: clock, Inventory: inventory, Promise: promise, UnitOfWork: uow},
-		RetryAllocation: &usecases.RetryAllocation{Orders: orders, Inventory: inventory, Events: publisher, Clock: clock, Promise: promise, UnitOfWork: uow},
-		CancelOrder:     &usecases.CancelOrder{Orders: orders, Inventory: inventory, Events: publisher, Clock: clock, UnitOfWork: uow},
+		RetryAllocation: &usecases.RetryAllocation{Orders: orders, Inventory: inventory, Events: publisher, Clock: clock, Promise: promise, DemandProjection: demand, UnitOfWork: uow},
+		CancelOrder:     &usecases.CancelOrder{Orders: orders, Inventory: inventory, Events: publisher, Clock: clock, DemandProjection: demand, UnitOfWork: uow},
 		GetOrder:        &usecases.GetOrder{Orders: orders},
 		// IdempotencyPool reuses the SAME pool buildRepoAdapters opened
 		// against DATABASE_URL (nil in the in-memory dev/test
