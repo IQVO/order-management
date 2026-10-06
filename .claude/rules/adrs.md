@@ -2,7 +2,7 @@
 paths:
   - "docs/docs/adr/**"
 ---
-# Architecture Decision Records (0001-0020 summarized here; 0021-0031 exist in `docs/docs/adr/` — read the file)
+# Architecture Decision Records (0001-0020 summarized in order here; 0021-0033 summarized below; read the file in `docs/docs/adr/` before acting)
 
 1. **0001 — Hexagonal (ports & adapters) architecture.** The dependency
    rule this whole repo enforces (`internal/architecture/` fitness test).
@@ -321,6 +321,42 @@ Other ADR-adjacent facts worth knowing without opening every file:
   untouched. `GET /planned-capacity?site=` reads the model. KNOWN GAP:
   orders carry no site, so the configured one is used. Read the ADR before
   touching `planned_capacity.go`, the consumer or `Server.orderResponse`.
+
+- **0022 — ACCEPTED: transactional outbox.** Use cases no longer write to
+  Kafka directly: with `DATABASE_URL` + `EVENT_PUBLISHER=kafka`,
+  `postgres.OutboxPublisher` inserts one `outbox_events` row per
+  (event x topic) inside the same `UnitOfWork` transaction as the `Order`
+  save, and `postgres.OutboxRelay` (`OUTBOX_RELAY_INTERVAL`, default 1s)
+  drains them to both topics with `FOR UPDATE SKIP LOCKED`.
+- **0023 — ACCEPTED: transactional `Idempotency-Key` middleware on
+  `POST /orders`.** Route-scoped `RequireIdempotencyKey` opens the outer
+  transaction, inserts into `idempotency_keys`, joins `ReceiveOrder`'s
+  `UnitOfWork` via `internal/pgtx`, and replays the stored response for a
+  repeated key (422 `idempotency-key-reused` on a different body, 400
+  `idempotency-key-required` when absent). Only active with Postgres.
+- **0024 — ACCEPTED: optimistic concurrency.** `orders.version` (migration
+  0009); `OrderRepo.Save` is `UPDATE ... WHERE id AND version`, a lost
+  race surfaces as `ports.ErrConcurrentModification` (409
+  `concurrent-modification`).
+- **0025 — ACCEPTED: resilience.** sony/gobreaker per outbound dependency
+  (inventory-storage reservations, product classification), jittered
+  retry on the read-only classification GET only, `<topic>.dlq` for the
+  re-promise consumer (also used by the planned-capacity consumer), and a
+  readiness-flip-first graceful shutdown (`/readyz`,
+  `SHUTDOWN_DRAIN_DELAY`).
+- **0029 — ACCEPTED: migrations bypass PgBouncer.**
+  `MIGRATIONS_DATABASE_URL` (defaults to `DATABASE_URL`) is a direct
+  connection used only for golang-migrate's advisory lock.
+- **0032 — ACCEPTED: housekeeping sweeper.** `postgres.Sweeper` in
+  `cmd/order` deletes `idempotency_keys` older than `IDEMPOTENCY_KEY_TTL`
+  (24h) and PUBLISHED `outbox_events` older than `OUTBOX_RETENTION` (7d)
+  every `HOUSEKEEPING_INTERVAL` (1h; `0` disables), plus the
+  `order.outbox.lag_seconds` gauge.
+- **0033 — ACCEPTED: boot retry and Kafka writer tuning.**
+  `internal/bootretry` retries every composition root's first
+  Postgres/Kafka dial; synchronous kafka-go writers use a 10ms
+  `BatchTimeout` and `RequireAll`; DLQ publishes retry while the
+  auto-created topic elects a leader.
 
 - Gateway API `HTTPRoute` chart template exists (`charts/order-management`
   `values.yaml` `gatewayApi:` block, `enabled: false` by default) —

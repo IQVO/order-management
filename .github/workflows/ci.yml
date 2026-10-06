@@ -423,11 +423,19 @@ jobs:
       - name: Regenerate REST API docs from apis/openapi.yaml
         run: npm run clean-api-docs order && npm run gen-api-docs order
       - name: Fail if generated docs differ from what's committed
+        # This step runs with working-directory: docs, so the pathspec is
+        # relative to docs/ (docs/api-reference/rest), NOT docs/docs/api-reference/rest —
+        # the latter resolves to docs/docs/docs/..., a nonexistent path, so the gate could never fail.
+        # `git status --porcelain` (not `git diff --exit-code`) so a NEW generated
+        # page for a newly documented operation (untracked file) also fails the job.
         run: |
           set -euo pipefail
-          if ! git diff --exit-code -- docs/docs/api-reference/rest; then
+          drift="$(git status --porcelain -- docs/api-reference/rest)"
+          if [ -n "$drift" ]; then
+            echo "$drift"
+            git --no-pager diff -- docs/api-reference/rest | head -n 200
             echo "::error::docs/docs/api-reference/rest is out of sync with apis/openapi.yaml." \
-                 "Run 'npm run gen-api-docs order' inside docs/ and commit the result."
+                 "Run 'npm run clean-api-docs order && npm run gen-api-docs order' inside docs/ and commit the result."
             exit 1
           fi
 
@@ -577,7 +585,7 @@ jobs:
           cosign sign --yes \
             ghcr.io/iqvo/order-management@${{ steps.build.outputs.digest }}
       - name: Generate SBOM (SPDX) for the published image
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           image: ghcr.io/iqvo/order-management@${{ steps.build.outputs.digest }}
           format: spdx-json
