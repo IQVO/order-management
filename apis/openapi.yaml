@@ -95,6 +95,45 @@ paths:
                 example:
                   status: ok
 
+  /readyz:
+    get:
+      operationId: getReadyz
+      summary: Readiness probe
+      description: >
+        Returns 200 `{"status":"ready"}` while the process accepts traffic and
+        503 `{"status":"not_ready"}` once graceful shutdown has begun
+        (ADR 0025): the readiness gate is flipped first, before the HTTP
+        server or any consumer is stopped, so a Kubernetes readinessProbe
+        can drain traffic during `SHUTDOWN_DRAIN_DELAY`. Like `/healthz` it
+        does not check downstream dependencies; unlike `/healthz` it is the
+        one that changes during shutdown.
+      tags: [Health]
+      responses:
+        "200":
+          description: Service is ready to receive traffic.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ready
+                example:
+                  status: ready
+        "503":
+          description: Service is draining for shutdown and must not receive new traffic.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: not_ready
+                example:
+                  status: not_ready
+
   /orders:
     post:
       operationId: receiveOrder
