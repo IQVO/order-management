@@ -19,7 +19,7 @@ quadrantChart
   x-axis Low model complexity --> High model complexity
   y-axis Low business differentiation --> High business differentiation
   quadrant-1 Core
-  quadrant-2 Decisive or Short-term Core
+  quadrant-2 Decisive - Short-term Core
   quadrant-3 Supporting
   quadrant-4 Generic
   order-management today: [0.46, 0.36]
