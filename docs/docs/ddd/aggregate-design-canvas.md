@@ -140,7 +140,8 @@ any other error aborts the pass (`allocateLines` in
 `internal/application/usecases/allocation.go`). **BR3** in practice:
 `releaseAllocatedLines` checks `EnsureReleasable` and, when it fails,
 releases nothing and returns no error — so the HTTP caller sees `200`/`201`
-with a `Backordered` order, never `409 ship-complete-blocked`.
+with a `Backordered` order — BR3 is a hold, not an error, so there is no
+`ship-complete-blocked` problem type (pinned by `br3_block_test.go`).
 
 ### 5. Corrective Policies
 

@@ -158,8 +158,8 @@ change, no event); an order that was never held answers `409`
 (`409` `concurrent-modification`), inventory-storage fails during
 reconfirm (`503`). A ship-complete held order that lost a reservation is
 **not** an error: nothing is released and the call returns `200` with the
-order `Backordered` — `ship-complete-blocked` is mapped in `errors.go` but
-unreachable over HTTP.
+order `Backordered` — BR3 is a hold, not a problem type, so there is no
+`ship-complete-blocked` response anywhere in the REST contract.
 
 ## 5. CancelOrder(orderId)
 

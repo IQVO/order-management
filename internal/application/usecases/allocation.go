@@ -183,6 +183,23 @@ func publishOrderAllocationOutcome(
 	}
 }
 
+// publishReleasePassEvents publishes everything a release-on-allocation pass
+// announces once the aggregate is saved: the order-level outcome event
+// (OrderAllocated/OrderPartiallyAllocated, carrying the released lines for
+// wes-work-planning) followed by the analytics release facts.
+func publishReleasePassEvents(
+	ctx context.Context,
+	deps allocationDeps,
+	o *order.Order,
+	outcome allocationOutcome,
+	released []shared.ReleasedLine,
+) error {
+	if err := publishOrderAllocationOutcome(ctx, deps.Events, deps.Clock, o, outcome, released); err != nil {
+		return err
+	}
+	return publishReleaseFacts(ctx, deps.Events, deps.Clock, o, released)
+}
+
 // publishReleaseFacts raises the release facts for the lines released in
 // THIS pass — the real Allocated -> Released transition performed by
 // releaseAllocatedLines. One OrderLineReleased per line released now (never
@@ -455,10 +472,7 @@ func allocateAndRelease(
 		if err := deps.Orders.Save(ctx, o); err != nil {
 			return err
 		}
-		if err := publishOrderAllocationOutcome(ctx, deps.Events, deps.Clock, o, outcome, released); err != nil {
-			return err
-		}
-		return publishReleaseFacts(ctx, deps.Events, deps.Clock, o, released)
+		return publishReleasePassEvents(ctx, deps, o, outcome, released)
 	})
 	if txErr != nil {
 		return outcome, txErr
