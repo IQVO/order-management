@@ -95,6 +95,45 @@ paths:
                 example:
                   status: ok
 
+  /readyz:
+    get:
+      operationId: getReadyz
+      summary: Readiness probe
+      description: >
+        Returns 200 `{"status":"ready"}` while the process accepts traffic and
+        503 `{"status":"not_ready"}` once graceful shutdown has begun
+        (ADR 0025): the readiness gate is flipped first, before the HTTP
+        server or any consumer is stopped, so a Kubernetes readinessProbe
+        can drain traffic during `SHUTDOWN_DRAIN_DELAY`. Like `/healthz` it
+        does not check downstream dependencies; unlike `/healthz` it is the
+        one that changes during shutdown.
+      tags: [Health]
+      responses:
+        "200":
+          description: Service is ready to receive traffic.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ready
+                example:
+                  status: ready
+        "503":
+          description: Service is draining for shutdown and must not receive new traffic.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: not_ready
+                example:
+                  status: not_ready
+
   /orders:
     post:
       operationId: receiveOrder
@@ -121,7 +160,11 @@ paths:
 
 
         `allowPartialShipment` defaults to `false` — ship-complete (BR3).
-        Every line's `pathId` is always the internal default (`pick`) — a
+        Every line's `pathId` is chosen by this service, not the caller
+        (ADR 0021): the active process paths in the process-path catalogue
+        are filtered by their declared eligibility and the shortest known
+        cycle time wins (ties: lower path id), falling back to the default
+        `pick` when no catalogue is configured or no path is active. A
         caller placing an order has no business supplying
         wes-work-planning's process-path vocabulary at intake; `pathId` is
         visible on every line in the response, but not settable on the
@@ -737,7 +780,10 @@ components:
         The per-line status. `Pending` -> `Allocated` (inventory-storage
         reserved) or `Backordered` (inventory-storage answered 409);
         `Backordered` -> `Allocated` ONLY via retry-allocation;
-        `Allocated` -> `Released` (wes-work-planning accepted the work);
+        `Allocated` -> `Released` (a pure domain transition made in the
+        same call once ship-complete rule BR3 allows it, ADR 0005 — the
+        released lines are then announced on Kafka for wes-work-planning to
+        react to independently; nothing waits for it to accept the work);
         any pre-release state -> `Cancelled`.
       enum: [Pending, Allocated, Backordered, Released, Cancelled]
       example: Allocated
@@ -764,8 +810,14 @@ components:
         pathId:
           type: string
           description: >
-            The process path assigned to this line, ALWAYS the internal
-            default (`pick`) — a caller placing an order has no business
+            The process path assigned to this line. It is chosen by this
+            service, never by the caller (ADR 0021): the active paths in
+            the process-path catalogue are filtered by their declared
+            eligibility (max units, required/excluded product attributes,
+            gift wrap) and the one with the shortest known cycle time
+            (P95) wins, ties broken on the lower path id. With no
+            catalogue configured, or no active path, it falls back to the
+            default `pick`. A caller placing an order has no business
             supplying wes-work-planning's process-path vocabulary at
             intake, so this is read-only: visible in every response, never
             settable on the request.
@@ -940,12 +992,24 @@ components:
           type: string
           format: date-time
           description: >
-            The date this order is promised for, RFC 3339. Computed at
-            allocation time by the domain lead-time policy as "now plus the
-            slowest lead time among the allocated lines' process paths".
-            Absent until at least one line is allocated. v1 uses a
-            configurable static lead time, not a live carrier rate — see
-            the README's "Deferred (v1)" section.
+            The date this order is promised for, RFC 3339 — the cutoff of
+            a CPT window computed at allocation time as a capability
+            promise (ADR 0014): the earliest window in the site's CPT
+            schedule that the allocated lines' process-path cycle time
+            (P95), eligibility and wes-work-planning's path capacity can
+            all meet. When those inputs are not available (caches cold, or
+            no process-path catalogue configured) it falls back to the
+            lead-time policy: "now plus the slowest configurable static
+            lead time among the allocated lines' process paths", not a live
+            carrier rate. With `allowPartialShipment=true` lines are
+            promised per shipment group (ADR 0017) and this is the latest
+            cutoff across the groups. For an order received with
+            `requiredShipBy` it is the latest window at or before that
+            deadline, and absent when the deadline cannot be met (ADR
+            0020). The promise basis (Capability / LeadTime / Network) is
+            carried on the `OrderAllocated`/`OrderPartiallyAllocated`
+            events, not on this response. Absent until at least one line is
+            allocated.
           example: "2026-08-27T09:00:00Z"
         capacityConstraint:
           $ref: "#/components/schemas/CapacityConstraint"

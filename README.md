@@ -344,7 +344,7 @@ probes. The full contract, including the RFC 7807 error schema, is in
 | `DELETE` | `/orders/{id}` | CancelOrder |
 | `GET` | `/planned-capacity?site=` | GetPlannedCapacity — registered only when `PLANNED_CAPACITY_CONSUMER_GROUP` is set (ADR 0031) |
 | `GET` | `/healthz` | Liveness probe |
-| `GET` | `/readyz` | Readiness probe — flips to `503` first on shutdown (ADR 0025); not declared in `apis/openapi.yaml` |
+| `GET` | `/readyz` | Readiness probe — flips to `503` first on shutdown (ADR 0025) |
 
 `POST /orders/{id}/allocate` and the old general-purpose
 `POST /orders/{id}/release` were removed by
@@ -633,6 +633,7 @@ GitHub Pages on every push to `main` that touches `docs/**`, publishing to
 31. [0031 — Consume warehouse-planning's capacity plans into a local planned-capacity read model](docs/docs/adr/0031-consume-warehouse-planning-capacity-plans.md)
 32. [0032 — Housekeeping sweeper for idempotency keys and published outbox rows](docs/docs/adr/0032-housekeeping-sweeper-idempotency-keys-and-outbox.md)
 33. [0033 — Boot-time first-dial retry, synchronous-writer BatchTimeout/acks, and DLQ topic-create retry](docs/docs/adr/0033-bootretry-and-kafka-writer-tuning.md)
+34. [0034 — Raise OrderLineReleased and OrderReleased at the release transition](docs/docs/adr/0034-raise-order-line-released-and-order-released.md)
 
 ## License
 

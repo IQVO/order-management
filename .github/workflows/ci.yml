@@ -423,11 +423,19 @@ jobs:
       - name: Regenerate REST API docs from apis/openapi.yaml
         run: npm run clean-api-docs order && npm run gen-api-docs order
       - name: Fail if generated docs differ from what's committed
+        # This step runs with working-directory: docs, so the pathspec is
+        # relative to docs/ (docs/api-reference/rest), NOT docs/docs/api-reference/rest —
+        # the latter resolves to docs/docs/docs/..., a nonexistent path, so the gate could never fail.
+        # `git status --porcelain` (not `git diff --exit-code`) so a NEW generated
+        # page for a newly documented operation (untracked file) also fails the job.
         run: |
           set -euo pipefail
-          if ! git diff --exit-code -- docs/docs/api-reference/rest; then
+          drift="$(git status --porcelain -- docs/api-reference/rest)"
+          if [ -n "$drift" ]; then
+            echo "$drift"
+            git --no-pager diff -- docs/api-reference/rest | head -n 200
             echo "::error::docs/docs/api-reference/rest is out of sync with apis/openapi.yaml." \
-                 "Run 'npm run gen-api-docs order' inside docs/ and commit the result."
+                 "Run 'npm run clean-api-docs order && npm run gen-api-docs order' inside docs/ and commit the result."
             exit 1
           fi
 

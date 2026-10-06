@@ -54,17 +54,22 @@ ten.
 | OrderAllocationPartiallyFailed | `com.warehouse.wes.order-management.order.OrderAllocationPartiallyFailed` | analytics | allocation pass, hard failure after some lines allocated | order-projector |
 | OrderCancelled | `com.warehouse.wes.order-management.order.OrderCancelled` | analytics | CancelOrder | order-projector |
 | OrderRepromised | `com.warehouse.wes.order-management.order.OrderRepromised` | integration + analytics | RepromiseOrder | order-projector; no integration consumer known from this repo |
-| OrderLineReleased | `com.warehouse.wes.order-management.order.OrderLineReleased` | analytics (if raised) | **none — declared, never raised** | order-projector handles it |
-| OrderReleased | `com.warehouse.wes.order-management.order.OrderReleased` | analytics (if raised) | **none — declared, never raised** | order-projector handles it |
+| OrderLineReleased | `com.warehouse.wes.order-management.order.OrderLineReleased` | analytics | allocation pass, once per line released in that pass | order-projector |
+| OrderReleased | `com.warehouse.wes.order-management.order.OrderReleased` | analytics | allocation pass, when that pass leaves every line `Released` | order-projector |
 
 Topics: integration = `warehouse.order-management.events`, analytics =
 `warehouse.order-management.analytics`. "Allocation pass" is the shared
 `allocateAndRelease` flow run by ReceiveOrder, RetryAllocation and
-ReleaseHeldOrder. Release is announced only through
-`OrderAllocated`/`OrderPartiallyAllocated` and their `lines[]`; the
-`OrderLineReleased`/`OrderReleased` types exist in code, AsyncAPI and the
-projector but no use case publishes them, so the funnel's
-`ordersReleased`/`linesReleased` stay at zero.
+ReleaseHeldOrder. Release is announced to wes-work-planning only through
+`OrderAllocated`/`OrderPartiallyAllocated` and their `lines[]`.
+`OrderLineReleased`/`OrderReleased` are analytics-only facts raised at the
+same release transition (`publishReleaseFacts`, in the same unit of work as
+the aggregate save, so they go through the outbox,
+[ADR 0034](/docs/adr/0034-raise-order-line-released-and-order-released)); they
+feed the funnel's `linesReleased`/`ordersReleased`. Nothing is raised when
+the release leg releases nothing (BR3-blocked ship-complete order, held
+order, a reservation lost at reconfirm), and a line is announced only in the
+pass that releases it.
 
 ### Integration payloads (`warehouse.order-management.events`)
 
@@ -182,25 +187,26 @@ flowchart LR
   AR --> E4["OrderAllocated"]
   AR --> E5["OrderPartiallyAllocated"]
   AR --> E6["OrderAllocationPartiallyFailed"]
+  AR --> E7["OrderLineReleased"]
+  AR --> E10["OrderReleased"]
   CO["CancelOrder"] --> E8["OrderCancelled"]
   RP["RepromiseOrder"] --> E9["OrderRepromised"]
 
-  E1 & E2 & E3 & E4 & E5 & E6 & E8 & E9 --> AN["warehouse.order-management.analytics"]
+  E1 & E2 & E3 & E4 & E5 & E6 & E7 & E8 & E9 & E10 --> AN["warehouse.order-management.analytics"]
   E4 & E5 & E9 --> INT["warehouse.order-management.events"]
   INT --> WP["wes-work-planning"]
   AN --> PJ["cmd/order-projector"]
 
   classDef ev fill:#f6a04d,stroke:#9a5b1c,color:#1f1300;
   classDef topic fill:#38bdf8,stroke:#0369a1,color:#0f172a;
-  class E1,E2,E3,E4,E5,E6,E8,E9 ev;
+  class E1,E2,E3,E4,E5,E6,E7,E8,E9,E10 ev;
   class AN,INT topic;
 ```
 
 Source: `internal/application/usecases/*.go`,
 `internal/adapters/outbound/kafka/publisher.go`,
 `analytics_publisher.go`. Omits: the outbox hop (diagram 9 on
-[Sequence Diagrams](./sequence-diagrams.md)) and the two declared but
-never-raised release events.
+[Sequence Diagrams](./sequence-diagrams.md)).
 
 ## Naming and payload shape
 

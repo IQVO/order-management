@@ -108,7 +108,6 @@ other services in this platform emit:
 | `held-order-must-be-ship-complete` | 422 | `releaseOnAllocation: false` combined with `allowPartialShipment: true` (ADR 0020) |
 | `idempotency-key-reused` | 422 | the same `Idempotency-Key` sent with a different body (ADR 0023) |
 | `order-already-released` | 409 | `CancelOrder` when any line is `Released` (BR6) |
-| `ship-complete-blocked` | 409 | mapped for `ErrShipCompleteBlocked`, but not reachable over HTTP today: the release leg treats a BR3-blocked ship-complete order as "nothing to release" and answers `200` |
 | `no-backordered-lines` | 409 | `RetryAllocation` on an order with nothing backordered |
 | `order-not-held` | 409 | `ReleaseHeldOrder` on an order that was not held at intake (ADR 0020) |
 | `concurrent-modification` | 409 | the order's `version` changed between read and save (ADR 0024) |
@@ -127,6 +126,13 @@ line-state guard errors (`order-line-not-found` 400;
 `insufficient-stock` (503); the current use cases catch or never return
 most of these on their HTTP paths (the per-line `409` from inventory-storage
 becomes a `Backordered` line, not an error).
+
+There is deliberately no problem type for BR3 (ship-complete). A ship-complete
+order whose release is blocked because a line is unallocated is a hold, not an
+error ([ADR 0003](/docs/adr/0003-ship-complete-default-and-fail-closed-allocation)):
+`POST /orders` answers `201`, and `POST /orders/{id}/retry-allocation` and
+`POST /orders/{id}/release` answer `200`, each with the order `Backordered` and
+nothing released.
 
 The domain never knows about any of this. It returns typed errors; the
 inbound adapter is the only layer that translates them.

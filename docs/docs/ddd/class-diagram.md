@@ -382,8 +382,8 @@ classDiagram
 
 Source: `internal/domain/shared/events.go`. Omits: the embedded `base`
 struct (`eventName`, `occurredAt`) that implements `DomainEvent` for every
-event. `OrderLineReleased` and `OrderReleased` are declared but no use case
-raises them today.
+event. `OrderLineReleased` and `OrderReleased` are raised by
+`allocateAndRelease` at the release transition (analytics topic only).
 
 ## 4. Application ports
 

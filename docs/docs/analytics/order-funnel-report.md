@@ -38,12 +38,16 @@ lifecycle at OrderLine granularity.
 
 Each metric counts events per `(path_id, hour_bucket)`.
 
-:::note[ordersReleased and linesReleased stay at zero today]
-The projector handles `OrderReleased` and `OrderLineReleased`, but no use
-case in `internal/application/usecases` raises either event: release is
-announced only through `OrderAllocated` / `OrderPartiallyAllocated` (see
-[Domain Events](/docs/ddd/domain-events)). Until a use case publishes
-them, these two columns are always `0`.
+:::note[ordersReleased and linesReleased]
+`OrderLineReleased` is raised once per line released and `OrderReleased`
+once when a pass leaves every line of the order released, both at the same
+release transition inside `allocateAndRelease`
+([ADR 0034](/docs/adr/0034-raise-order-line-released-and-order-released)).
+Before that change no use case raised them and these two columns were always
+`0`; orders released earlier have no such events, so the columns only count
+releases from that deploy onwards. A partial-shipment order raises
+`OrderLineReleased` per pass and `OrderReleased` only when its last
+backordered line is retried and released.
 :::
 
 ### Promise KPIs (ADR 0019)

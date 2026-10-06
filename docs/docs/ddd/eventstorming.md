@@ -61,10 +61,11 @@ flowchart LR
   P2["Reconfirm then release unless ship-complete is blocked"]:::policy
   E5["Order Allocated"]:::event
   E6["Order Partially Allocated"]:::event
+  E7["Order Line Released"]:::event
+  E8["Order Released"]:::event
   WP["wes-work-planning"]:::external
   OP["Operator"]:::actor
   RA["Retry Allocation"]:::command
-  H1["Order Line Released and Order Released never raised"]:::hotspot
   H2["No release confirmation from wes-work-planning"]:::hotspot
 
   CUS --> RO --> O1
@@ -78,10 +79,11 @@ flowchart LR
   PP --> P2
   P2 --> E5
   P2 --> E6
+  P2 --> E7
+  E7 --> E8
   E5 --> WP
   E6 --> WP
   E3 --> OP --> RA --> O1
-  E5 -.-> H1
   WP -.-> H2
 
   classDef actor fill:#fff59d,stroke:#b59f00,color:#1f1300,font-size:11px;
@@ -117,7 +119,6 @@ flowchart LR
   INV2["inventory-storage"]:::external
   E9["Order Cancelled"]:::event
   H3["Orphaned hold is never swept"]:::hotspot
-  H4["ship-complete-blocked is unreachable over HTTP"]:::hotspot
 
   NF --> ROH --> P3 --> O2
   O2 --> E7 --> RV --> NF
@@ -128,7 +129,6 @@ flowchart LR
   O2 --> INV2
   O2 --> E9
   E7 -.-> H3
-  P4 -.-> H4
 
   classDef actor fill:#fff59d,stroke:#b59f00,color:#1f1300,font-size:11px;
   classDef command fill:#4aa3df,stroke:#1f6f9f,color:#0b1e2d;
@@ -219,8 +219,8 @@ Omits: the analytics projector (a read model built from every event, see
 | Planned capacity windows | Read Model | `planned_capacity_windows`, `order.PlannedCapacityWindow` |
 | Order view with promiseDate | Read Model | `GET /orders/{id}` response (`orderResponse`) |
 | inventory-storage, wes-work-planning, process-path-management, fulfillment-execution, warehouse-planning, network-fulfillment | External System | outbound and inbound adapters listed on [Context Map](/docs/ecosystem/context-map) |
-| Order Line Released and Order Released never raised | Hotspot | `.claude/rules/deferred-and-known-gaps.md`; no caller of `shared.NewOrderLineReleased`/`NewOrderReleased` |
+| Order Line Released and Order Released raised only on the analytics topic | Event | `publishReleaseFacts` in `allocation.go`, [ADR 0034](/docs/adr/0034-raise-order-line-released-and-order-released) |
 | No release confirmation from wes-work-planning | Hotspot | README Deferred list, ADR 0005 |
 | Orphaned hold is never swept | Hotspot | ADR 0020, README Deferred list |
-| ship-complete-blocked is unreachable over HTTP | Hotspot | `allocation.go` returns success when BR3 blocks; `errors.go` still maps the problem type |
+| BR3 blocking a release is a hold, answered 201/200 with a `Backordered` order (no `ship-complete-blocked` problem type) | Policy | `releaseAllocatedLines`, `Order.EnsureReleasable`, `br3_block_test.go`, ADR 0003 |
 | No known consumer of Order Repromised | Hotspot | published on `warehouse.order-management.events` (`outbound/kafka.Publisher`), but no sibling consumer is named in this repo's docs or ADR 0018 |
