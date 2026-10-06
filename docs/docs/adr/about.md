@@ -93,6 +93,7 @@ Typos, broken links and formatting are of course fair game.
 | [0031](./0031-consume-warehouse-planning-capacity-plans.md) | Consume warehouse-planning's capacity plans into a local planned-capacity read model | Accepted |
 | [0032](./0032-housekeeping-sweeper-idempotency-keys-and-outbox.md) | Housekeeping sweeper for idempotency keys and published outbox rows | Accepted |
 | [0033](./0033-bootretry-and-kafka-writer-tuning.md) | Boot-time first-dial retry, synchronous-writer BatchTimeout/acks, and DLQ topic-create retry | Accepted |
+| [0034](./0034-raise-order-line-released-and-order-released.md) | Raise OrderLineReleased and OrderReleased at the release transition | Accepted |
 
 Each of these reconstructs a decision that is actually visible in this
 repository's `CLAUDE.md` and code — none is a generic placeholder.

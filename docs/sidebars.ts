@@ -116,6 +116,7 @@ const sidebars: SidebarsConfig = {
         'adr/0031-consume-warehouse-planning-capacity-plans',
         'adr/0032-housekeeping-sweeper-idempotency-keys-and-outbox',
         'adr/0033-bootretry-and-kafka-writer-tuning',
+        'adr/0034-raise-order-line-released-and-order-released',
       ],
     },
   ],

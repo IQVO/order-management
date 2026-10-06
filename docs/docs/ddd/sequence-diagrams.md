@@ -155,6 +155,12 @@ sequenceDiagram
       end
       UC->>R: Save(order) with version guard
       UC->>OB: Publish(OrderAllocated or OrderPartiallyAllocated) with released lines
+      opt lines were released in this pass
+        UC->>OB: Publish(OrderLineReleased) for each line released now
+        opt every line of the order is now Released
+          UC->>OB: Publish(OrderReleased)
+        end
+      end
     end
   end
   Note over OB: integration and analytics rows, drained by the relay, diagram 9
@@ -162,7 +168,8 @@ sequenceDiagram
 
 Source: `internal/application/usecases/allocation.go`
 (`allocateLines`, `salvageAllocationFailure`, `reconfirmBeforeRelease`,
-`releaseAllocatedLines`, `publishOrderAllocationOutcome`),
+`releaseAllocatedLines`, `publishOrderAllocationOutcome`,
+`publishReleaseFacts`),
 `internal/adapters/outbound/inventorystorage/client.go`. Omits: the circuit
 breaker wrapping the inventory client (ADR 0025), and the rule that the
 outcome event is skipped when the order ends `Backordered` or the pass

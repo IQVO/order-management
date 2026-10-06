@@ -189,7 +189,7 @@ func testReceiveOrderPartialShipmentReleasesWhatAllocates(t *testing.T) {
 		t.Fatalf("Status() = %q, want %q", o.Status(), order.StatusPartiallyReleased)
 	}
 	assertLineStatuses(t, o, order.LineReleased, order.LineBackordered)
-	assertEventNames(t, f.events, "OrderReceived", "OrderLineAllocated", "OrderLineBackordered", "OrderPartiallyAllocated")
+	assertEventNames(t, f.events, "OrderReceived", "OrderLineAllocated", "OrderLineBackordered", "OrderPartiallyAllocated", "OrderLineReleased")
 }
 
 func testReceiveOrderHardAllocationFailureDoesNotFailIntake(t *testing.T) {

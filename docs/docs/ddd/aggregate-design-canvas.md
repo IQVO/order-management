@@ -183,8 +183,8 @@ CloudEvents 1.0 with `type = com.warehouse.wes.order-management.order.<EventName
 | OrderAllocationPartiallyFailed | `com.warehouse.wes.order-management.order.OrderAllocationPartiallyFailed` | `salvageAllocationFailure` |
 | OrderCancelled | `com.warehouse.wes.order-management.order.OrderCancelled` | CancelOrder |
 | OrderRepromised | `com.warehouse.wes.order-management.order.OrderRepromised` | RepromiseOrder |
-| OrderLineReleased | `com.warehouse.wes.order-management.order.OrderLineReleased` | declared, **never raised** today |
-| OrderReleased | `com.warehouse.wes.order-management.order.OrderReleased` | declared, **never raised** today |
+| OrderLineReleased | `com.warehouse.wes.order-management.order.OrderLineReleased` | `allocateAndRelease` (`publishReleaseFacts`), once per line released in the pass; analytics only |
+| OrderReleased | `com.warehouse.wes.order-management.order.OrderReleased` | `allocateAndRelease` (`publishReleaseFacts`), when the pass leaves every line `Released`; analytics only |
 
 Topic routing and payloads are on [Domain Events](./domain-events.md).
 
