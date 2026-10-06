@@ -3,8 +3,9 @@
 // Integration tests for OrderRepo's optimistic-concurrency-control
 // version guard (see docs/docs/adr/0024-optimistic-concurrency-version-column.md)
 // against a real Postgres 16, gated behind the `integration` build tag.
-// Testcontainers-only: each test boots and owns its own disposable
-// Postgres container, never reads DATABASE_URL or hardcodes localhost.
+// Testcontainers-only: the package's TestMain (main_integration_test.go)
+// boots one shared disposable Postgres container, never reads
+// DATABASE_URL or hardcodes localhost.
 package postgres_test
 
 import (
@@ -15,8 +16,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/testcontainers/testcontainers-go"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/claudioed/order-management/internal/adapters/outbound/postgres"
 	"github.com/claudioed/order-management/internal/application/ports"
@@ -25,35 +24,12 @@ import (
 	"github.com/claudioed/order-management/internal/domain/shared"
 )
 
-// versionDB boots a throwaway Postgres and runs every migration in this
-// repo, including the orders.version column one (0009).
+// versionDB is the package's shared, truncated database (see TestMain).
+// These tests identify their rows by unique order ids and assert on
+// versions of those rows only, so they do not need a pristine container.
 func versionDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	ctx := context.Background()
-	container, err := tcpostgres.Run(ctx, "postgres:16-alpine",
-		tcpostgres.WithDatabase("order_management"),
-		tcpostgres.WithUsername("order_management"),
-		tcpostgres.WithPassword("order_management"),
-		tcpostgres.BasicWaitStrategies(),
-	)
-	if err != nil {
-		t.Fatalf("start postgres container: %v", err)
-	}
-	t.Cleanup(func() { _ = testcontainers.TerminateContainer(container) })
-
-	url, err := container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("connection string: %v", err)
-	}
-	if err := postgres.RunMigrations(url, "../../../../migrations"); err != nil {
-		t.Fatalf("run migrations: %v", err)
-	}
-	pool, err := postgres.NewPool(ctx, url)
-	if err != nil {
-		t.Fatalf("open pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
+	return outboxDB(t)
 }
 
 func mustSingleLineOrder(t *testing.T, id shared.OrderId) *order.Order {

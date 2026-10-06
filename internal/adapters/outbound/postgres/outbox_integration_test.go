@@ -2,8 +2,9 @@
 
 // Integration tests for the transactional outbox (ADR: see
 // docs/docs/adr — this rollout's ADR) against a real Postgres 16, gated
-// behind the `integration` build tag. Testcontainers-only: the test
-// boots and owns its own disposable Postgres container, never reads
+// behind the `integration` build tag. Testcontainers-only: the package's
+// TestMain (main_integration_test.go) boots ONE disposable Postgres
+// container shared by every test here (each test truncates the tables), never reads
 // DATABASE_URL or hardcodes localhost, so CI cannot silently skip this
 // contract and a local run is byte-for-byte identical to CI's.
 package postgres_test
@@ -16,8 +17,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/testcontainers/testcontainers-go"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	outboundkafka "github.com/claudioed/order-management/internal/adapters/outbound/kafka"
 	"github.com/claudioed/order-management/internal/adapters/outbound/postgres"
@@ -25,38 +24,6 @@ import (
 	"github.com/claudioed/order-management/internal/application/usecases"
 	"github.com/claudioed/order-management/internal/domain/shared"
 )
-
-// outboxDB boots a throwaway Postgres (testcontainers — the test owns its
-// own database, never an external DATABASE_URL) and runs every migration
-// in this repo, including the outbox one.
-func outboxDB(t *testing.T) *pgxpool.Pool {
-	t.Helper()
-	ctx := context.Background()
-	container, err := tcpostgres.Run(ctx, "postgres:16-alpine",
-		tcpostgres.WithDatabase("order_management"),
-		tcpostgres.WithUsername("order_management"),
-		tcpostgres.WithPassword("order_management"),
-		tcpostgres.BasicWaitStrategies(),
-	)
-	if err != nil {
-		t.Fatalf("start postgres container: %v", err)
-	}
-	t.Cleanup(func() { _ = testcontainers.TerminateContainer(container) })
-
-	url, err := container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("connection string: %v", err)
-	}
-	if err := postgres.RunMigrations(url, "../../../../migrations"); err != nil {
-		t.Fatalf("run migrations: %v", err)
-	}
-	pool, err := postgres.NewPool(ctx, url)
-	if err != nil {
-		t.Fatalf("open pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
-}
 
 // recordingSink is a fake postgres.Sink: it records everything sent, and
 // can be told to fail once on a specific event type so tests can drive

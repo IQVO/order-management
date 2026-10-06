@@ -7,49 +7,27 @@ import (
 	"testing"
 	"time"
 
-	"github.com/testcontainers/testcontainers-go"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
-
 	"github.com/claudioed/order-management/internal/adapters/outbound/analyticsstore"
-	"github.com/claudioed/order-management/internal/adapters/outbound/postgres"
 	"github.com/claudioed/order-management/internal/analytics/report"
 )
 
-// requireAnalyticsURL boots a throwaway Postgres (testcontainers — the test
-// owns its own database; it never reads ANALYTICS_DATABASE_URL, never skips,
-// never hardcodes localhost) and returns its connection string. The name is
-// kept so every test in this file reads as before.
+// requireAnalyticsURL returns the connection string of the package's shared,
+// already-migrated analytics Postgres (testcontainers — see
+// main_integration_test.go; it never reads ANALYTICS_DATABASE_URL, never
+// skips, never hardcodes localhost) with every table emptied. Tests must not
+// run in parallel: they share one database.
 func requireAnalyticsURL(t *testing.T) string {
 	t.Helper()
-	ctx := context.Background()
-	container, err := tcpostgres.Run(ctx, "postgres:16-alpine",
-		tcpostgres.WithDatabase("order_analytics"),
-		tcpostgres.WithUsername("order_analytics"),
-		tcpostgres.WithPassword("order_analytics"),
-		tcpostgres.BasicWaitStrategies(),
-	)
-	if err != nil {
-		t.Fatalf("start postgres container: %v", err)
+	sharedPGOnce.Do(startSharedAnalyticsPostgres)
+	if sharedPGErr != nil {
+		t.Fatalf("shared analytics postgres: %v", sharedPGErr)
 	}
-	t.Cleanup(func() { _ = testcontainers.TerminateContainer(container) })
-
-	url, err := container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("connection string: %v", err)
-	}
-	return url
-}
-
-func migrateAnalytics(t *testing.T, url string) {
-	t.Helper()
-	if err := postgres.RunMigrations(url, "../../../../migrations/analytics"); err != nil {
-		t.Fatalf("migrate analytics: %v", err)
-	}
+	truncateAllTables(t, sharedPGURL)
+	return sharedPGURL
 }
 
 func TestPostgresProjectionAndReport_RoundTrip(t *testing.T) {
 	url := requireAnalyticsURL(t)
-	migrateAnalytics(t, url)
 
 	pool, err := analyticsstore.NewPool(context.Background(), url)
 	if err != nil {
@@ -115,7 +93,6 @@ func TestPostgresProjectionAndReport_RoundTrip(t *testing.T) {
 // read-only: an attempt to write through it must be rejected by Postgres.
 func TestReadOnlyPool_RejectsWrites(t *testing.T) {
 	url := requireAnalyticsURL(t)
-	migrateAnalytics(t, url)
 
 	roPool, err := analyticsstore.NewReadOnlyPool(context.Background(), url)
 	if err != nil {
@@ -143,7 +120,6 @@ func TestReadOnlyPool_RejectsWrites(t *testing.T) {
 // a zero lag rather than a scan error (pilot bug #2).
 func TestFreshnessLag_EmptyStore(t *testing.T) {
 	url := requireAnalyticsURL(t)
-	migrateAnalytics(t, url)
 
 	pool, err := analyticsstore.NewPool(context.Background(), url)
 	if err != nil {
@@ -173,7 +149,6 @@ func TestFreshnessLag_EmptyStore(t *testing.T) {
 // counter merged in from the separate repromise_rollup table.
 func TestPostgresProjectionAndReport_PromiseKPIs(t *testing.T) {
 	url := requireAnalyticsURL(t)
-	migrateAnalytics(t, url)
 
 	pool, err := analyticsstore.NewPool(context.Background(), url)
 	if err != nil {
@@ -280,7 +255,6 @@ func TestPostgresProjectionAndReport_PromiseKPIs(t *testing.T) {
 // also synthesizes a repromise-only row (the UNION ALL column count).
 func TestPostgresProjectionAndReport_NetworkBasisBucket(t *testing.T) {
 	url := requireAnalyticsURL(t)
-	migrateAnalytics(t, url)
 
 	pool, err := analyticsstore.NewPool(context.Background(), url)
 	if err != nil {
