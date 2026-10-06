@@ -15,35 +15,17 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/testcontainers/testcontainers-go"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/claudioed/order-management/internal/adapters/outbound/postgres"
 )
 
-// poolLimitsDB boots a throwaway Postgres (own container, never an
-// external DATABASE_URL) for tests that only need a bare connection —
-// no migrations, since these tests exercise pool-level settings, not
-// schema.
+// poolLimitsDB returns the shared container's connection string (see
+// TestMain) for tests that only need a bare connection: they exercise
+// pool-level settings on pools of their own, which read and write no
+// table, so they do not need a container of their own.
 func poolLimitsDB(t *testing.T) string {
 	t.Helper()
-	ctx := context.Background()
-	container, err := tcpostgres.Run(ctx, "postgres:16-alpine",
-		tcpostgres.WithDatabase("order_management"),
-		tcpostgres.WithUsername("order_management"),
-		tcpostgres.WithPassword("order_management"),
-		tcpostgres.BasicWaitStrategies(),
-	)
-	if err != nil {
-		t.Fatalf("start postgres container: %v", err)
-	}
-	t.Cleanup(func() { _ = testcontainers.TerminateContainer(container) })
-
-	url, err := container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("connection string: %v", err)
-	}
-	return url
+	return sharedURL
 }
 
 // TestNewPool_AppliesStatementTimeoutToNewConnections is the core claim:
