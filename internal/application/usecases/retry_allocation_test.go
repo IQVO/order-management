@@ -28,7 +28,7 @@ func TestRetryAllocationClearsABackorderAndUnblocksShipComplete(t *testing.T) {
 		t.Fatalf("Status() = %q, want %q", got.Status(), order.StatusReleased)
 	}
 	assertLineStatuses(t, got, order.LineReleased, order.LineReleased)
-	assertEventNames(t, f.events, "OrderLineAllocated", "OrderAllocated")
+	assertEventNames(t, f.events, "OrderLineAllocated", "OrderAllocated", "OrderLineReleased", "OrderLineReleased", "OrderReleased")
 
 	// The backordered line is retried, and the already-allocated line is
 	// re-confirmed (not blindly trusted) before release: its reservation

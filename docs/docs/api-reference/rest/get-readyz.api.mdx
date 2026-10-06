@@ -1,0 +1,61 @@
+---
+id: get-readyz
+title: "Readiness probe"
+description: "Returns 200 `{'status':'ready'}` while the process accepts traffic and 503 `{'status':'not_ready'}` once graceful shutdown has begun (ADR 0025): the readiness gate is flipped first, before the HTTP server or any consumer is stopped, so a Kubernetes readinessProbe can drain traffic during `SHUTDOWN_DRAIN_DELAY`. Like `/healthz` it does not check downstream dependencies; unlike `/healthz` it is the one that changes during shutdown."
+sidebar_label: "Readiness probe"
+hide_title: true
+hide_table_of_contents: true
+api: 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
+sidebar_class_name: "get api-method"
+info_path: docs/api-reference/rest/order-management-api
+custom_edit_url: null
+hide_send_button: true
+---
+
+import MethodEndpoint from "@theme/ApiExplorer/MethodEndpoint";
+import ParamsDetails from "@theme/ParamsDetails";
+import RequestSchema from "@theme/RequestSchema";
+import StatusCodes from "@theme/StatusCodes";
+import OperationTabs from "@theme/OperationTabs";
+import TabItem from "@theme/TabItem";
+import Heading from "@theme/Heading";
+import Translate from "@docusaurus/Translate";
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"Readiness probe"}
+>
+</Heading>
+
+<MethodEndpoint
+  method={"get"}
+  path={"/readyz"}
+  context={"endpoint"}
+>
+  
+</MethodEndpoint>
+
+
+
+Returns 200 `{"status":"ready"}` while the process accepts traffic and 503 `{"status":"not_ready"}` once graceful shutdown has begun (ADR 0025): the readiness gate is flipped first, before the HTTP server or any consumer is stopped, so a Kubernetes readinessProbe can drain traffic during `SHUTDOWN_DRAIN_DELAY`. Like `/healthz` it does not check downstream dependencies; unlike `/healthz` it is the one that changes during shutdown.
+
+
+<ParamsDetails>
+  
+</ParamsDetails>
+
+<RequestSchema
+  {...require("./get-readyz.RequestSchema.json")}
+>
+  
+</RequestSchema>
+
+<StatusCodes
+  {...require("./get-readyz.StatusCodes.json")}
+>
+  
+</StatusCodes>
+
+
+      
