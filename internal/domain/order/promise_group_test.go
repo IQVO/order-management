@@ -109,7 +109,10 @@ func TestRehydrateWithGroups_RoundTripsGroups(t *testing.T) {
 		{LineNos: []int{1}, Promise: order.Promise{CptId: cptId, CutoffAt: promiseDate, Basis: basis}},
 	}
 
-	o := order.RehydrateWithGroups("ord-1", []*order.OrderLine{line}, true, &promiseDate, &cptId, &basis, groups)
+	o := order.Rehydrate(order.OrderSnapshot{
+		ID: "ord-1", Lines: []*order.OrderLine{line}, AllowPartialShipment: true,
+		PromiseDate: &promiseDate, PromiseCptID: &cptId, PromiseBasis: &basis, PromiseGroups: groups,
+	})
 
 	got := o.PromiseGroups()
 	if len(got) != 1 || len(got[0].LineNos) != 1 || got[0].LineNos[0] != 1 {
@@ -118,14 +121,17 @@ func TestRehydrateWithGroups_RoundTripsGroups(t *testing.T) {
 	if got[0].Promise.CptId != cptId {
 		t.Fatalf("group CptId = %q, want %q", got[0].Promise.CptId, cptId)
 	}
-	// Rehydrate (the 6-arg legacy constructor) must still produce an
-	// order with NO group breakdown, only the legacy summary fields —
-	// proving the two constructors are genuinely independent.
-	legacy := order.Rehydrate("ord-2", []*order.OrderLine{line}, true, &promiseDate, &cptId, &basis)
+	// A snapshot with no PromiseGroups (a pre-ADR-0017 row) must still
+	// produce an order with NO group breakdown, only the legacy summary
+	// fields.
+	legacy := order.Rehydrate(order.OrderSnapshot{
+		ID: "ord-2", Lines: []*order.OrderLine{line}, AllowPartialShipment: true,
+		PromiseDate: &promiseDate, PromiseCptID: &cptId, PromiseBasis: &basis,
+	})
 	if got := legacy.PromiseGroups(); len(got) != 0 {
-		t.Fatalf("Rehydrate (legacy) PromiseGroups() = %v, want empty", got)
+		t.Fatalf("Rehydrate (no groups) PromiseGroups() = %v, want empty", got)
 	}
 	if got := legacy.PromiseDate(); got == nil || !got.Equal(promiseDate) {
-		t.Fatalf("Rehydrate (legacy) PromiseDate() = %v, want %v", got, promiseDate)
+		t.Fatalf("Rehydrate (no groups) PromiseDate() = %v, want %v", got, promiseDate)
 	}
 }

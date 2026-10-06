@@ -23,7 +23,7 @@ func newAllocatedOrderShipComplete(t *testing.T, pathsAndQty ...struct {
 			i+1, "SKU-1", pq.qty, pq.path, false, order.LineAllocated, nil,
 		))
 	}
-	return order.Rehydrate("ord-1", lines, false, nil, nil, nil)
+	return order.Rehydrate(order.OrderSnapshot{ID: "ord-1", Lines: lines})
 }
 
 // TestPromiseGroups_ShipComplete_IsOneGroupIdenticalToPromise proves the
@@ -110,9 +110,9 @@ func TestPromiseGroups_ShipComplete_FallbackIsOneGroup(t *testing.T) {
 // contract for both ship-complete and partial-shipment orders.
 func TestPromiseGroups_NoAllocatedLines_ReturnsNotOK(t *testing.T) {
 	for _, allowPartial := range []bool{false, true} {
-		o := order.Rehydrate("ord-1", []*order.OrderLine{
+		o := order.Rehydrate(order.OrderSnapshot{ID: "ord-1", Lines: []*order.OrderLine{
 			order.RehydrateOrderLine(1, "SKU-1", 1, "pick", false, order.LinePending, nil),
-		}, allowPartial, nil, nil, nil)
+		}, AllowPartialShipment: allowPartial})
 
 		policy := order.PromisePolicy{Fallback: order.NewLeadTimePolicy(24*time.Hour, nil)}
 		groups, ok := policy.PromiseGroups(testTime(), o)

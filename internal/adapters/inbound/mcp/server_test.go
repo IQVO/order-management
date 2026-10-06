@@ -30,9 +30,9 @@ func newServer(t *testing.T) string {
 		t.Fatalf("order id: %v", err)
 	}
 	resID := "RES-1"
-	o := order.Rehydrate(orderID, []*order.OrderLine{
+	o := order.Rehydrate(order.OrderSnapshot{ID: orderID, Lines: []*order.OrderLine{
 		order.RehydrateOrderLine(1, "SKU-1", 2, "pick", false, order.LineAllocated, &resID),
-	}, false, nil, nil, nil)
+	}})
 	if err := orders.Save(ctx, o); err != nil {
 		t.Fatalf("seed order: %v", err)
 	}
