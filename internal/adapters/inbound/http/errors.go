@@ -30,7 +30,6 @@ func statusFor(err error) int {
 		return http.StatusUnprocessableEntity
 
 	case errors.Is(err, order.ErrOrderAlreadyReleased),
-		errors.Is(err, order.ErrShipCompleteBlocked),
 		errors.Is(err, order.ErrLineAlreadyAllocated),
 		errors.Is(err, order.ErrLineNotPending),
 		errors.Is(err, order.ErrLineNotBackordered),
@@ -94,7 +93,11 @@ var problemCatalog = []struct {
 	{order.ErrHeldOrderMustBeShipComplete, problemInfo{"held-order-must-be-ship-complete", "A held order (releaseOnAllocation=false) must be ship-complete"}},
 
 	{order.ErrOrderAlreadyReleased, problemInfo{"order-already-released", "Order already has released lines and can no longer be cancelled"}},
-	{order.ErrShipCompleteBlocked, problemInfo{"ship-complete-blocked", "Ship-complete order cannot be released while any line is unallocated"}},
+	// order.ErrShipCompleteBlocked (BR3) is deliberately NOT mapped: a
+	// ship-complete order whose release is blocked is a HOLD, not an error
+	// (ADR 0003/0005). The release leg treats it as "nothing to release", so
+	// POST /orders answers 201 and retry-allocation / release answer 200, all
+	// with the order Backordered. There is no ship-complete-blocked problem type.
 	{order.ErrLineAlreadyAllocated, problemInfo{"order-line-already-allocated", "Order line is already allocated"}},
 	{order.ErrLineNotPending, problemInfo{"order-line-not-pending", "Order line is not pending allocation"}},
 	{order.ErrLineNotBackordered, problemInfo{"order-line-not-backordered", "Order line is not backordered"}},

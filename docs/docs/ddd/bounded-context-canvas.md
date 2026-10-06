@@ -142,11 +142,6 @@ Top terms:
 
 ## Open Questions
 
-- `OrderLineReleased`/`OrderReleased` are declared and projected but never
-  raised — keep them, raise them, or delete them? Until decided, the
-  funnel's released columns stay at zero.
-- `ship-complete-blocked` (409) is mapped but unreachable over HTTP; should
-  a BR3-blocked release report that to the caller?
 - No consumer of `OrderRepromised` on the integration topic is known — does
   wes-work-planning or network-fulfillment need it?
 - **Held orders are never swept.** Nothing expires an orphaned hold; ADR

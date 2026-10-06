@@ -2,7 +2,7 @@
 paths:
   - "docs/docs/adr/**"
 ---
-# Architecture Decision Records (0001-0020 summarized in order here; 0021-0033 summarized below; read the file in `docs/docs/adr/` before acting)
+# Architecture Decision Records (0001-0020 summarized in order here; 0021-0034 summarized below; read the file in `docs/docs/adr/` before acting)
 
 1. **0001 — Hexagonal (ports & adapters) architecture.** The dependency
    rule this whole repo enforces (`internal/architecture/` fitness test).
@@ -357,6 +357,11 @@ Other ADR-adjacent facts worth knowing without opening every file:
   Postgres/Kafka dial; synchronous kafka-go writers use a 10ms
   `BatchTimeout` and `RequireAll`; DLQ publishes retry while the
   auto-created topic elects a leader.
+- **0034 — ACCEPTED: raise `OrderLineReleased` / `OrderReleased`.**
+  `allocateAndRelease` publishes one `OrderLineReleased` per line released in
+  the pass, plus `OrderReleased` when every line is Released, through the
+  outbox in the same transaction as the aggregate save; analytics topic only,
+  so the Order Funnel's `linesReleased`/`ordersReleased` count from deploy on.
 
 - Gateway API `HTTPRoute` chart template exists (`charts/order-management`
   `values.yaml` `gatewayApi:` block, `enabled: false` by default) —

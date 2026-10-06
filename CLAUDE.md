@@ -71,7 +71,7 @@ docs-site regeneration and local run: `.claude/rules/ci-quality-gates.md` and
   (efficacy 89 / mutant-coverage 83). Details: `.claude/rules/testing-standards.md`.
 - **Docs:** regenerate the Docusaurus API reference after ANY
   `apis/openapi.yaml` change (procedure in `ci-quality-gates.md`; the
-  `docs-api-drift` CI check has a known defect, so verify by hand).
+  `docs-api-drift` CI check fails on any drift).
 - **`web/`** is a separate Vite/React MFE remote, NOT part of the Go module and
   never part of `make check`/`check-all`; it talks only to this service's own
   REST API. See `.claude/rules/frontend-mfe.md`.

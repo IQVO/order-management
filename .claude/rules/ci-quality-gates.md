@@ -55,14 +55,11 @@ paths:
   fitness tests: hexagonal dependency rule, analytics isolation, ports
   customer-owned).
 - **`docs-api-drift`** — `npm run clean-api-docs order && npm run
-  gen-api-docs order` in `docs/`, then `git diff --exit-code -- docs/docs/
-  api-reference/rest`. **Known defect:** that step runs with
-  `working-directory: docs`, so the pathspec resolves to
-  `docs/docs/docs/api-reference/rest` (nonexistent) and the check always <!-- guide-lint: ignore -->
-  passes — it let ADR-0020's `releaseHeldOrder` endpoint land with no
-  generated page. The working pathspec from `docs/` is
-  `docs/api-reference/rest`. <!-- guide-lint: ignore --> Until the workflow is fixed, run the
-  procedure below by hand after any `apis/openapi.yaml` change.
+  gen-api-docs order` in `docs/`, then fails if
+  `git status --porcelain -- docs/api-reference/rest` (pathspec relative to
+  `docs/`) is non-empty, so a new untracked generated page fails the job too.
+  The former pathspec resolved to a nonexistent path and the job could never
+  fail; that is fixed.
 - **`web`** — builds `warehouse-ui-kit` (checked out at `develop`), then
   `npm ci`, `npm run lint`, `npx tsc -b`, `npm test`, `npm run build` in
   `web/`.
