@@ -11,8 +11,8 @@ type DomainEvent interface {
 }
 
 type base struct {
-	Name string    `json:"eventName"`
-	At   time.Time `json:"occurredAt"`
+	Name string
+	At   time.Time
 }
 
 func (b base) EventName() string     { return b.Name }
