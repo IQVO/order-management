@@ -213,7 +213,8 @@ windows for one site that end after `from` (default now).
 `OrderCapacityConstraints` is called while building every order response:
 an order with a promise gets a `capacityConstraint` annotation listing the
 published shortage windows its promise overlaps, for the single configured
-`DEFAULT_SITE_ID`. Neither changes a promise.
+site (`PLANNED_CAPACITY_SITE_ID`, defaulting to `DEFAULT_SITE_ID`). Neither
+changes a promise.
 
 ## REST endpoint summary
 

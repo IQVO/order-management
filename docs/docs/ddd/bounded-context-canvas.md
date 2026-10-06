@@ -120,8 +120,9 @@ Top terms:
 
 - inventory-storage is the single source of truth for stock; this context
   never caches stock levels.
-- One site per deployment: `DEFAULT_SITE_ID` is the only site the promise
-  and planned-capacity annotation consider.
+- One site per deployment: the promise uses `DEFAULT_SITE_ID`, and the
+  planned-capacity annotation uses `PLANNED_CAPACITY_SITE_ID` (defaulting to
+  the same value).
 - wes-work-planning accepts every released line; there is no confirmation
   event back.
 - Upstream catalogue, CPT-schedule and capacity topics are replayable from
