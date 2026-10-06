@@ -108,5 +108,5 @@ func orderWithLineStatuses(allowPartialShipment bool, statuses ...order.LineStat
 			i+1, shared.SKU("SKU-1"), 1, shared.DefaultPathId, false, status, reservationID,
 		))
 	}
-	return order.Rehydrate("ord-1", lines, allowPartialShipment, nil, nil, nil)
+	return order.Rehydrate(order.OrderSnapshot{ID: "ord-1", Lines: lines, AllowPartialShipment: allowPartialShipment})
 }

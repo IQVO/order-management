@@ -96,7 +96,7 @@ func TestFulfillmentClass_IsComputedNotStored_ReflectsCurrentLines(t *testing.T)
 	if err != nil {
 		t.Fatalf("unexpected error building line B: %v", err)
 	}
-	rehydrated := Rehydrate("ORDER-1", []*OrderLine{line, lineB}, true, nil, nil, nil)
+	rehydrated := Rehydrate(OrderSnapshot{ID: "ORDER-1", Lines: []*OrderLine{line, lineB}, AllowPartialShipment: true})
 	if got := rehydrated.FulfillmentClass(); got != ClassMultiLineMulti {
 		t.Fatalf("want ClassMultiLineMulti after rehydrating with a second distinct-SKU line, got %v", got)
 	}
