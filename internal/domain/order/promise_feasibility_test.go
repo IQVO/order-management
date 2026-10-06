@@ -307,9 +307,9 @@ func TestFeasibleBy_UnknownCycleTime_IsNotFeasible(t *testing.T) {
 
 func TestFeasibleBy_NoAllocatedLines_IsNotFeasible(t *testing.T) {
 	now := testTime()
-	o := order.Rehydrate("ord-1", []*order.OrderLine{
+	o := order.Rehydrate(order.OrderSnapshot{ID: "ord-1", Lines: []*order.OrderLine{
 		order.RehydrateOrderLine(1, "SKU-1", 1, "pick", false, order.LinePending, nil),
-	}, true, nil, nil, nil)
+	}, AllowPartialShipment: true})
 
 	policy := feasibleByPolicy(
 		[]order.CPTWindow{{CptId: "sp1-1800", CutoffAt: now.Add(6 * time.Hour), EligiblePathIds: []string{"pick"}}},

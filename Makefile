@@ -37,7 +37,7 @@ help:
 	@echo "  fmt-check     Fail if gofmt -l . is non-empty (the CI-style check)"
 	@echo "  lint          golangci-lint run ./... (pinned $(GOLANGCI_VERSION) in CI)"
 	@echo "  test          go test ./... -race — unit + httptest, no DB needed"
-	@echo "  integration   Run Kafka integration tests in an isolated Testcontainers broker"
+	@echo "  integration   Run Kafka + Postgres integration tests (Docker only; each test boots its own Testcontainers)"
 	@echo "  coverage      CI coverage command + the $(COVERAGE_THRESHOLD)% gate"
 	@echo "  bdd           godog/Gherkin acceptance tests (features/*.feature)"
 	@echo "  arch-test     Architecture fitness tests (internal/architecture/)"
@@ -88,6 +88,9 @@ integration:
 	$(GO) test -tags=integration ./internal/adapters/outbound/kafkacptschedule
 	$(GO) test -tags=integration ./internal/adapters/outbound/kafkapathcapacity
 	$(GO) test -tags=integration ./internal/adapters/inbound/kafka
+	$(GO) test -tags=integration ./internal/adapters/inbound/http
+	$(GO) test -tags=integration ./internal/adapters/outbound/analyticsstore
+	$(GO) test -tags=integration ./cmd/order
 	$(GO) test -tags=integration ./internal/adapters/outbound/postgres
 
 coverage:

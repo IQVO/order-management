@@ -63,7 +63,7 @@ func newAllocatedOrder(t *testing.T, pathsAndQty ...struct {
 			i+1, "SKU-1", pq.qty, pq.path, false, order.LineAllocated, nil,
 		))
 	}
-	return order.Rehydrate("ord-1", lines, true, nil, nil, nil)
+	return order.Rehydrate(order.OrderSnapshot{ID: "ord-1", Lines: lines, AllowPartialShipment: true})
 }
 
 func pq(path shared.PathId, qty int) struct {
@@ -77,9 +77,9 @@ func pq(path shared.PathId, qty int) struct {
 }
 
 func TestPromisePolicy_NoAllocatedLines_ReturnsNotOK(t *testing.T) {
-	o := order.Rehydrate("ord-1", []*order.OrderLine{
+	o := order.Rehydrate(order.OrderSnapshot{ID: "ord-1", Lines: []*order.OrderLine{
 		order.RehydrateOrderLine(1, "SKU-1", 1, "pick", false, order.LinePending, nil),
-	}, true, nil, nil, nil)
+	}, AllowPartialShipment: true})
 
 	policy := order.PromisePolicy{Fallback: order.NewLeadTimePolicy(24*time.Hour, nil)}
 	_, ok := policy.Promise(testTime(), o)

@@ -198,7 +198,12 @@ jobs:
         run: go test ./internal/adapters/inbound/mcp/... -race -run '^TestEval|^TestMCPEvalSuite' -v
 
   # ============================================================
-  # CLASSIFICATION: INTEGRATION TESTING (isolated Testcontainers Kafka)
+  # CLASSIFICATION: INTEGRATION TESTING (isolated Testcontainers Kafka + Postgres)
+  # Every Postgres and Kafka integration test boots its own container via
+  # testcontainers (the runner's Docker daemon): there is no `services:`
+  # container and no DATABASE_URL. An env-gated Postgres test used to skip
+  # silently here (audit 2026-10-05, F1); the arch-test sensor
+  # TestPostgresIntegrationTestsUseTestcontainers now forbids that shape.
   # ============================================================
   integration:
     runs-on: ubuntu-latest
@@ -208,7 +213,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
-      - name: Build, vet, and test Kafka adapters against Testcontainers
+      - name: Build, vet, and test Kafka + Postgres adapters against Testcontainers
         run: |
           set -euo pipefail
           go build -tags=integration ./...
@@ -218,7 +223,10 @@ jobs:
           go test -tags=integration ./internal/adapters/outbound/kafkacptschedule
           go test -tags=integration ./internal/adapters/outbound/kafkapathcapacity
           go test -tags=integration ./internal/adapters/inbound/kafka
-          go test -tags=integration ./internal/adapters/outbound/postgres
+          go test -tags=integration ./internal/adapters/inbound/http
+          go test -tags=integration ./internal/adapters/outbound/analyticsstore
+          go test -tags=integration ./cmd/order
+          go test -tags=integration -v ./internal/adapters/outbound/postgres
 
 
   # ============================================================

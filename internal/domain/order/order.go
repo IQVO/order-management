@@ -98,18 +98,19 @@ type Order struct {
 	// repository's read-modify-write Save can guard its write against a
 	// lost update, exactly like id: the domain layer never reasons
 	// about it in any business rule. A freshly-constructed order (New)
-	// starts at version 1, by convention; RehydrateHeld — the only
-	// constructor a real persistence adapter calls — takes the
-	// persisted value as a parameter. The convenience Rehydrate/
-	// RehydrateWithGroups constructors (used only by tests and by
-	// PromisePolicy's own in-memory scratch computation, never by a
-	// real repository) always pass 1, since nothing that calls them
-	// persists the result.
+	// starts at version 1, by convention; Rehydrate takes the
+	// persisted value through OrderSnapshot.Version.
 	version int
 }
 
 // New constructs an Order in Received status. lines must be non-empty;
 // each line is numbered by its 1-based position.
+//
+// The Order takes its OWN copy of every line: numbering never writes
+// through to the caller's *OrderLine, and the caller's pointers do not
+// alias the aggregate's entities afterwards (all further mutation goes
+// through Order methods, per the aggregate-boundary rule). A nil line is
+// a programming error, as it always was.
 func New(id shared.OrderId, lines []*OrderLine, allowPartialShipment bool) (*Order, error) {
 	if id == "" {
 		return nil, shared.ErrEmptyOrderID
@@ -119,69 +120,70 @@ func New(id shared.OrderId, lines []*OrderLine, allowPartialShipment bool) (*Ord
 	}
 	numbered := make([]*OrderLine, 0, len(lines))
 	for i, l := range lines {
-		l.lineNo = i + 1
-		numbered = append(numbered, l)
+		owned := *l
+		owned.lineNo = i + 1
+		numbered = append(numbered, &owned)
 	}
 	return &Order{id: id, lines: numbered, allowPartialShipment: allowPartialShipment, version: 1}, nil
 }
 
+// OrderSnapshot is the persisted state of an Order, the single input of
+// Rehydrate. Field zero values are the safe defaults a caller that does
+// not care about a field should get:
+//
+//   - PromiseDate / PromiseCptID / PromiseBasis are nil for orders
+//     persisted before ADR 0014, or for a promise never given a CPT
+//     identity (a LeadTime-basis promise leaves PromiseCptID nil;
+//     PromiseBasis is still recorded).
+//   - PromiseGroups (ADR 0014 §3 / ADR 0017) may be nil — an order
+//     persisted before that ADR, or one whose summary fields were set via
+//     the legacy SetPromise path. PromiseGroups() then returns an empty
+//     slice and the summary fields are exactly what was passed in.
+//   - HeldAtIntake is ADR 0020 §1's releaseOnAllocation=false as its
+//     INVERSE, deliberately (see Order.heldAtIntake): the zero value is
+//     an ordinary order that releases on allocation. A row written before
+//     migration 0005 reads back releaseOnAllocation=TRUE (the column's
+//     DEFAULT), i.e. HeldAtIntake=false — pre-ADR orders rehydrate as
+//     un-held, which is what they are.
+//   - RequiredShipBy (ADR 0020 §2) is nil for the overwhelming majority
+//     of orders.
+//   - Version is the optimistic-concurrency version the row was loaded at.
+//     The zero value means "never persisted" and rehydrates as 1, the
+//     same starting version New assigns; every persisted row is >= 1
+//     (the version migration's DEFAULT), so a pre-existing order's first
+//     post-migration Save is guarded against version 1, never a mismatch
+//     it could never have satisfied.
+type OrderSnapshot struct {
+	ID                   shared.OrderId
+	Lines                []*OrderLine
+	AllowPartialShipment bool
+	PromiseDate          *time.Time
+	PromiseCptID         *string
+	PromiseBasis         *PromiseBasis
+	PromiseGroups        []PromiseGroup
+	HeldAtIntake         bool
+	RequiredShipBy       *time.Time
+	Version              int
+}
+
 // Rehydrate rebuilds an Order from persisted state without re-running
-// construction invariants. Only outbound repository adapters call this.
-// promiseCptId/promiseBasis are nil for orders persisted before ADR 0014
-// or for a promise never given a CPT identity (a LeadTime-basis promise
-// leaves promiseCptId nil; promiseBasis is still recorded).
-//
-// Kept with its original 6-argument signature (no promiseGroups
-// parameter) so every existing call site and every existing test that
-// constructs an Order this way keeps compiling and behaving unchanged —
-// see RehydrateWithGroups for the ADR 0014 §3 / ADR 0017 widened
-// constructor a repository adapter that also persists the per-group
-// breakdown should call instead.
-//
-// This constructor always sets version=1: no real repository calls it
-// (see RehydrateHeld's doc comment) — every call site today is a test
-// or PromisePolicy's own in-memory scratch computation, neither of
-// which ever persists the result, so the version value is inert here.
-func Rehydrate(id shared.OrderId, lines []*OrderLine, allowPartialShipment bool, promiseDate *time.Time, promiseCptId *string, promiseBasis *PromiseBasis) *Order {
-	return RehydrateWithGroups(id, lines, allowPartialShipment, promiseDate, promiseCptId, promiseBasis, nil)
-}
-
-// RehydrateWithGroups is Rehydrate plus the full PromiseGroup breakdown
-// (ADR 0014 §3 / ADR 0017). promiseGroups may be nil (an order persisted
-// before this ADR, or one whose promiseDate/promiseCptId/promiseBasis
-// were set via the legacy SetPromise path) — PromiseGroups() then simply
-// returns an empty slice, and the legacy summary fields are exactly what
-// was passed in, untouched.
-//
-// Like Rehydrate, this always sets version=1 (see that constructor's
-// doc comment) — RehydrateHeld is the one a real persistence adapter
-// calls.
-func RehydrateWithGroups(id shared.OrderId, lines []*OrderLine, allowPartialShipment bool, promiseDate *time.Time, promiseCptId *string, promiseBasis *PromiseBasis, promiseGroups []PromiseGroup) *Order {
-	return RehydrateHeld(id, lines, allowPartialShipment, promiseDate, promiseCptId, promiseBasis, promiseGroups, true, 1)
-}
-
-// RehydrateHeld is RehydrateWithGroups plus ADR 0020 §1's
-// releaseOnAllocation intent, and the persisted optimistic-concurrency
-// version (see Order.version's doc comment). Only a repository adapter
-// that actually persists the orders.release_on_allocation and
-// orders.version columns should call it; every other construction path
-// goes through Rehydrate/RehydrateWithGroups, which pass
-// releaseOnAllocation=true and version=1 and therefore keep today's
-// behaviour exactly.
-//
-// A row written before migration 0005 reads back as TRUE (the column's
-// DEFAULT), so pre-ADR orders rehydrate as ordinary un-held orders —
-// which is what they are. A row written before the version-column
-// migration reads back as 1 (that migration's DEFAULT), so a pre-
-// existing order's first post-migration Save is guarded against version
-// 1, never a mismatch it could never have satisfied.
-func RehydrateHeld(id shared.OrderId, lines []*OrderLine, allowPartialShipment bool, promiseDate *time.Time, promiseCptId *string, promiseBasis *PromiseBasis, promiseGroups []PromiseGroup, releaseOnAllocation bool, version int) *Order {
+// construction invariants. It is the ONE persistence entry point: the
+// outbound repository adapter calls it with what it read; tests and
+// PromisePolicy's in-memory scratch computation call it with a partial
+// snapshot (nothing that does persists the result, so the defaulted
+// Version is inert there).
+func Rehydrate(s OrderSnapshot) *Order {
+	version := s.Version
+	if version == 0 {
+		version = 1
+	}
 	return &Order{
-		id: id, lines: lines, allowPartialShipment: allowPartialShipment,
-		promiseDate: promiseDate, promiseCptId: promiseCptId, promiseBasis: promiseBasis,
-		promiseGroups: promiseGroups,
-		heldAtIntake:  !releaseOnAllocation,
-		version:       version,
+		id: s.ID, lines: s.Lines, allowPartialShipment: s.AllowPartialShipment,
+		promiseDate: s.PromiseDate, promiseCptId: s.PromiseCptID, promiseBasis: s.PromiseBasis,
+		promiseGroups:  s.PromiseGroups,
+		heldAtIntake:   s.HeldAtIntake,
+		requiredShipBy: s.RequiredShipBy,
+		version:        version,
 	}
 }
 
@@ -224,11 +226,10 @@ func (o *Order) RequiredShipBy() *time.Time { return o.requiredShipBy }
 
 // SetRequiredShipBy attaches an external deadline (ADR 0020 §2).
 //
-// A mutator rather than a fourth Rehydrate parameter: the constructor
-// chain is already Rehydrate / RehydrateWithGroups / RehydrateHeld, and
-// widening it again would force every existing call site to grow an
-// argument it does not care about. Repositories call this after
-// rehydrating, the same way intake calls Hold().
+// A mutator for intake, which attaches the deadline to a freshly
+// constructed order the same way it calls Hold(). A repository
+// rehydrating a persisted order passes OrderSnapshot.RequiredShipBy
+// instead.
 func (o *Order) SetRequiredShipBy(t time.Time) { o.requiredShipBy = &t }
 
 // Lines returns the order's lines. The slice is a copy, but the

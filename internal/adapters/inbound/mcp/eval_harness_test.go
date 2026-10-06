@@ -112,10 +112,10 @@ func newEvalHarness(t *testing.T) *evalHarness {
 		t.Fatalf("order id: %v", err)
 	}
 	resID := "RES-1"
-	o := order.Rehydrate(orderID, []*order.OrderLine{
+	o := order.Rehydrate(order.OrderSnapshot{ID: orderID, Lines: []*order.OrderLine{
 		order.RehydrateOrderLine(1, "SKU-1", 2, "pick", false, order.LineAllocated, &resID),
 		order.RehydrateOrderLine(2, "SKU-2", 1, "pick", true, order.LineBackordered, nil),
-	}, true, nil, nil, nil)
+	}, AllowPartialShipment: true})
 	if err := h.orders.Save(ctx, o); err != nil {
 		t.Fatalf("seed order: %v", err)
 	}

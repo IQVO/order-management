@@ -43,10 +43,11 @@ type ever appears in the domain layer.
   AllocateOrder/ReleaseOrder were deleted as public types (ADR-0005); the
   shared allocate-then-release logic lives in `allocation.go`.
 - Inbound adapters: `inbound/http/` (chi handlers, DTOs, RFC 7807 error
-  mapping, CORS), `inbound/kafka/` (RepromiseConsumer on
-  `warehouse.fulfillment.events`, ADR-0018; PlannedCapacityConsumer on
-  `warehouse.warehouse-planning.events`, ADR-0031), `inbound/mcp/` (read-only tools
-  `get_order`, `get_promise_health`).
+  mapping, CORS, `Idempotency-Key` middleware, `/readyz`), `inbound/kafka/`
+  (RepromiseConsumer on `warehouse.fulfillment.events`, ADR-0018;
+  PlannedCapacityConsumer on `warehouse.warehouse-planning.events`,
+  ADR-0031; AnalyticsConsumer for `cmd/order-projector`, ADR-0006),
+  `inbound/mcp/` (read-only tools `get_order`, `get_promise_health`).
 - Outbound adapters: `inventorystorage/` (HTTP `POST /reservations`,
   `DELETE /reservations/{id}`), `productclassification/`,
   `kafkacatalog/`+`kafkacptschedule/`+`kafkapathcapacity/` (capability caches,
@@ -61,7 +62,8 @@ type ever appears in the domain layer.
   internal (enforced by arch-go).
 - Migrations: `migrations/` (OLTP) and `migrations/analytics/` (analytics
   store), both golang-migrate SQL.
-- Contracts: `apis/openapi.yaml` (REST: 5 order endpoints + /healthz),
+- Contracts: `apis/openapi.yaml` (REST: 5 order endpoints +
+  `/planned-capacity` + `/healthz`; `/readyz` is served but not declared),
   `apis/asyncapi.yaml` (Kafka, CloudEvents 1.0, ADR-0030).
 
 ## Run locally

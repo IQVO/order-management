@@ -220,15 +220,17 @@ func (r *OrderRepo) FindByID(ctx context.Context, id shared.OrderId) (*order.Ord
 		return nil, err
 	}
 
-	o := order.RehydrateHeld(id, lines, header.allowPartialShipment, header.promiseDate, header.promiseCptId, header.promiseBasis, promiseGroups, header.releaseOnAllocation, header.version)
-	// Set after rehydration rather than as a fourth Rehydrate parameter:
-	// the deadline is optional and most orders have none, so widening the
-	// constructor chain again would cost every call site an argument it
-	// does not care about.
-	if header.requiredShipBy != nil {
-		o.SetRequiredShipBy(*header.requiredShipBy)
-	}
-	return o, nil
+	return order.Rehydrate(order.OrderSnapshot{
+		ID: id, Lines: lines,
+		AllowPartialShipment: header.allowPartialShipment,
+		PromiseDate:          header.promiseDate,
+		PromiseCptID:         header.promiseCptId,
+		PromiseBasis:         header.promiseBasis,
+		PromiseGroups:        promiseGroups,
+		HeldAtIntake:         !header.releaseOnAllocation,
+		RequiredShipBy:       header.requiredShipBy,
+		Version:              header.version,
+	}), nil
 }
 
 // orderHeader holds the orders-table columns FindByID scans, before they

@@ -493,7 +493,10 @@ func TestRehydrateRestoresPersistedState(t *testing.T) {
 
 	cptId := "sp1-1800"
 	basis := order.BasisCapability
-	o := order.Rehydrate("ord-9", lines, true, &promise, &cptId, &basis)
+	o := order.Rehydrate(order.OrderSnapshot{
+		ID: "ord-9", Lines: lines, AllowPartialShipment: true,
+		PromiseDate: &promise, PromiseCptID: &cptId, PromiseBasis: &basis,
+	})
 
 	if o.ID() != "ord-9" || !o.AllowPartialShipment() {
 		t.Fatalf("rehydrated order lost detail: %+v", o)
@@ -510,6 +513,69 @@ func TestRehydrateRestoresPersistedState(t *testing.T) {
 	if o.Status() != order.StatusPartiallyAllocated {
 		t.Fatalf("Status() = %q, want %q", o.Status(), order.StatusPartiallyAllocated)
 	}
+}
+
+// New must not write through to the caller's lines: numbering happens on
+// the aggregate's own copies, so building a second order from the same
+// line values cannot renumber the first (audit 2026-10-05, F5).
+func TestNewDoesNotMutateTheCallersLines(t *testing.T) {
+	l, err := order.NewOrderLine(7, "SKU-1", 1, "pick", false)
+	if err != nil {
+		t.Fatalf("NewOrderLine: %v", err)
+	}
+	o, err := order.New("ord-1", []*order.OrderLine{l}, false)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if l.LineNo() != 7 {
+		t.Fatalf("caller's line renumbered to %d by New, want its own 7", l.LineNo())
+	}
+	if got := o.Lines()[0].LineNo(); got != 1 {
+		t.Fatalf("aggregate line numbered %d, want 1", got)
+	}
+	// And the aggregate's line is its own entity: allocating through the
+	// order does not leak into the caller's pointer.
+	mustAllocate(t, o, 1, "res-1")
+	if l.Status() != order.LinePending || l.ReservationID() != nil {
+		t.Fatalf("caller's line changed by an Order mutation: status=%s reservation=%v", l.Status(), l.ReservationID())
+	}
+}
+
+func TestRehydrateSnapshotDefaultsAndPersistedFields(t *testing.T) {
+	line := order.RehydrateOrderLine(1, "SKU-1", 1, "pick", false, order.LineAllocated, nil)
+	lines := []*order.OrderLine{line}
+
+	t.Run("zero-value fields are the safe defaults", func(t *testing.T) {
+		o := order.Rehydrate(order.OrderSnapshot{ID: "ord-1", Lines: lines})
+		if o.Version() != 1 {
+			t.Errorf("Version() = %d, want 1 for a snapshot with no version", o.Version())
+		}
+		if !o.ReleaseOnAllocation() {
+			t.Error("ReleaseOnAllocation() = false, want true (HeldAtIntake zero value)")
+		}
+		if o.RequiredShipBy() != nil {
+			t.Errorf("RequiredShipBy() = %v, want nil", o.RequiredShipBy())
+		}
+		if o.AllowPartialShipment() {
+			t.Error("AllowPartialShipment() = true, want false")
+		}
+	})
+
+	t.Run("persisted version, hold and deadline round-trip", func(t *testing.T) {
+		deadline := testTime()
+		o := order.Rehydrate(order.OrderSnapshot{
+			ID: "ord-2", Lines: lines, HeldAtIntake: true, Version: 7, RequiredShipBy: &deadline,
+		})
+		if o.Version() != 7 {
+			t.Errorf("Version() = %d, want the persisted 7", o.Version())
+		}
+		if o.ReleaseOnAllocation() {
+			t.Error("ReleaseOnAllocation() = true, want false for HeldAtIntake")
+		}
+		if got := o.RequiredShipBy(); got == nil || !got.Equal(deadline) {
+			t.Errorf("RequiredShipBy() = %v, want %v", got, deadline)
+		}
+	})
 }
 
 func mustAllocate(t *testing.T, o *order.Order, lineNo int, reservationID string) {

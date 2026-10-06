@@ -12,7 +12,7 @@ warehouse-systems: one set of global standards, enforced the same way in every
 repository, while each bounded context owns its own server. It is the MCP
 counterpart to the platform's existing 5-stage quality gate and its ADR
 discipline. `fulfillment-execution` is the reference implementation
-(see [its ADR-0008](https://github.com/claudioed/fulfillment-execution)); the
+(see [its ADR-0008](https://github.com/IQVO/fulfillment-execution)); the
 other six contexts — `inventory-storage`, `wes-work-planning`,
 `workforce-management`, `facility-layout`, `labor-performance`,
 `order-management` — copy it. In `order-management` the adopting decision

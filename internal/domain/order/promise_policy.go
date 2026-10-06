@@ -318,7 +318,7 @@ func (p PromisePolicy) fallbackForLines(now time.Time, o *Order, lines []*OrderL
 	for i, l := range lines {
 		subset[i] = RehydrateOrderLine(l.LineNo(), l.SKU(), l.Quantity(), l.PathID(), l.GiftWrap(), l.Status(), l.ReservationID())
 	}
-	tmp := Rehydrate(o.ID(), subset, o.AllowPartialShipment(), nil, nil, nil)
+	tmp := Rehydrate(OrderSnapshot{ID: o.ID(), Lines: subset, AllowPartialShipment: o.AllowPartialShipment()})
 	d, ok := p.Fallback.PromiseDate(now, tmp)
 	if !ok {
 		return Promise{}, false
