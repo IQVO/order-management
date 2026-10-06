@@ -29,7 +29,7 @@ func NewLogPublisher(logger *slog.Logger) *LogPublisher {
 }
 
 func (p *LogPublisher) Publish(ctx context.Context, event shared.DomainEvent) error {
-	payload, err := json.Marshal(event)
+	payload, err := json.Marshal(logPayloadOf(event))
 	if err != nil {
 		return err
 	}

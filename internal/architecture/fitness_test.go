@@ -452,3 +452,74 @@ func TestPostgresIntegrationDetector(t *testing.T) {
 		})
 	}
 }
+
+// serializationTagRE matches a `json:"` / `db:"` struct tag.
+var serializationTagRE = regexp.MustCompile("`[^`]*\\b(json|db):\"")
+
+// domainTagWhitelist lists domain files allowed to carry serialisation
+// tags, each with the reason. Empty: wire/persistence shape is an adapter
+// concern, so the domain has no legitimate exception today.
+var domainTagWhitelist = map[string]string{}
+
+// domainTagViolations returns one message per struct tag in content,
+// skipping comment lines.
+func domainTagViolations(path, content string) []string {
+	var out []string
+	for i, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue
+		}
+		if serializationTagRE.MatchString(line) {
+			out = append(out, fmt.Sprintf("%s:%d carries a serialisation struct tag (%s).", path, i+1, strings.TrimSpace(line)))
+		}
+	}
+	return out
+}
+
+// TestDomainHasNoSerializationTags: JSON/DB shape is an adapter concern, so
+// non-test files under internal/domain/** carry no `json:"` / `db:"` tags.
+// Map domain types to adapter-owned DTOs instead (see
+// internal/adapters/outbound/events/log_payload.go).
+func TestDomainHasNoSerializationTags(t *testing.T) {
+	for _, path := range goFilesUnder(t, "../domain", false) {
+		if _, ok := domainTagWhitelist[filepath.ToSlash(path)]; ok {
+			continue
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, v := range domainTagViolations(path, string(src)) {
+			t.Errorf("%s", archViolation("contents", "domain types carry no json/db struct tags", v+
+				" FIX: define an adapter-owned DTO with the tags and map the domain type to it in the adapter."))
+		}
+	}
+}
+
+func TestDomainTagSensorFailsOnBadFixtures(t *testing.T) {
+	const badJSON = "type E struct {\n	Name string `json:\"eventName\"`\n}\n"
+	const badDB = "type R struct {\n	ID string `db:\"id\"`\n}\n"
+	const badMixed = "type R struct {\n	ID string `validate:\"x\" json:\"id,omitempty\"`\n}\n"
+	const good = "type E struct {\n	Name string\n}\n"
+	const commentOnly = "// Name used to be `json:\"eventName\"` on the wire.\ntype E struct{ Name string }\n"
+
+	cases := []struct {
+		name    string
+		content string
+		want    int
+	}{
+		{"json tag is flagged", badJSON, 1},
+		{"db tag is flagged", badDB, 1},
+		{"json tag after another tag is flagged", badMixed, 1},
+		{"untagged struct is clean", good, 0},
+		{"comment mentions are ignored", commentOnly, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := domainTagViolations("fixture.go", tc.content)
+			if len(got) != tc.want {
+				t.Fatalf("want %d violation(s), got %d: %v", tc.want, len(got), got)
+			}
+		})
+	}
+}
