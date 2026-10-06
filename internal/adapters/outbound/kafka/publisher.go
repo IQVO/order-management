@@ -2,11 +2,13 @@
 // warehouse-systems Kafka broker. It implements ports.EventPublisher, so it
 // drops in wherever the log or Postgres outbox publisher is used today.
 //
-// OrderAllocated, OrderPartiallyAllocated, and — since ADR 0014 §5 / ADR
-// 0018 — OrderRepromised are the published integration contract (see
-// CLAUDE.md's Kafka integration section); every other domain event is a
-// local concern and is not forwarded here — mirroring inventory-storage's
-// own precedent of forwarding only a subset of its several domain events.
+// OrderAllocated, OrderPartiallyAllocated, — since ADR 0014 §5 / ADR
+// 0018 — OrderRepromised, and — since ADR 0035 — the additive, PII-free
+// SiteSkuDemandChanged projection are the published integration contract
+// (see CLAUDE.md's Kafka integration section); every other domain event
+// is a local concern and is not forwarded here — mirroring
+// inventory-storage's own precedent of forwarding only a subset of its
+// several domain events.
 //
 // Since the transactional outbox (see the ADR registered alongside
 // postgres.OutboxPublisher), Publish's work is split into Encode (build
@@ -18,6 +20,7 @@ package kafka
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -142,8 +145,23 @@ type repromisedData struct {
 	Reason   string `json:"reason"`
 }
 
-// Publisher publishes OrderAllocated and OrderPartiallyAllocated domain
-// events as integration events on Topic.
+// siteSkuDemandData is the PII-free snapshot for one source order line's
+// demand at a static configured site. It deliberately does not reuse the
+// frozen allocationData shape shared with wes-work-planning.
+type siteSkuDemandData struct {
+	SourceOrderID     string `json:"source_order_id"`
+	LineNo            int    `json:"line_no"`
+	SiteID            string `json:"site_id"`
+	SKU               string `json:"sku"`
+	DemandedUnits     int    `json:"demanded_units"`
+	DueAt             string `json:"due_at"`
+	State             string `json:"state"`
+	AssignmentVersion string `json:"assignment_version"`
+}
+
+// Publisher publishes the OrderAllocated, OrderPartiallyAllocated,
+// OrderRepromised and SiteSkuDemandChanged domain events as integration
+// events on Topic.
 type Publisher struct {
 	writer Writer
 }
@@ -256,6 +274,14 @@ func encodeEvent(event shared.DomainEvent) (out encodedEvent, ok bool, err error
 			CptIdNew: e.CptIdNew,
 			Reason:   e.Reason,
 		}
+	case shared.SiteSkuDemandChanged:
+		lineSubject := fmt.Sprintf("%s/line/%d", e.SourceOrderID, e.LineNo)
+		orderID = shared.OrderId(lineSubject)
+		data = siteSkuDemandData{
+			SourceOrderID: e.SourceOrderID.String(), LineNo: e.LineNo, SiteID: e.SiteID,
+			SKU: e.SKU.String(), DemandedUnits: e.DemandedUnits, DueAt: e.DueAt.UTC().Format(time.RFC3339),
+			State: string(e.State), AssignmentVersion: e.AssignmentVersion,
+		}
 	default:
 		return encodedEvent{}, false, nil
 	}
@@ -263,7 +289,7 @@ func encodeEvent(event shared.DomainEvent) (out encodedEvent, ok bool, err error
 	id := uuid.NewString()
 	value, err := cloudevents.New(cloudevents.Spec{
 		ID:        id,
-		Entity:    entityOrder,
+		Entity:    eventEntity(event),
 		EventName: event.EventName(),
 		Subject:   orderID.String(),
 		Time:      event.OccurredAt(),
@@ -276,10 +302,17 @@ func encodeEvent(event shared.DomainEvent) (out encodedEvent, ok bool, err error
 	}
 	return encodedEvent{
 		id:    id,
-		ceTyp: cloudevents.Type(entityOrder, event.EventName()),
+		ceTyp: cloudevents.Type(eventEntity(event), event.EventName()),
 		key:   []byte(orderID.String()),
 		value: value,
 	}, true, nil
+}
+
+func eventEntity(event shared.DomainEvent) string {
+	if _, ok := event.(shared.SiteSkuDemandChanged); ok {
+		return "siteskudemand"
+	}
+	return entityOrder
 }
 
 // Encode implements Encoder: it builds the wire-ready integration message

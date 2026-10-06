@@ -31,12 +31,13 @@ import (
 // propagating a hard failure to its own caller exactly as it did
 // pre-redesign, matching its existing error-return behaviour.
 type RetryAllocation struct {
-	Orders     ports.OrderRepo
-	Inventory  ports.InventoryReservationClient
-	Events     ports.EventPublisher
-	Clock      ports.Clock
-	Promise    order.PromisePolicy
-	UnitOfWork ports.UnitOfWork
+	Orders           ports.OrderRepo
+	Inventory        ports.InventoryReservationClient
+	Events           ports.EventPublisher
+	Clock            ports.Clock
+	Promise          order.PromisePolicy
+	DemandProjection DemandProjectionPolicy
+	UnitOfWork       ports.UnitOfWork
 }
 
 func (uc *RetryAllocation) Execute(ctx context.Context, id shared.OrderId) (*order.Order, error) {
@@ -53,7 +54,7 @@ func (uc *RetryAllocation) Execute(ctx context.Context, id shared.OrderId) (*ord
 		return nil, ErrNoBackorderedLines
 	}
 
-	deps := allocationDeps{Orders: uc.Orders, Inventory: uc.Inventory, Events: uc.Events, Clock: uc.Clock, Promise: uc.Promise, UnitOfWork: uc.UnitOfWork}
+	deps := allocationDeps{Orders: uc.Orders, Inventory: uc.Inventory, Events: uc.Events, Clock: uc.Clock, Promise: uc.Promise, DemandProjection: uc.DemandProjection, UnitOfWork: uc.UnitOfWork}
 	if _, err := allocateAndRelease(ctx, deps, o, backordered, true, o.ReleaseOnAllocation()); err != nil {
 		return nil, err
 	}

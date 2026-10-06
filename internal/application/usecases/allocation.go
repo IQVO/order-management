@@ -253,12 +253,13 @@ func publishReleaseFacts(
 // configuration — atomically() treats that identically to every other
 // use case in this package.
 type allocationDeps struct {
-	Orders     ports.OrderRepo
-	Inventory  ports.InventoryReservationClient
-	Events     ports.EventPublisher
-	Clock      ports.Clock
-	Promise    order.PromisePolicy
-	UnitOfWork ports.UnitOfWork
+	Orders           ports.OrderRepo
+	Inventory        ports.InventoryReservationClient
+	Events           ports.EventPublisher
+	Clock            ports.Clock
+	Promise          order.PromisePolicy
+	DemandProjection DemandProjectionPolicy
+	UnitOfWork       ports.UnitOfWork
 }
 
 // setPromiseDate applies deps.Promise (PromisePolicy, ADR 0014/ADR 0017)
@@ -326,6 +327,14 @@ func allocatedLineNos(o *order.Order) []int {
 		}
 	}
 	return out
+}
+
+// publishActiveDemand emits an ACTIVE projection only for lines allocated in
+// the current pass, each with its OWN promise-group cutoff as due_at. It
+// runs after the aggregate Save but inside the same UnitOfWork, so the
+// order mutation and its outbox rows commit together.
+func publishActiveDemand(ctx context.Context, deps allocationDeps, o *order.Order, lines []*order.OrderLine) error {
+	return deps.DemandProjection.publishForGroups(ctx, deps.Events, deps.Clock.Now(), o, lines, shared.SiteSkuDemandActive)
 }
 
 // promiseGroupByLine indexes o.PromiseGroups() (ADR 0014 §3 / ADR 0017)
@@ -433,6 +442,7 @@ func allocateAndRelease(
 		}
 
 		deps.setPromiseDate(o)
+		newlyAllocated := linesWithStatus(lines, order.LineAllocated)
 
 		// ADR 0020 §1: when the caller held the order at intake, stop after
 		// allocation. Lines stay Allocated, inventory reservations genuinely
@@ -445,7 +455,7 @@ func allocateAndRelease(
 		// the allocation genuinely happened, and suppressing the event would
 		// hide a real state change from every other context.
 		if !releaseOnAllocation {
-			if err := deps.Orders.Save(ctx, o); err != nil {
+			if err := saveAndProjectDemand(ctx, deps, o, newlyAllocated); err != nil {
 				return err
 			}
 			return publishOrderAllocationOutcome(ctx, deps.Events, deps.Clock, o, outcome, nil)
@@ -469,7 +479,7 @@ func allocateAndRelease(
 			return relErr
 		}
 
-		if err := deps.Orders.Save(ctx, o); err != nil {
+		if err := saveAndProjectDemand(ctx, deps, o, newlyAllocated); err != nil {
 			return err
 		}
 		return publishReleasePassEvents(ctx, deps, o, outcome, released)
@@ -481,6 +491,29 @@ func allocateAndRelease(
 		return outcome, reportErr
 	}
 	return outcome, nil
+}
+
+// saveAndProjectDemand persists o and then emits the ACTIVE demand
+// projection for this pass's newly-allocated lines — the two steps every
+// allocateAndRelease exit path performs together, inside the caller's
+// UnitOfWork so the aggregate write and the outbox rows commit atomically.
+func saveAndProjectDemand(ctx context.Context, deps allocationDeps, o *order.Order, newlyAllocated []*order.OrderLine) error {
+	if err := deps.Orders.Save(ctx, o); err != nil {
+		return err
+	}
+	return publishActiveDemand(ctx, deps, o, newlyAllocated)
+}
+
+// linesWithStatus filters lines to those currently in status — the
+// allocation-pass slice a projection or salvage path reasons about.
+func linesWithStatus(lines []*order.OrderLine, status order.LineStatus) []*order.OrderLine {
+	out := make([]*order.OrderLine, 0, len(lines))
+	for _, line := range lines {
+		if line.Status() == status {
+			out = append(out, line)
+		}
+	}
+	return out
 }
 
 // salvageAllocationFailure persists the partial allocation that genuinely
@@ -496,6 +529,14 @@ func salvageAllocationFailure(ctx context.Context, deps allocationDeps, o *order
 	deps.setPromiseDate(o)
 	if saveErr := deps.Orders.Save(ctx, o); saveErr != nil {
 		return errors.Join(allocErr, saveErr)
+	}
+	// The genuinely-allocated lines carry site demand exactly as a clean
+	// pass would; suppressing the projection here would hide real
+	// reservations from the site. Joined like every other best-effort
+	// step below so errors.Is(err, allocErr) still holds.
+	newlyAllocated := linesWithStatus(o.Lines(), order.LineAllocated)
+	if projErr := publishActiveDemand(ctx, deps, o, newlyAllocated); projErr != nil {
+		return errors.Join(allocErr, projErr)
 	}
 	// Best-effort visibility: a failure publishing this event must never
 	// mask or replace allocErr, the real failure — it is joined in

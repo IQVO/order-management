@@ -50,8 +50,14 @@ type envelope struct {
 }
 
 // typeOf is the full CloudEvents type this service publishes for name.
+// SiteSkuDemandChanged is the one event raised outside the Order entity:
+// its entity segment is "siteskudemand" (see publisher.go's eventEntity).
 func typeOf(name string) string {
-	return "com.warehouse.wes.order-management.order." + name
+	entity := "order"
+	if name == "SiteSkuDemandChanged" {
+		entity = "siteskudemand"
+	}
+	return "com.warehouse.wes.order-management." + entity + "." + name
 }
 
 type releasedLineData struct {
@@ -668,5 +674,50 @@ func assertPerLinePromiseDecode(t *testing.T, data allocationData, earlyCutoff t
 	}
 	if data.Lines[2].PromiseCptId != "" || data.Lines[2].PromiseBasis != "" || data.Lines[2].PromiseCutoffAt != "" {
 		t.Errorf("data.Lines[2] = %+v, want every promise field empty (no group)", data.Lines[2])
+	}
+}
+
+func TestPublisher_SiteSkuDemandChanged_UsesLineScopedCloudEventAndKey(t *testing.T) {
+	writer := &fakeWriter{}
+	pub := kafka.NewPublisher(writer)
+	dueAt := time.Date(2026, 10, 8, 18, 0, 0, 0, time.UTC)
+	event := shared.NewSiteSkuDemandChanged(
+		time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC),
+		"ord-42", 3, "SIM1", "SKU-42", 7, dueAt, shared.SiteSkuDemandActive, "static-site-v1",
+	)
+
+	msg := publishOne(t, writer, pub, event)
+	env := decodeEnvelope(t, msg)
+	if env.Source != "/warehouse/order-management" {
+		t.Fatalf("source = %q", env.Source)
+	}
+	if env.Type != "com.warehouse.wes.order-management.siteskudemand.SiteSkuDemandChanged" {
+		t.Fatalf("type = %q", env.Type)
+	}
+	if env.DataSchema != "urn:warehouse:order-management:events:SiteSkuDemandChanged:v1" {
+		t.Fatalf("dataschema = %q", env.DataSchema)
+	}
+	if env.Subject != "ord-42/line/3" {
+		t.Fatalf("subject = %q", env.Subject)
+	}
+	if string(msg.Key) != env.Subject {
+		t.Fatalf("key = %q, want %q", msg.Key, env.Subject)
+	}
+
+	var data struct {
+		SourceOrderID     string `json:"source_order_id"`
+		LineNo            int    `json:"line_no"`
+		SiteID            string `json:"site_id"`
+		SKU               string `json:"sku"`
+		DemandedUnits     int    `json:"demanded_units"`
+		DueAt             string `json:"due_at"`
+		State             string `json:"state"`
+		AssignmentVersion string `json:"assignment_version"`
+	}
+	if err := json.Unmarshal(env.Data, &data); err != nil {
+		t.Fatalf("unmarshal demand data: %v", err)
+	}
+	if data.SourceOrderID != "ord-42" || data.LineNo != 3 || data.SiteID != "SIM1" || data.SKU != "SKU-42" || data.DemandedUnits != 7 || data.DueAt != dueAt.Format(time.RFC3339) || data.State != "ACTIVE" || data.AssignmentVersion != "static-site-v1" {
+		t.Fatalf("data = %+v", data)
 	}
 }

@@ -82,6 +82,13 @@ spec:
               value: {{ .Values.plannedCapacity.siteId | quote }}
             {{- end }}
             {{- end }}
+            {{- if .Values.demandProjection.siteId }}
+            # ADR 0035: static demand-site scope for the additive
+            # SiteSkuDemandChanged projection. Empty (the default)
+            # renders nothing and the projection stays off.
+            - name: DEMAND_PROJECTION_SITE_ID
+              value: {{ .Values.demandProjection.siteId | quote }}
+            {{- end }}
             - name: INVENTORY_STORAGE_MODE
               value: {{ .Values.inventoryStorage.mode | quote }}
             {{- if .Values.inventoryStorage.baseUrl }}

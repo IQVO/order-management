@@ -20,10 +20,10 @@ import (
 
 // newRepromiseOrder builds the use case behind the RepromiseOrder
 // consumer (ADR 0014 §5 / ADR 0018).
-func newRepromiseOrder(orders ports.OrderRepo, publisher ports.EventPublisher, clock memory.SystemClock, promise order.PromisePolicy, repromiseProcessed ports.RepromiseProcessedEvents, uow ports.UnitOfWork, logger *slog.Logger) *usecases.RepromiseOrder {
+func newRepromiseOrder(orders ports.OrderRepo, publisher ports.EventPublisher, clock memory.SystemClock, promise order.PromisePolicy, repromiseProcessed ports.RepromiseProcessedEvents, uow ports.UnitOfWork, logger *slog.Logger, demand usecases.DemandProjectionPolicy) *usecases.RepromiseOrder {
 	return &usecases.RepromiseOrder{
 		Orders: orders, Promise: promise, Events: publisher, Clock: clock,
-		Processed: repromiseProcessed, Logger: logger, UnitOfWork: uow,
+		Processed: repromiseProcessed, Logger: logger, DemandProjection: demand, UnitOfWork: uow,
 	}
 }
 

@@ -7,7 +7,7 @@ description: Every event order-management publishes and consumes — full CloudE
 
 # Domain Events
 
-This context declares **ten** past-tense domain events in
+This context declares **eleven** past-tense domain events in
 `internal/domain/shared/events.go` and consumes **ten** CloudEvents types
 from four sibling contexts. Every Kafka message, in and out, is a
 CloudEvents 1.0 event in **structured** content mode
@@ -26,6 +26,11 @@ parsed only by `internal/adapters/kafka/cloudevents`:
 - Kafka key = the order id on both outbound topics, with the `Hash`
   balancer, so one order's events stay on one partition
   ([ADR 0027](/docs/adr/0027-kafka-integration-publisher-partition-key)).
+  The one exception is `SiteSkuDemandChanged`
+  ([ADR 0035](/docs/adr/0035-site-sku-demand-projection-event)): its
+  subject and key are the line-scoped
+  `<source_order_id>/line/<line_no>`, because the LINE is that stream's
+  ordering unit.
 
 ## How events leave the service
 
@@ -38,9 +43,10 @@ parsed only by `internal/adapters/kafka/cloudevents`:
 | `kafka` without `DATABASE_URL` | `kafka.FanOutPublisher` | written directly to both topics |
 
 Two encoders decide what goes where: `kafka.Publisher` (integration topic)
-accepts only `OrderAllocated`, `OrderPartiallyAllocated` and
-`OrderRepromised`; `kafka.AnalyticsPublisher` (analytics topic) accepts all
-ten.
+accepts only `OrderAllocated`, `OrderPartiallyAllocated`,
+`OrderRepromised` and `SiteSkuDemandChanged`; `kafka.AnalyticsPublisher`
+(analytics topic) accepts all ten Order* events (the demand projection is
+integration-only).
 
 ## Published events
 
@@ -56,6 +62,7 @@ ten.
 | OrderRepromised | `com.warehouse.wes.order-management.order.OrderRepromised` | integration + analytics | RepromiseOrder | order-projector; no integration consumer known from this repo |
 | OrderLineReleased | `com.warehouse.wes.order-management.order.OrderLineReleased` | analytics | allocation pass, once per line released in that pass | order-projector |
 | OrderReleased | `com.warehouse.wes.order-management.order.OrderReleased` | analytics | allocation pass, when that pass leaves every line `Released` | order-projector |
+| SiteSkuDemandChanged | `com.warehouse.wes.order-management.siteskudemand.SiteSkuDemandChanged` | integration | allocation pass (intake/retry), RepromiseOrder's moved group, CancelOrder — only while `DEMAND_PROJECTION_SITE_ID` is set ([ADR 0035](/docs/adr/0035-site-sku-demand-projection-event)) | site-level planning consumers (none in this fleet yet) |
 
 Topics: integration = `warehouse.order-management.events`, analytics =
 `warehouse.order-management.analytics`. "Allocation pass" is the shared
@@ -108,6 +115,17 @@ have exactly the fields above.
 `OrderRepromised` (`repromisedData`): `order_id`, `cpt_id_old` and
 `cpt_id_new` (each omitted when that side is a `LeadTime` promise), and
 `reason` (`TaskCPTMissed` or `PackageManifested`).
+
+`SiteSkuDemandChanged` ([ADR 0035](/docs/adr/0035-site-sku-demand-projection-event),
+`siteSkuDemandData`): `source_order_id`, `line_no`, `site_id`, `sku`,
+`demanded_units`, `due_at` (RFC 3339 — the line's own promise-group
+cutoff where one is recorded, else the order-level promise date),
+`state` (`ACTIVE` or `REMOVED`), and `assignment_version`
+(`static-site-v1`). PII-free by construction; `subject`/Kafka key =
+`<source_order_id>/line/<line_no>`. Emitted in the same
+order-save/outbox transaction as the allocation, re-promise, or
+cancellation that produced the line state, and only while
+`DEMAND_PROJECTION_SITE_ID` is configured.
 
 wes-work-planning never receives a work-unit id: it rebuilds
 `{order_id}-line-{line_no}` itself, and this repo's `usecases.WorkUnitID`
@@ -189,24 +207,30 @@ flowchart LR
   AR --> E6["OrderAllocationPartiallyFailed"]
   AR --> E7["OrderLineReleased"]
   AR --> E10["OrderReleased"]
+  AR --> E11["SiteSkuDemandChanged (ACTIVE)"]
   CO["CancelOrder"] --> E8["OrderCancelled"]
+  CO --> E12["SiteSkuDemandChanged (REMOVED)"]
   RP["RepromiseOrder"] --> E9["OrderRepromised"]
+  RP --> E13["SiteSkuDemandChanged (ACTIVE, fresh cutoff)"]
 
   E1 & E2 & E3 & E4 & E5 & E6 & E7 & E8 & E9 & E10 --> AN["warehouse.order-management.analytics"]
   E4 & E5 & E9 --> INT["warehouse.order-management.events"]
+  E11 & E12 & E13 --> INT
   INT --> WP["wes-work-planning"]
   AN --> PJ["cmd/order-projector"]
 
   classDef ev fill:#f6a04d,stroke:#9a5b1c,color:#1f1300;
   classDef topic fill:#38bdf8,stroke:#0369a1,color:#0f172a;
-  class E1,E2,E3,E4,E5,E6,E7,E8,E9,E10 ev;
+  class E1,E2,E3,E4,E5,E6,E7,E8,E9,E10,E11,E12,E13 ev;
   class AN,INT topic;
 ```
 
 Source: `internal/application/usecases/*.go`,
 `internal/adapters/outbound/kafka/publisher.go`,
 `analytics_publisher.go`. Omits: the outbox hop (diagram 9 on
-[Sequence Diagrams](./sequence-diagrams.md)).
+[Sequence Diagrams](./sequence-diagrams.md)). The `SiteSkuDemandChanged` emissions are
+conditional on `DEMAND_PROJECTION_SITE_ID`
+([ADR 0035](/docs/adr/0035-site-sku-demand-projection-event)).
 
 ## Naming and payload shape
 

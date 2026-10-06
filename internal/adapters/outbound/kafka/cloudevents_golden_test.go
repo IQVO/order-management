@@ -90,6 +90,19 @@ func TestPublisher_GoldenCloudEvents(t *testing.T) {
 				"dataschema":"urn:warehouse:order-management:events:OrderRepromised:v1",
 				"data":{"order_id":"ord-3","cpt_id_old":"sp1-1200","cpt_id_new":"sp1-1800","reason":"TaskCPTMissed"}}`,
 		},
+		{
+			name: "SiteSkuDemandChanged",
+			event: shared.NewSiteSkuDemandChanged(
+				goldenTime, "ord-4", 3, "SIM1", "SKU-42", 7,
+				time.Date(2026, 10, 1, 18, 0, 0, 0, time.UTC), shared.SiteSkuDemandActive, "static-site-v1",
+			),
+			want: `{"specversion":"1.0","id":"<id>","source":"/warehouse/order-management",
+				"type":"com.warehouse.wes.order-management.siteskudemand.SiteSkuDemandChanged","subject":"ord-4/line/3",
+				"time":"2026-09-30T12:00:00Z","datacontenttype":"application/json",
+				"dataschema":"urn:warehouse:order-management:events:SiteSkuDemandChanged:v1",
+				"data":{"source_order_id":"ord-4","line_no":3,"site_id":"SIM1","sku":"SKU-42",
+				"demanded_units":7,"due_at":"2026-10-01T18:00:00Z","state":"ACTIVE","assignment_version":"static-site-v1"}}`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name+"/publish", func(t *testing.T) {

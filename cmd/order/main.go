@@ -82,7 +82,7 @@ func run() error {
 	promise := buildPromisePolicy(catalogue, cptSchedule, capacity, logger)
 
 	clock := memory.SystemClock{}
-	server := buildInboundServer(orders, publisher, clock, promise, lookups.inventory, lookups.classification, catalogue, orderMetrics, uow, dbPool, readiness)
+	server := buildInboundServer(orders, publisher, clock, promise, lookups.inventory, lookups.classification, catalogue, orderMetrics, uow, dbPool, readiness, logger)
 
 	// ADR 0031 planned capacity: a nil value (consumer-group env unset)
 	// leaves everything below exactly as before.
@@ -93,7 +93,7 @@ func run() error {
 
 	repromiseConsumerCtx, cancelRepromiseConsumer := context.WithCancel(context.Background())
 	defer cancelRepromiseConsumer()
-	repromiseOrder := newRepromiseOrder(orders, publisher, clock, promise, repromiseProcessed, uow, logger)
+	repromiseOrder := newRepromiseOrder(orders, publisher, clock, promise, repromiseProcessed, uow, logger, buildDemandProjection(logger))
 	repromiseConsumer := newRepromiseConsumer(repromiseOrder, logger)
 
 	httpServer := buildHTTPServer(server, serviceName, logger)

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	kafkaadapter "github.com/claudioed/order-management/internal/adapters/outbound/kafka"
+	"github.com/claudioed/order-management/internal/application/usecases"
 	"github.com/claudioed/order-management/internal/domain/shared"
 )
 
@@ -107,4 +109,26 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// demandProjectionSiteEnv selects the static site every order line's
+// demand projects to (the ADR 0035 Phase-1 seam). Unset disables the
+// projection entirely — no SiteSkuDemandChanged is ever emitted,
+// byte-identical to pre-projection behaviour.
+const demandProjectionSiteEnv = "DEMAND_PROJECTION_SITE_ID"
+
+// buildDemandProjection resolves the versioned static demand-site scope
+// from the environment. The zero value it returns when
+// DEMAND_PROJECTION_SITE_ID is unset leaves the additive projection
+// disabled everywhere it is threaded through.
+func buildDemandProjection(logger *slog.Logger) usecases.DemandProjectionPolicy {
+	site := os.Getenv(demandProjectionSiteEnv)
+	if site == "" {
+		logger.Info("site/SKU demand projection disabled",
+			"hint", "set "+demandProjectionSiteEnv+" to emit SiteSkuDemandChanged on "+kafkaadapter.Topic)
+		return usecases.DemandProjectionPolicy{}
+	}
+	logger.Info("site/SKU demand projection enabled",
+		"site_id", site, "assignment_version", usecases.StaticDemandAssignmentVersion)
+	return usecases.DemandProjectionPolicy{SiteID: site, AssignmentVersion: usecases.StaticDemandAssignmentVersion}
 }
