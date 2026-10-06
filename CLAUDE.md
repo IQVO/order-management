@@ -2,9 +2,9 @@
 
 Generic/Supporting bounded context: order intake, per-line stock allocation,
 a capability-derived delivery promise, and choreographed release — the
-upstream Open Host Service for the `warehouse-systems` fleet. Owns **Order**
-and **OrderLine** as first-class aggregates (previously an unowned string
-reinvented by three other services). Study project, not a production system,
+upstream Open Host Service for the `warehouse-systems` fleet. Owns the
+**Order** aggregate (with its **OrderLine** entity) as a first-class concept
+(previously an unowned string reinvented by three other services). Study project, not a production system,
 not affiliated with any real-world company.
 
 Design source of truth: `/Users/claudioed/warehouse-systems/.hermes/plans/2026-08-25_023800-order-management.md`
