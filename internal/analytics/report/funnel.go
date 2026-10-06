@@ -83,6 +83,13 @@ type Row struct {
 	// percentage itself, mirroring this read model's existing convention of
 	// exposing raw counts rather than precomputed rates.
 	PromiseBasisLeadTime int
+	// PromiseBasisNetwork is the same count for basis "Network" (ADR 0020:
+	// a promise DICTATED by an external party's deadline rather than chosen
+	// by us — order.BasisNetwork). It is its own bucket because ADR 0019's
+	// KPIs measure how well OUR chosen promises track reality, and mixing
+	// in promises we never chose would corrupt that signal. Capability +
+	// LeadTime + Network is the complete promise-basis distribution.
+	PromiseBasisNetwork int
 	// OrdersRepromised is the number of OrderRepromised events in this
 	// bucket. UNLIKE every other counter on this row, it carries NO path_id
 	// dimension: OrderRepromised (ADR 0018) does not carry a process path,

@@ -58,6 +58,22 @@ const sidebar: SidebarsConfig = {
     },
     {
       type: "category",
+      label: "PlannedCapacity",
+      link: {
+        type: "doc",
+        id: "api-reference/rest/planned-capacity",
+      },
+      items: [
+        {
+          type: "doc",
+          id: "api-reference/rest/get-planned-capacity",
+          label: "List a site's planned capacity windows",
+          className: "api-method get",
+        },
+      ],
+    },
+    {
+      type: "category",
       label: "Health",
       link: {
         type: "doc",

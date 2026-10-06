@@ -37,7 +37,7 @@ help:
 	@echo "  fmt-check     Fail if gofmt -l . is non-empty (the CI-style check)"
 	@echo "  lint          golangci-lint run ./... (pinned $(GOLANGCI_VERSION) in CI)"
 	@echo "  test          go test ./... -race — unit + httptest, no DB needed"
-	@echo "  integration   Run Kafka integration tests in an isolated Testcontainers broker"
+	@echo "  integration   Run Kafka + Postgres integration tests (Docker only; each test boots its own Testcontainers)"
 	@echo "  coverage      CI coverage command + the $(COVERAGE_THRESHOLD)% gate"
 	@echo "  bdd           godog/Gherkin acceptance tests (features/*.feature)"
 	@echo "  arch-test     Architecture fitness tests (internal/architecture/)"
@@ -88,6 +88,10 @@ integration:
 	$(GO) test -tags=integration ./internal/adapters/outbound/kafkacptschedule
 	$(GO) test -tags=integration ./internal/adapters/outbound/kafkapathcapacity
 	$(GO) test -tags=integration ./internal/adapters/inbound/kafka
+	$(GO) test -tags=integration ./internal/adapters/inbound/http
+	$(GO) test -tags=integration ./internal/adapters/outbound/analyticsstore
+	$(GO) test -tags=integration ./cmd/order
+	$(GO) test -tags=integration ./internal/adapters/outbound/postgres
 
 coverage:
 	$(GO) test ./... -race -coverprofile=$(COVERAGE_OUT) -coverpkg=$(COVERAGE_PKGS)
@@ -142,3 +146,17 @@ check: fmt-check vet build lint test
 
 # The fuller gate a human runs before pushing.
 check-all: check coverage arch-test bdd
+
+# --- agent harness (harness-template v3) -----------------------------------
+.PHONY: check-fast guide-lint harness-test
+# Fast local gate used by the agent Stop hook: format, vet, fitness tests, and the tests of
+# the packages changed vs HEAD. The full gate stays `make check` / `make check-all`.
+check-fast: fmt-check vet arch-test
+	@pkgs="$$(python3 scripts/harness/hook.py changed-pkgs)"; \
+	if [ -n "$$pkgs" ]; then go test $$pkgs; else echo "check-fast: no changed Go packages"; fi
+
+guide-lint: ## lint agent guides: skills load, references resolve, context budget
+	python3 scripts/harness/guide_lint.py
+
+harness-test: ## unit-test the agent hooks (pre/post/stop)
+	python3 scripts/harness/test_hook.py

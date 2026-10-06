@@ -38,6 +38,14 @@ lifecycle at OrderLine granularity.
 
 Each metric counts events per `(path_id, hour_bucket)`.
 
+:::note[ordersReleased and linesReleased stay at zero today]
+The projector handles `OrderReleased` and `OrderLineReleased`, but no use
+case in `internal/application/usecases` raises either event: release is
+announced only through `OrderAllocated` / `OrderPartiallyAllocated` (see
+[Domain Events](/docs/ddd/domain-events)). Until a use case publishes
+them, these two columns are always `0`.
+:::
+
 ### Promise KPIs (ADR 0019)
 
 [ADR 0019](/docs/adr/0019-promise-kpis-on-order-funnel) adds promise-quality
@@ -47,21 +55,27 @@ columns to the same rows:
 | --------------------------- | ---------------------------------------------- | ------- |
 | `promiseBasisCapability`    | `OrderAllocated` / `OrderPartiallyAllocated`   | Allocations whose promise basis was `Capability`. |
 | `promiseBasisLeadTime`      | `OrderAllocated` / `OrderPartiallyAllocated`   | Allocations whose promise basis was the `LeadTime` fallback. |
+| `promiseBasisNetwork`       | `OrderAllocated` / `OrderPartiallyAllocated`   | Allocations whose promise basis was `Network` — the date was dictated by an external deadline (ADR 0020), not chosen by this service. |
 | `ordersSplitShipment`       | `OrderAllocated` / `OrderPartiallyAllocated`   | Allocations whose order had more than one promise group (ADR 0017). |
-| `promiseToCutoffGapSeconds` | `OrderAllocated` / `OrderPartiallyAllocated`   | Mean of (cutoff − allocation time) over Capability-basis promises; `0` when none. |
+| `promiseToCutoffGapSeconds` | `OrderAllocated` / `OrderPartiallyAllocated`   | Mean of (cutoff − allocation time) over Capability-basis promises; `0` when none. `Network` and `LeadTime` promises are excluded. |
 | `ordersRepromised`          | `OrderRepromised`                              | Re-promises in the hour. **Not path-dimensioned:** always lands on the `pathId: ""` row. |
 
-Only `Capability` and `LeadTime` are counted as bases; the ADR 0020
-`Network` basis has no column of its own. Any other analytics event type
-is acknowledged and ignored.
+`Capability`, `LeadTime` and `Network` are the three counted bases and
+together are the complete promise-basis distribution
+(`get_promise_health`'s `ordersAllocatedTotal` is their sum). Any other
+analytics event type is acknowledged and ignored.
 
 ## Path enrichment
 
 Order-level events do not carry a process path, but the report is keyed by one.
 The analytics publisher enriches each event with its path via an `OrderRepo`
-lookup: an order's path is its first line's path (a v1 simplification that is
-exact because intake places every line on the same default path), and
-`OrderLineReleased` carries its line's path directly.
+lookup: an order's path is its first line's path (or, for
+`OrderAllocated`/`OrderPartiallyAllocated`, the first released line's path),
+and `OrderLineAllocated`/`OrderLineBackordered`/`OrderLineReleased` carry
+their own line's path. Since multi-path routing
+([ADR 0021](/docs/adr/0021-multi-path-attribute-driven-routing)) lines of
+one order can resolve to different paths, so order-level counters are
+attributed to the first line's path — an approximation, not an exact split.
 
 ## REST API
 
@@ -93,6 +107,7 @@ Query parameters:
       "linesReleased": 6,
       "promiseBasisCapability": 3,
       "promiseBasisLeadTime": 1,
+      "promiseBasisNetwork": 0,
       "ordersRepromised": 0,
       "ordersSplitShipment": 0,
       "promiseToCutoffGapSeconds": 5400

@@ -3,7 +3,7 @@
 replicaCount: 1
 
 image:
-  repository: ghcr.io/claudioed/order-management
+  repository: ghcr.io/iqvo/order-management
   pullPolicy: IfNotPresent
   tag: ""
 
@@ -144,6 +144,20 @@ autoscaling:
 config:
   httpAddr: ":8080"
   eventPublisher: "log"   # "log" or "kafka" — gates the outbound domain-event publisher only
+  # Graceful shutdown (ADR-0025 §8): after /readyz flips to not-ready the
+  # process waits this long before closing the listener, so the
+  # readinessProbe/endpoint controller stops routing new traffic first.
+  # "0" disables the wait. Must satisfy
+  # shutdownDrainDelay + 10s (shutdown budget) < terminationGracePeriodSeconds.
+  shutdownDrainDelay: "5s"
+  # ADR-0032 housekeeping sweeper (cmd/order only; rendered into the
+  # deployment env when a database is configured). HOUSEKEEPING_INTERVAL
+  # "0" disables the sweeper; TTL/retention "0" keeps that table's rows
+  # forever (the pre-ADR-0032 behaviour). Defaults mirror the binary's
+  # own fallbacks and inventory-storage's ADR-0026 knobs exactly.
+  housekeepingInterval: "1h"
+  idempotencyKeyTtl: "24h"
+  outboxRetention: "168h"
 
 database:
   url: ""
@@ -162,12 +176,28 @@ database:
   # incompatibility this key exists to route migrations around.
   migrationsExistingSecretKey: "MIGRATIONS_DATABASE_URL"
 
-# KAFKA_BROKERS is only rendered when config.eventPublisher is "kafka".
-# Unlike fulfillment-execution, order-management has no inbound Kafka
-# consumer — this is purely the outbound domain-event publisher toggle
-# (cmd/order/main.go: buildRepoAdapters, EVENT_PUBLISHER env var).
+# KAFKA_BROKERS is rendered when config.eventPublisher is "kafka" OR
+# plannedCapacity.consumerGroup is set (the planned-capacity consumer needs
+# a broker even when events are only logged).
 kafka:
   brokers: "kafka:9092"
+
+# Planned capacity from warehouse-planning (ADR 0031). When consumerGroup is
+# set, cmd/order consumes warehouse.warehouse-planning.events into a local
+# planned-capacity read model, serves GET /planned-capacity, and annotates an
+# order response with `capacityConstraint` when its promise overlaps a
+# published shortage window at siteId. EMPTY (the default) renders no env at
+# all and the service behaves exactly as before.
+plannedCapacity:
+  # PLANNED_CAPACITY_CONSUMER_GROUP. A fixed, stable id: a restarted pod
+  # resumes from its committed offsets and N replicas share partitions. Never
+  # share it with another environment's cluster. There is deliberately no
+  # default in the binary, so a locally run process cannot join this group.
+  consumerGroup: ""
+  # PLANNED_CAPACITY_SITE_ID: the warehouse-planning `location` (site/building
+  # code, e.g. SIM1) an order's promise is matched against. Empty falls back
+  # to the binary's DEFAULT_SITE_ID, i.e. the site the promise is computed for.
+  siteId: ""
 
 # inventory-storage is this service's outbound HTTP dependency for per-line
 # stock allocation (POST/DELETE /reservations). Defaults to "permissive"
@@ -226,12 +256,12 @@ readinessProbe:
   periodSeconds: 5
 
 # Gives cmd/order/main.go's graceful shutdown sequence (readiness flip
-# -> HTTP drain -> outbox relay / repromise consumer clean stop with
-# final offset commit -> pgx pool close LAST) room to actually finish
-# before Kubernetes SIGKILLs the container. 10s (the HTTP Shutdown
-# budget) + 10s (the same budget, reused for the relay/consumer stop)
-# + margin for the readinessProbe's periodSeconds=5 to have observed
-# the not-ready flip before traffic fully stops arriving.
+# -> SHUTDOWN_DRAIN_DELAY wait -> HTTP drain -> repromise consumer clean
+# stop with final offset commit -> outbox relay final pass LAST -> pgx pool
+# close) room to actually finish before Kubernetes SIGKILLs the
+# container: config.shutdownDrainDelay (5s, so the readinessProbe's
+# periodSeconds=5 has observed the not-ready flip) + 10s (shared
+# HTTP/consumer/relay shutdown budget) + margin.
 terminationGracePeriodSeconds: 30
 
 nodeSelector: {}

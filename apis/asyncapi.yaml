@@ -195,6 +195,40 @@ channels:
       message:
         $ref: "#/components/messages/PathCapacityChangedInbound"
 
+  warehouse.warehouse-planning.events:
+    description: >-
+      warehouse-planning's integration topic (key and CloudEvents subject =
+      the capacity plan id). Consumed under a STABLE shared consumer group
+      (env `PLANNED_CAPACITY_CONSUMER_GROUP`, ADR 0031) — a normal
+      process-and-commit consumer, not a full-replay cache. Every other
+      CloudEvents `type` is ignored; a message that is not a valid
+      CloudEvent, or whose payload cannot be applied, is dead-lettered to
+      `warehouse.warehouse-planning.events.dlq` and committed past.
+    subscribe:
+      operationId: consumeWarehousePlanningEvents
+      summary: Maintain the local planned-capacity read model.
+      description: >-
+        Dispatch is on the FULL CloudEvents type. CapacityPlanCreated
+        stores a DRAFT row; CapacityPlanPublished and
+        CapacityShortageDetected store a PUBLISHED row; BottleneckDetected
+        is recognised and ignored (its bottleneck_step is already carried by
+        CapacityShortageDetected). The row is keyed by plan id with
+        last-writer-wins on the CloudEvents `time` (a DRAFT never replaces a
+        PUBLISHED row). The idempotency claim on the CloudEvents `id` and
+        the upsert commit in ONE database transaction; the Kafka offset is
+        committed only afterwards. Only a PUBLISHED plan with `shortage > 0`
+        ever influences an order (ADR 0031). These contracts are
+        warehouse-planning's own — see its apis/asyncapi.yaml — decoded
+        independently here, never imported.
+      tags:
+        - name: order-management
+      message:
+        oneOf:
+          - $ref: "#/components/messages/CapacityPlanCreatedInbound"
+          - $ref: "#/components/messages/CapacityPlanPublishedInbound"
+          - $ref: "#/components/messages/CapacityShortageDetectedInbound"
+          - $ref: "#/components/messages/BottleneckDetectedInbound"
+
   warehouse.order-management.analytics:
     description: >-
       The analytics fan-out topic (`kafka.AnalyticsTopic` in the code),
@@ -970,6 +1004,82 @@ components:
               data:
                 $ref: "#/components/schemas/PathCapacityData"
 
+    CapacityPlanCreatedInbound:
+      name: CapacityPlanCreated
+      title: CapacityPlanCreated (inbound, warehouse-planning)
+      summary: "A DRAFT capacity plan exists (stored as DRAFT; never influences an order)."
+      tags:
+        - name: order-management
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/warehouse-planning }
+              type: { const: com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanCreated }
+              dataschema: { const: "urn:warehouse:warehouse-planning:events:CapacityPlanCreated:v1" }
+              data:
+                $ref: "#/components/schemas/CapacityPlanData"
+
+    CapacityPlanPublishedInbound:
+      name: CapacityPlanPublished
+      title: CapacityPlanPublished (inbound, warehouse-planning)
+      summary: A capacity plan was published (stored as PUBLISHED).
+      tags:
+        - name: order-management
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/warehouse-planning }
+              type: { const: com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanPublished }
+              dataschema: { const: "urn:warehouse:warehouse-planning:events:CapacityPlanPublished:v1" }
+              data:
+                $ref: "#/components/schemas/CapacityPlanData"
+
+    CapacityShortageDetectedInbound:
+      name: CapacityShortageDetected
+      title: CapacityShortageDetected (inbound, warehouse-planning)
+      summary: "A published plan's demand exceeds its capacity over the window (stored as PUBLISHED with its shortage)."
+      tags:
+        - name: order-management
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/warehouse-planning }
+              type: { const: com.warehouse.wes.warehouse-planning.capacityplan.CapacityShortageDetected }
+              dataschema: { const: "urn:warehouse:warehouse-planning:events:CapacityShortageDetected:v1" }
+              data:
+                $ref: "#/components/schemas/CapacityPlanData"
+
+    BottleneckDetectedInbound:
+      name: BottleneckDetected
+      title: BottleneckDetected (inbound, warehouse-planning)
+      summary: "The path step limiting a plan with a shortage (recognised and ignored: CapacityShortageDetected carries bottleneck_step)."
+      tags:
+        - name: order-management
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/warehouse-planning }
+              type: { const: com.warehouse.wes.warehouse-planning.capacityplan.BottleneckDetected }
+              dataschema: { const: "urn:warehouse:warehouse-planning:events:BottleneckDetected:v1" }
+              data:
+                $ref: "#/components/schemas/BottleneckData"
+
   messageTraits:
     CloudEventsStructured:
       contentType: application/cloudevents+json
@@ -1126,10 +1236,14 @@ components:
             LeadTime-basis promise has no departure identity.
         promise_basis:
           type: string
-          enum: [Capability, LeadTime]
+          enum: [Capability, LeadTime, Network]
           description: >-
-            Which policy produced promise_date (ADR 0014). Absent on
-            events published before this ADR.
+            Which policy produced promise_date (ADR 0014). "Network"
+            (ADR 0020) means the date was DICTATED by an external
+            party's deadline (requiredShipBy) rather than chosen by this
+            service, and is a separate bucket in the analytics promise-
+            basis distribution (ADR 0019). Absent on events published
+            before this ADR.
         lines:
           type: array
           description: Exactly the lines released in this pass (may be empty).
@@ -1167,7 +1281,7 @@ components:
             single-Promise path). Older consumers can safely ignore it.
         promise_basis:
           type: string
-          enum: [Capability, LeadTime]
+          enum: [Capability, LeadTime, Network]
           description: >-
             ADR 0017's additive per-line promise field: which policy
             produced the PromiseGroup this line belongs to. Absent under
@@ -1202,7 +1316,7 @@ components:
         path_id: { type: string }
         promise_basis:
           type: string
-          enum: [Capability, LeadTime]
+          enum: [Capability, LeadTime, Network]
           description: >-
             ADR 0014 §6 / ADR 0019's additive promise-basis-
             distribution field, mirrored from the OrderAllocated
@@ -1261,7 +1375,7 @@ components:
         backordered_lines: { type: integer, minimum: 0 }
         promise_basis:
           type: string
-          enum: [Capability, LeadTime]
+          enum: [Capability, LeadTime, Network]
           description: Same ADR 0014 §6 / ADR 0019 field as OrderAnalyticsEvent's.
         promise_cutoff_at:
           type: string
@@ -1360,3 +1474,30 @@ components:
         cutoff_at: { type: string, format: date-time }
         remaining_units: { type: integer }
         known: { type: boolean }
+    CapacityPlanData:
+      type: object
+      description: >-
+        The fields order-management reads from warehouse-planning's
+        CapacityPlanCreated / CapacityPlanPublished / CapacityShortageDetected
+        payloads (its own apis/asyncapi.yaml; extra fields such as
+        path_capacity, status and published_at are ignored). Quantities are
+        orders; times are RFC 3339 UTC; window_end is exclusive.
+      required: [plan_id, location, window_start, window_end, shortage]
+      properties:
+        plan_id: { type: string, description: "The CapacityPlan id; equals the CloudEvents subject." }
+        warehouse_id: { type: string }
+        location: { type: string, description: "Site/building code, e.g. SIM1." }
+        path_id: { type: string }
+        window_start: { type: string, format: date-time }
+        window_end: { type: string, format: date-time }
+        assigned_demand: { type: number, format: double }
+        capacity_over_window: { type: number, format: double }
+        shortage: { type: number, format: double, minimum: 0 }
+        bottleneck_step: { type: string }
+    BottleneckData:
+      type: object
+      description: warehouse-planning's BottleneckDetected payload (recognised, not applied).
+      properties:
+        plan_id: { type: string }
+        bottleneck_step: { type: string }
+        path_capacity: { type: number, format: double }

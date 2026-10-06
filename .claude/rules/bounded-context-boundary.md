@@ -30,8 +30,8 @@ by anything in this repo.
 
 The original v1 called `wes-work-planning`'s `POST /paths/{pathId}/work-units`
 synchronously from a `ReleaseOrder` use case. That is **gone**:
-`internal/adapters/outbound/weswork/` and `ports.WorkReleaseClient` were
-deleted entirely. Release is now announced as a Kafka integration event
+The wes-work-planning HTTP outbound adapter and `ports.WorkReleaseClient`
+were deleted entirely. Release is now announced as a Kafka integration event
 (`OrderAllocated`/`OrderPartiallyAllocated`) on
 `warehouse.order-management.events`; `wes-work-planning`'s own consumer
 reacts to it independently and derives the deterministic work-unit id

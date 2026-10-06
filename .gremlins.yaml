@@ -18,6 +18,18 @@
 # is tracked as follow-up domain-test hardening; the gate below locks in
 # TODAY's re-measured score so neither number can silently regress further.
 #
+# Re-measured and RATCHETED UP on 2026-10-04 (gremlins v0.6.0, workers 1,
+# timeout-coefficient 30) after ADR-0031 added internal/domain/order/
+# planned_capacity.go (planned-capacity window overlap / last-writer-wins /
+# validation / order constraint). Every mutant in that file is killed by the
+# exact-boundary tests in planned_capacity_test.go; the pre-existing
+# survivors above are unchanged:
+#   ./internal/domain/order -> 117 mutants, killed 100 / lived 7 / not covered 10,
+#   efficacy 93.46%, mutant-coverage 91.45%, ~87s
+# (the 2026-09-13 baseline of 89.29% / 83.58% re-measured at 91.76% / 89.47%
+# on origin/develop on 2026-10-04, before this change). Thresholds below are
+# ratcheted to 93 / 91 — strictly below the measured values — never lowered.
+#
 # NOTE on the comparison: gremlins fails when the MEASURED value is <= the
 # threshold (a run measuring 100.00% against a threshold of 100 exits with
 # "ERROR: below efficacy-threshold"), so the threshold must sit strictly
@@ -36,6 +48,6 @@ unleash:
 
   threshold:
     # efficacy = KILLED / (KILLED + LIVED)
-    efficacy: 89
+    efficacy: 93
     # mutant-coverage = (KILLED + LIVED) / TOTAL mutants
-    mutant-coverage: 83
+    mutant-coverage: 91

@@ -69,3 +69,7 @@ updates:
         update-types:
           - "minor"
           - "patch"
+
+  # web/ is intentionally NOT listed: it depends on file:../../warehouse-ui-kit (a sibling repo) and
+  # Dependabot cannot fetch path dependencies outside the repository, so an npm entry for /web fails on
+  # every run. Security alerts for web/ are fixed with scoped npm overrides (see the fleet recipe).

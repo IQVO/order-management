@@ -1,15 +1,25 @@
+---
+paths:
+  - "internal/adapters/inbound/http/**"
+  - "apis/openapi*.yaml"
+  - "apis/openapi/**"
+---
+
 # API contracts
 
-## REST API (6 routes — `apis/openapi.yaml`; ADR-0005's `/allocate` and old `/release` verbs are gone)
+## REST API (8 routes in `server.go`; 7 declared in `apis/openapi.yaml` — `/readyz` is not; ADR-0005's `/allocate` and old `/release` verbs are gone)
 
 - `POST   /orders`                       → `receiveOrder` — intake; folds
   allocation-then-release into the same call (ADR-0005). 201 always, even
-  if the implicit allocation pass hits a hard failure. Optional
-  `releaseOnAllocation` (default `true`; `false` = hold after allocation,
-  ADR-0020 — combining it with `allowPartialShipment: true` is rejected
-  422, `order.ErrHeldOrderMustBeShipComplete`; NOTE `problemFor` has no
-  case for that error yet, so the body's `type` is currently
-  `internal-error` — a known code gap, not the intended contract) and optional `requiredShipBy`
+  if the implicit allocation pass hits a hard failure. With `DATABASE_URL`
+  set the route is wrapped by `RequireIdempotencyKey` (ADR-0023): 400
+  `idempotency-key-required` without the header, 422
+  `idempotency-key-reused` for the same key with a different body, stored
+  response replayed otherwise (the header is not declared in the spec).
+  Optional `releaseOnAllocation` (default `true`; `false` = hold after
+  allocation, ADR-0020 — combining it with `allowPartialShipment: true` is
+  rejected 422 `held-order-must-be-ship-complete`,
+  `order.ErrHeldOrderMustBeShipComplete`) and optional `requiredShipBy`
   (RFC 3339 deadline; the promise is constrained to the latest CPT window
   at or before it via `PromisePolicy.FeasibleBy`, and an infeasible
   deadline comes back with NO `promiseDate` rather than an error).
@@ -24,6 +34,15 @@
   already `Released` (BR6); 204 on success.
 - `GET    /healthz`                      → `getHealthz` — liveness only,
   does not check Postgres/inventory-storage.
+- `GET    /readyz`                       → readiness; flips to 503
+  `{"status":"not_ready"}` first during graceful shutdown (ADR-0025). Not
+  in `apis/openapi.yaml`.
+- `GET    /planned-capacity?site=&from=` → `getPlannedCapacity` (ADR-0031) —
+  registered only when `PLANNED_CAPACITY_CONSUMER_GROUP` is set; 400
+  `invalid-query-parameter` without `site`.
+
+Any read-modify-write that loses the `orders.version` race answers 409
+`concurrent-modification` (ADR-0024).
 
 JSON DTOs live in the http adapter; never leak domain structs. Every error
 response is RFC 7807 `application/problem+json` (identical shape to the

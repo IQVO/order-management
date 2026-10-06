@@ -1,4 +1,8 @@
-# Architecture Decision Records (20 total, `docs/docs/adr/`)
+---
+paths:
+  - "docs/docs/adr/**"
+---
+# Architecture Decision Records (0001-0020 summarized in order here; 0021-0033 summarized below; read the file in `docs/docs/adr/` before acting)
 
 1. **0001 — Hexagonal (ports & adapters) architecture.** The dependency
    rule this whole repo enforces (`internal/architecture/` fitness test).
@@ -11,9 +15,9 @@
 4. **0004 — The cancellation boundary is release.** BR6 in ADR form,
    including the documented "no clawback of released work" known gap.
 5. **0005 — Choreographed release via Kafka, folded allocate-then-release,
-   and pathId goes internal-only.** The big one: deletes `/allocate` and
-   `/release` REST verbs, deletes `ports.WorkReleaseClient` and
-   `internal/adapters/outbound/weswork/` entirely, replaces the synchronous
+   and pathId goes internal-only.** The big one: the `/allocate` and
+   `/release` REST verbs were deleted, as were `ports.WorkReleaseClient` and
+   the whole wes-work-planning HTTP outbound adapter; it replaces the synchronous
    wes-work-planning call with Kafka choreography, folds the whole saga into
    `ReceiveOrder`/`RetryAllocation`. **Read this before touching anything in
    the allocation/release path.**
@@ -195,8 +199,8 @@
     (`releaseHeldOrder`), `releaseOnAllocation`/`requiredShipBy` on
     `POST /orders`, `ErrOrderNotHeld` -> 409 `order-not-held`, migrations
     `0005_release_on_allocation`/`0006_required_ship_by`. The caller is
-    `network-fulfillment` (`internal/adapters/outbound/ordermanagement`:
-    `POST /orders`, `POST /orders/{id}/release`, `DELETE /orders/{id}`).
+    `network-fulfillment` (its own order-management outbound adapter, in
+    that repo: `POST /orders`, `POST /orders/{id}/release`, `DELETE /orders/{id}`).
 
 **0026 — ACCEPTED: per-workload HorizontalPodAutoscaler and pgxpool
 MaxConns/statement_timeout tuning (Phase 3 scalability).** An
@@ -301,6 +305,58 @@ Other ADR-adjacent facts worth knowing without opening every file:
   non-CloudEvents. **Supersedes** the flat envelope of ADR-0005, the
   analytics Envelope v1 (`schema_version`) of ADR-0006, and the flat
   dispatch shown in ADR-0015/0018. No dual-read, no toggle.
+
+- **0031 — ACCEPTED: consume warehouse-planning's capacity plans into a
+  local planned-capacity read model; annotate, never reject or re-promise.**
+  `inbound/kafka.PlannedCapacityConsumer` (STABLE group from
+  `PLANNED_CAPACITY_CONSUMER_GROUP`, no default; the env var is also the
+  off switch) on `warehouse.warehouse-planning.events` upserts
+  `order.PlannedCapacityWindow` rows (Postgres `planned_capacity_windows`,
+  migration 0010; last-writer-wins per plan id via `Supersedes`) in ONE
+  `UnitOfWork` with the CloudEvents-id claim; poison -> `<topic>.dlq`. A
+  PUBLISHED shortage whose window overlaps `[now, promise cutoff)` (both
+  half-open) at `PLANNED_CAPACITY_SITE_ID` (default `DEFAULT_SITE_ID`) adds
+  an optional `capacityConstraint` to the order response, derived at read
+  time — promise, status, allocation, reservations and events are
+  untouched. `GET /planned-capacity?site=` reads the model. KNOWN GAP:
+  orders carry no site, so the configured one is used. Read the ADR before
+  touching `planned_capacity.go`, the consumer or `Server.orderResponse`.
+
+- **0022 — ACCEPTED: transactional outbox.** Use cases no longer write to
+  Kafka directly: with `DATABASE_URL` + `EVENT_PUBLISHER=kafka`,
+  `postgres.OutboxPublisher` inserts one `outbox_events` row per
+  (event x topic) inside the same `UnitOfWork` transaction as the `Order`
+  save, and `postgres.OutboxRelay` (`OUTBOX_RELAY_INTERVAL`, default 1s)
+  drains them to both topics with `FOR UPDATE SKIP LOCKED`.
+- **0023 — ACCEPTED: transactional `Idempotency-Key` middleware on
+  `POST /orders`.** Route-scoped `RequireIdempotencyKey` opens the outer
+  transaction, inserts into `idempotency_keys`, joins `ReceiveOrder`'s
+  `UnitOfWork` via `internal/pgtx`, and replays the stored response for a
+  repeated key (422 `idempotency-key-reused` on a different body, 400
+  `idempotency-key-required` when absent). Only active with Postgres.
+- **0024 — ACCEPTED: optimistic concurrency.** `orders.version` (migration
+  0009); `OrderRepo.Save` is `UPDATE ... WHERE id AND version`, a lost
+  race surfaces as `ports.ErrConcurrentModification` (409
+  `concurrent-modification`).
+- **0025 — ACCEPTED: resilience.** sony/gobreaker per outbound dependency
+  (inventory-storage reservations, product classification), jittered
+  retry on the read-only classification GET only, `<topic>.dlq` for the
+  re-promise consumer (also used by the planned-capacity consumer), and a
+  readiness-flip-first graceful shutdown (`/readyz`,
+  `SHUTDOWN_DRAIN_DELAY`).
+- **0029 — ACCEPTED: migrations bypass PgBouncer.**
+  `MIGRATIONS_DATABASE_URL` (defaults to `DATABASE_URL`) is a direct
+  connection used only for golang-migrate's advisory lock.
+- **0032 — ACCEPTED: housekeeping sweeper.** `postgres.Sweeper` in
+  `cmd/order` deletes `idempotency_keys` older than `IDEMPOTENCY_KEY_TTL`
+  (24h) and PUBLISHED `outbox_events` older than `OUTBOX_RETENTION` (7d)
+  every `HOUSEKEEPING_INTERVAL` (1h; `0` disables), plus the
+  `order.outbox.lag_seconds` gauge.
+- **0033 — ACCEPTED: boot retry and Kafka writer tuning.**
+  `internal/bootretry` retries every composition root's first
+  Postgres/Kafka dial; synchronous kafka-go writers use a 10ms
+  `BatchTimeout` and `RequireAll`; DLQ publishes retry while the
+  auto-created topic elects a leader.
 
 - Gateway API `HTTPRoute` chart template exists (`charts/order-management`
   `values.yaml` `gatewayApi:` block, `enabled: false` by default) —

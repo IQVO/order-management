@@ -75,7 +75,7 @@ func (d Deps) registerTools(server *mcp.Server) {
 
 	addTool(server, &mcp.Tool{
 		Name:        "get_promise_health",
-		Description: "Return promise-health KPIs for a time window (and optional process-path filter) from the Order Funnel & Allocation Health data product: promise basis distribution (how many promises were a real capability-derived CPT window vs. the LeadTimePolicy fallback), re-promise rate (orders whose promise moved after a missed CPT or SLAM pass -- fleet-wide, not path-scoped), split-shipment rate (orders whose lines were promised to more than one cutoff), and the mean promise-to-cutoff gap in seconds (how far in advance of the departure the promise was made). Does NOT include on-time-to-CPT -- that KPI is measured in fulfillment-execution's own analytics, where the evidence (cpt vs manifested_at) actually lives.",
+		Description: "Return promise-health KPIs for a time window (and optional process-path filter) from the Order Funnel & Allocation Health data product: promise basis distribution (how many promises were a real capability-derived CPT window, the LeadTimePolicy fallback, or dictated by an external network deadline), re-promise rate (orders whose promise moved after a missed CPT or SLAM pass -- fleet-wide, not path-scoped), split-shipment rate (orders whose lines were promised to more than one cutoff), and the mean promise-to-cutoff gap in seconds (how far in advance of the departure the promise was made). Does NOT include on-time-to-CPT -- that KPI is measured in fulfillment-execution's own analytics, where the evidence (cpt vs manifested_at) actually lives.",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: readOnly},
 	}, d.getPromiseHealth)
 }

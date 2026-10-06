@@ -1,3 +1,13 @@
+---
+paths:
+  - ".github/**"
+  - "Makefile"
+  - ".gremlins.yaml"
+  - ".golangci.yml"
+  - "lefthook.yml"
+  - "docs/**"
+---
+
 # CI / quality gates
 
 ## GitHub Actions workflows (`.github/workflows/`)
@@ -5,21 +15,32 @@
 ### `ci.yml` — triggers on push/PR to `main`, `develop` (+ weekly schedule for `mutation`)
 
 - **`lint`** — golangci-lint v2.13.1, `--timeout=5m`.
+- **`guide-lint`** — `scripts/harness/guide_lint.py`, `repo_lint.py` and
+  the two harness self-tests (agent guides load, references resolve,
+  context budget).
+- **`complexity`** — golangci-lint with only gocyclo, cyclop, gocognit,
+  nestif and funlen enabled (thresholds in `.golangci.yml`), plus an
+  informational gocyclo report.
+- **`contract`** — Schemathesis (pinned) over `apis/openapi.yaml` via
+  `scripts/contract-test.sh` (same as `make contract`).
+- **`evals-tests`** — MCP evals E1–E3:
+  `go test ./internal/adapters/inbound/mcp/... -race -run '^TestEval|^TestMCPEvalSuite'`.
 - **`test`** — build, vet, gofmt check, `go test ./... -race
   -coverprofile=coverage.out -coverpkg=./internal/domain/...,./internal/application/...`,
   then a 90% coverage gate on that coverprofile.
 - **`bdd`** — `go test ./... -run TestFeatures -v` (godog/Gherkin acceptance
   suite, `features/*.feature`).
 - **`integration`** — `go build/vet -tags=integration ./...` then
-  `go test -tags=integration ./internal/adapters/outbound/kafka` (+
-  `kafkacatalog`, `kafkacptschedule`, `kafkapathcapacity`, and
-  `./internal/adapters/inbound/kafka`) against a **Testcontainers** Kafka
-  broker (no external Kafka service in this workflow — do not write a
-  `KAFKA_BROKERS`-skip-gated test, it silently no-ops in CI). NOTE: the
-  job provisions no Postgres either, so the `DATABASE_URL`/
-  `ANALYTICS_DATABASE_URL`-skip-gated Postgres integration tests
-  (`outbound/postgres`, `outbound/analyticsstore`) are compiled/vetted but
-  never executed in CI.
+  `go test -tags=integration` on `./internal/adapters/outbound/kafka`,
+  `kafkacatalog`, `kafkacptschedule`, `kafkapathcapacity`,
+  `./internal/adapters/inbound/kafka`, `./internal/adapters/inbound/http`,
+  `./internal/adapters/outbound/analyticsstore`, `./cmd/order` and
+  `./internal/adapters/outbound/postgres`. Every test boots its own
+  **Testcontainers** Kafka broker or Postgres: the job has no `services:`
+  container and no `DATABASE_URL`. Never write a `KAFKA_BROKERS`- or
+  `DATABASE_URL`-skip-gated test — it silently no-ops in CI; the arch-test
+  sensors `TestKafkaIntegrationTestsUseTestcontainers` and
+  `TestPostgresIntegrationTestsUseTestcontainers` reject that shape.
 - **`mutation-fast`** — blocking gremlins subset over `internal/domain/order`
   only, every push/PR. Thresholds in `.gremlins.yaml` (gremlins fails when
   the measured value is `<=` the threshold, so the threshold sits strictly
@@ -37,10 +58,10 @@
   gen-api-docs order` in `docs/`, then `git diff --exit-code -- docs/docs/
   api-reference/rest`. **Known defect:** that step runs with
   `working-directory: docs`, so the pathspec resolves to
-  `docs/docs/docs/api-reference/rest` (nonexistent) and the check always
+  `docs/docs/docs/api-reference/rest` (nonexistent) and the check always <!-- guide-lint: ignore -->
   passes — it let ADR-0020's `releaseHeldOrder` endpoint land with no
   generated page. The working pathspec from `docs/` is
-  `docs/api-reference/rest`. Until the workflow is fixed, run the
+  `docs/api-reference/rest`. <!-- guide-lint: ignore --> Until the workflow is fixed, run the
   procedure below by hand after any `apis/openapi.yaml` change.
 - **`web`** — builds `warehouse-ui-kit` (checked out at `develop`), then
   `npm ci`, `npm run lint`, `npx tsc -b`, `npm test`, `npm run build` in
@@ -79,8 +100,8 @@ between commits before.
   **NOT** trigger on `develop` pushes or on PRs at all — only a push to
   `main` (i.e. after a release PR merges) that touches `docs/**` deploys
   the live site at `https://claudioed.github.io/order-management/`.
-- Job: `npm ci && npm run build` in `docs/`, uploads `docs/build` as a
-  Pages artifact, then deploys via `actions/deploy-pages`.
+- Job: `npm ci && npm run build` in `docs/`, uploads the built `build/`
+  directory (gitignored) as a Pages artifact, then deploys via `actions/deploy-pages`.
 - **This means a `docs/docs/api-reference/**` regeneration PR merged into
   `develop` alone does NOT redeploy the live site** — it only takes effect
   once `develop` promotes to `main` per the fleet's GitFlow release process.
@@ -141,3 +162,21 @@ in plain markdown under `docs/docs/ddd/domain-events.md`,
 event, changed payload shape), grep those narrative docs for the old
 name(s) and update them by hand — there is no automated generation or CI
 gate to catch this drift, unlike the OpenAPI case above.
+
+## Docs site and golangci-lint commands
+
+```bash
+# Docusaurus — regenerate after ANY apis/openapi.yaml change
+cd docs && npm ci
+npm run clean-api-docs order && npm run gen-api-docs order   # -> docs/docs/api-reference/rest/
+npm run typecheck && npm run build   # onBrokenLinks / onBrokenAnchors are both 'throw'
+
+# golangci-lint (CI-pinned version)
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
+```
+
+Other make targets: `make integration` (Kafka + Postgres adapters, each
+test on its own Testcontainers broker/database), `make coverage` (go test -race -coverprofile + the 90%
+gate), `make bdd` (godog suite), `make mutation-fast` (gremlins subset on
+`internal/domain/order`, thresholds in `.gremlins.yaml`), `make vuln`
+(govulncheck).

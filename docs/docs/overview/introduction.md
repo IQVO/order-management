@@ -95,6 +95,7 @@ flowchart LR
     PPM["process-path-management<br/>capability & CPT schedule"]
     WP["wes-work-planning<br/>(Core) — the conductor"]
     FE["fulfillment-execution<br/>(Core) — Pick/Pack/SLAM"]
+    WPL["warehouse-planning<br/>capacity plans"]
   end
 
   NF -- "HTTP: POST /orders (held)<br/>POST /orders/{id}/release" --> OM
@@ -103,18 +104,21 @@ flowchart LR
   PPM -- "Kafka: catalogue, CPT schedule" --> OM
   WP -- "Kafka: PathCapacityChanged" --> OM
   FE -- "Kafka: TaskCPTMissed,<br/>PackageManifested" --> OM
+  WPL -. "Kafka: CapacityPlan* (opt-in)" .-> OM
 
   classDef this fill:#1d4ed8,stroke:#1e3a8a,color:#fff,stroke-width:3px;
   classDef core fill:#0f766e,stroke:#134e4a,color:#fff;
   classDef supp fill:#7c3aed,stroke:#4c1d95,color:#fff;
   class OM this;
   class INV,WP,FE core;
-  class PPM,NF supp;
+  class PPM,NF,WPL supp;
 ```
 
-Allocation is synchronous HTTP; release, capability and re-promise facts
-are Kafka events (when `EVENT_PUBLISHER=kafka` / `PATH_CATALOGUE_SOURCE=kafka`
-/ `KAFKA_BROKERS` are set — see [Domain Events](/docs/ddd/domain-events)).
+Allocation is synchronous HTTP; release, capability, re-promise and
+planned-capacity facts are Kafka events (when `EVENT_PUBLISHER=kafka` /
+`PATH_CATALOGUE_SOURCE=kafka` / `KAFKA_BROKERS` /
+`PLANNED_CAPACITY_CONSUMER_GROUP` are set — see
+[Domain Events](/docs/ddd/domain-events)).
 See [the context map](/docs/ecosystem/context-map) for the full relationship
 analysis, including exactly which fields cross each wire.
 

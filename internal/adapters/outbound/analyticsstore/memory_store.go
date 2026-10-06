@@ -46,6 +46,7 @@ type rowAcc struct {
 	// --- promise KPIs (ADR 0014 §6 / ADR 0019) ---
 	promiseBasisCapability    int
 	promiseBasisLeadTime      int
+	promiseBasisNetwork       int
 	ordersRepromised          int
 	ordersSplitShipment       int
 	promiseToCutoffGapSum     float64
@@ -116,6 +117,8 @@ func applyPromiseKPIs(r *rowAcc, at time.Time, basis string, cutoffAt *time.Time
 		r.promiseBasisCapability++
 	case "LeadTime":
 		r.promiseBasisLeadTime++
+	case "Network":
+		r.promiseBasisNetwork++
 	}
 	if splitShipment {
 		r.ordersSplitShipment++
@@ -220,6 +223,7 @@ func (s *MemoryStore) Query(_ context.Context, q report.ReportQuery) (report.Fun
 			LinesReleased:            r.linesReleased,
 			PromiseBasisCapability:   r.promiseBasisCapability,
 			PromiseBasisLeadTime:     r.promiseBasisLeadTime,
+			PromiseBasisNetwork:      r.promiseBasisNetwork,
 			OrdersRepromised:         r.ordersRepromised,
 			OrdersSplitShipment:      r.ordersSplitShipment,
 		}

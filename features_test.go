@@ -133,6 +133,14 @@ type world struct {
 	eventSnapshot map[string]int
 	lastStatus    int
 	lastBody      []byte
+
+	// planned and plannedApply are the planned-capacity read model (ADR
+	// 0031) and the real ApplyPlannedCapacity use case the Kafka consumer
+	// drives; scenarios feed it through that use case, never through a
+	// side door, and observe it only through the REST API.
+	planned      *memory.PlannedCapacityRepo
+	plannedApply *usecases.ApplyPlannedCapacity
+	planSeq      int
 }
 
 func (w *world) reset() {
@@ -145,6 +153,9 @@ func (w *world) reset() {
 	w.publisher = &capturePublisher{}
 	clock := memory.NewFixedClock(fixedNow)
 	promise := order.PromisePolicy{Fallback: order.NewLeadTimePolicy(24*time.Hour, nil)}
+	w.planned = memory.NewPlannedCapacityRepo()
+	w.plannedApply = &usecases.ApplyPlannedCapacity{Windows: w.planned, Processed: memory.NewPlannedCapacityProcessedEventsRepo()}
+	w.planSeq = 0
 
 	server := &inboundhttp.Server{
 		ReceiveOrder:    &usecases.ReceiveOrder{Orders: orders, Events: w.publisher, Clock: clock, Inventory: w.inventory, Promise: promise},
@@ -152,6 +163,11 @@ func (w *world) reset() {
 		ReleaseHeld:     &usecases.ReleaseHeldOrder{Orders: orders, Inventory: w.inventory, Events: w.publisher, Clock: clock, Promise: promise},
 		CancelOrder:     &usecases.CancelOrder{Orders: orders, Inventory: w.inventory, Events: w.publisher, Clock: clock},
 		GetOrder:        &usecases.GetOrder{Orders: orders},
+		// Planned capacity (ADR 0031) is wired for every scenario: with no
+		// window published it is invisible, which is exactly what the
+		// pre-existing scenarios (untouched) keep proving.
+		CapacityConstraints: &usecases.OrderCapacityConstraints{Windows: w.planned, Clock: clock, SiteID: "SIM1"},
+		PlannedCapacity:     &usecases.GetPlannedCapacity{Windows: w.planned, Clock: clock},
 	}
 
 	// A discard logger keeps the middleware on the code path (so it is
@@ -631,6 +647,8 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^an "([^"]*)" event was published$`, w.eventWasPublished)
 	sc.Step(`^no "([^"]*)" event was published$`, w.noEventWasPublished)
 	sc.Step(`^no new "([^"]*)" event was published$`, w.noNewEventWasPublished)
+
+	registerPlannedCapacitySteps(sc, w)
 }
 
 // TestFeatures runs the Gherkin acceptance suite under features/.

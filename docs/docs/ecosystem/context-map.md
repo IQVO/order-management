@@ -27,9 +27,10 @@ flowchart TB
         INV["<b>inventory-storage</b><br/>Core subdomain"]
     end
     subgraph WES["WES tier"]
-        PPM["<b>process-path-management</b>"]
+        PPM["<b>process-path-management</b><br/>Generic subdomain"]
         WP["<b>wes-work-planning</b><br/>Core subdomain"]
         FE["<b>fulfillment-execution</b><br/>Core subdomain"]
+        WPL["<b>warehouse-planning</b><br/>Core subdomain"]
     end
     subgraph CONSOLE["Fleet console (ADR-0007)"]
         BFF["<b>warehouse-ops-agent</b><br/>console-bff"]
@@ -42,6 +43,7 @@ flowchart TB
     PPM -->|"warehouse.process-path-management.events<br/>ProcessPath* · CPTScheduleChanged"| OM
     WP -->|"warehouse.work-planning.events<br/>PathCapacityChanged"| OM
     FE -->|"warehouse.fulfillment.events<br/>TaskCPTMissed · PackageManifested"| OM
+    WPL -.->|"warehouse.warehouse-planning.events (opt-in)<br/>CapacityPlan* · CapacityShortageDetected"| OM
     BFF -.->|"HTTP GET /orders/{id}"| OM
     MFE -.->|"HTTP (own REST API)"| OM
 
@@ -50,16 +52,77 @@ flowchart TB
     classDef supp fill:#6d28d9,stroke:#4c1d95,color:#fff;
     classDef console fill:#0f766e,stroke:#134e4a,color:#fff,stroke-dasharray: 3 3;
     class OM this;
-    class INV,WP,FE core;
+    class INV,WP,FE,WPL core;
     class PPM,NF supp;
     class BFF,MFE console;
 ```
 
-**Bold edges are synchronous HTTP; thin edges are Kafka topics; dashed teal
-edges are the read-mostly console callers** (see
+**Bold edges are synchronous HTTP; thin edges are Kafka topics; the dashed
+warehouse-planning edge is opt-in (`PLANNED_CAPACITY_CONSUMER_GROUP`); dashed
+teal edges are the read-mostly console callers** (see
 [ADR-0007](../adr/0007-adopt-fleet-micro-frontend-console.md)). Only the
 Kafka edges this context itself publishes or consumes are drawn — the other
-services' topics among themselves are out of scope for this page.
+services' topics among themselves are out of scope for this page. The
+analytics topic `warehouse.order-management.analytics` is consumed only by
+this repo's own `cmd/order-projector`, so it is not a context edge.
+
+## Relationship patterns (ddd-crew)
+
+```mermaid
+flowchart LR
+  INV["inventory-storage"]
+  PPM["process-path-management"]
+  WP["wes-work-planning"]
+  FE["fulfillment-execution"]
+  WPL["warehouse-planning"]
+  OM["order-management"]
+  NF["network-fulfillment"]
+  CON["warehouse-ops-agent and order-mgmt-mfe"]
+
+  INV -->|"U OHS/PL -> D C/S ACL<br/>REST POST /reservations, DELETE /reservations/id,<br/>GET /products/sku/classification"| OM
+  PPM -->|"U PL -> D ACL<br/>Kafka processpath.ProcessPath* and cptschedule.CPTScheduleChanged"| OM
+  WP -->|"U PL -> D ACL<br/>Kafka workpool.PathCapacityChanged"| OM
+  FE -->|"U PL -> D ACL<br/>Kafka task.TaskCPTMissed, package.PackageManifested"| OM
+  WPL -.->|"U PL -> D ACL, opt-in<br/>Kafka capacityplan.CapacityPlan*"| OM
+  OM -->|"U PL -> D CF<br/>Kafka order.OrderAllocated, order.OrderPartiallyAllocated"| WP
+  OM -->|"U OHS -> D C/S<br/>REST POST /orders, POST /orders/id/release, DELETE /orders/id"| NF
+  OM -->|"U OHS -> D CF<br/>REST GET /orders/id, MCP get_order"| CON
+```
+
+Source: `internal/adapters/outbound/{inventorystorage,productclassification,kafka,kafkacatalog,kafkacptschedule,kafkapathcapacity}`,
+`internal/adapters/inbound/{kafka,http,mcp}`, `cmd/order/main.go`.
+Omits: the analytics topic (internal to this repo), the
+`OrderRepromised` integration event (published, no known consumer), and the
+CloudEvents type prefix `com.warehouse.wes.<context>.` on every Kafka label.
+Arrows point from upstream to downstream; `id` and `sku` stand for the path
+parameters.
+
+| Upstream | Downstream | Pattern (upstream side) | Pattern (downstream side) | Channel | Status | Evidence |
+| --- | --- | --- | --- | --- | --- | --- |
+| inventory-storage | order-management | Open Host Service, Published Language | Customer/Supplier, Anti-Corruption Layer | REST `POST /reservations`, `DELETE /reservations/{id}`, `GET /products/{sku}/classification` | live with `INVENTORY_STORAGE_MODE=http`, `PRODUCT_CLASSIFICATION_MODE=http` | `outbound/inventorystorage`, `outbound/productclassification` |
+| order-management | wes-work-planning | Published Language (CloudEvents, `apis/asyncapi.yaml`) | Conformist on the frozen four line fields | Kafka `warehouse.order-management.events` | live with `EVENT_PUBLISHER=kafka` | `outbound/kafka.Publisher` |
+| process-path-management | order-management | Published Language | Anti-Corruption Layer (local read model) | Kafka `warehouse.process-path-management.events` | live with `PATH_CATALOGUE_SOURCE=kafka` | `outbound/kafkacatalog`, `outbound/kafkacptschedule` |
+| wes-work-planning | order-management | Published Language | Anti-Corruption Layer (local read model) | Kafka `warehouse.work-planning.events` | live with `PATH_CATALOGUE_SOURCE=kafka` | `outbound/kafkapathcapacity` |
+| fulfillment-execution | order-management | Published Language | Anti-Corruption Layer | Kafka `warehouse.fulfillment.events` | live whenever `KAFKA_BROKERS` is set | `inbound/kafka/repromise_consumer.go` |
+| warehouse-planning | order-management | Published Language | Anti-Corruption Layer (local read model) | Kafka `warehouse.warehouse-planning.events` | opt-in, `PLANNED_CAPACITY_CONSUMER_GROUP` | `inbound/kafka/planned_capacity_consumer.go` |
+| order-management | network-fulfillment | Open Host Service (`apis/openapi.yaml`) | Customer/Supplier; network-fulfillment is the ACL to the external network | REST `POST /orders`, `POST /orders/{id}/release`, `DELETE /orders/{id}` | live | ADR 0020 |
+| order-management | warehouse-ops-agent, order-mgmt-mfe | Open Host Service | Conformist | REST, MCP `get_order` | live | ADR 0007, ADR 0010 |
+| order-management | wes-work-planning (synchronous) | — | — | REST `POST /paths/{pathId}/work-units` | deliberately absent since ADR 0005 | ADR 0005 |
+
+No Shared Kernel and no Partnership: no Go code or schema is shared with any
+sibling context (ADR 0002). Every downstream decode lands in a struct local
+to the adapter.
+
+## warehouse-planning (Kafka, inbound, opt-in — ADR 0031)
+
+`inbound/kafka.PlannedCapacityConsumer` reads
+`CapacityPlanCreated` (stored as `DRAFT`), `CapacityPlanPublished` and
+`CapacityShortageDetected` (stored as `PUBLISHED`) into
+`planned_capacity_windows`. The read model only annotates order responses
+with a `capacityConstraint` and backs `GET /planned-capacity`; no promise
+moves and nothing is published back. Enabled only when
+`PLANNED_CAPACITY_CONSUMER_GROUP` is set; failures go to
+`warehouse.warehouse-planning.events.dlq`.
 
 ## Console callers (ADR-0007)
 
@@ -88,8 +151,8 @@ is the Supplier / Open Host Service
 
 | Call | Request | Response | Used by |
 | --- | --- | --- | --- |
-| `POST /reservations` | `{"sku":"...","quantity":N,"demandRef":"..."}` (this order's `OrderId` as `demandRef`) | `201`: `{"id":"...","sku":"...","quantity":N,"demandRef":"...","status":"...","allocations":[...],"expiresAt":"..."}` | `allocateAndRelease` (from `ReceiveOrder`, `RetryAllocation`) |
-| `DELETE /reservations/{id}` | — | `204` on success | `CancelOrder` |
+| `POST /reservations` | `{"sku":"...","quantity":N,"demandRef":"..."}` (this order's `OrderId` as `demandRef`), header `Idempotency-Key: res-{orderId}-line-{n}-att-{version}` (ADR 0028) | `201`: `{"id":"...","sku":"...","quantity":N,"demandRef":"...","status":"...","allocations":[...],"expiresAt":"..."}` | `allocateAndRelease` (from `ReceiveOrder`, `RetryAllocation`, `ReleaseHeldOrder` reconfirm) |
+| `DELETE /reservations/{id}` | — | `204` (`200` and `404` also count as revoked) | `CancelOrder` |
 
 A `409` from `POST /reservations` means insufficient usable stock and maps
 to `Backordered` for that line; any other non-2xx status or a transport

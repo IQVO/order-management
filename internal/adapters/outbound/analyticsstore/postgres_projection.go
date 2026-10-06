@@ -128,12 +128,17 @@ func (p *PostgresProjection) applyAllocationOutcome(
 	return p.withClaim(ctx, eventId, at, func(tx pgx.Tx) error {
 		bucket := at.UTC().Truncate(time.Hour)
 
-		var basisCapability, basisLeadTime int
+		var basisCapability, basisLeadTime, basisNetwork int
 		switch basis {
 		case "Capability":
 			basisCapability = 1
 		case "LeadTime":
 			basisLeadTime = 1
+		case "Network":
+			// A promise dictated by an external deadline (ADR 0020): its own
+			// bucket, never folded into Capability/LeadTime (ADR 0019), and
+			// excluded from the promise-to-cutoff gap below.
+			basisNetwork = 1
 		}
 
 		var split int
@@ -152,19 +157,20 @@ func (p *PostgresProjection) applyAllocationOutcome(
 		sql := fmt.Sprintf(
 			`INSERT INTO funnel_rollup (
 				path_id, hour_bucket, %[1]s,
-				promise_basis_capability, promise_basis_lead_time, orders_split_shipment,
+				promise_basis_capability, promise_basis_lead_time, promise_basis_network, orders_split_shipment,
 				promise_to_cutoff_gap_seconds_sum, promise_to_cutoff_gap_samples
 			 )
-			 VALUES ($1, $2, 1, $3, $4, $5, $6, $7)
+			 VALUES ($1, $2, 1, $3, $4, $5, $6, $7, $8)
 			 ON CONFLICT (path_id, hour_bucket) DO UPDATE SET
 			 	%[1]s = funnel_rollup.%[1]s + 1,
 			 	promise_basis_capability = funnel_rollup.promise_basis_capability + $3,
 			 	promise_basis_lead_time = funnel_rollup.promise_basis_lead_time + $4,
-			 	orders_split_shipment = funnel_rollup.orders_split_shipment + $5,
-			 	promise_to_cutoff_gap_seconds_sum = funnel_rollup.promise_to_cutoff_gap_seconds_sum + $6,
-			 	promise_to_cutoff_gap_samples = funnel_rollup.promise_to_cutoff_gap_samples + $7`,
+			 	promise_basis_network = funnel_rollup.promise_basis_network + $5,
+			 	orders_split_shipment = funnel_rollup.orders_split_shipment + $6,
+			 	promise_to_cutoff_gap_seconds_sum = funnel_rollup.promise_to_cutoff_gap_seconds_sum + $7,
+			 	promise_to_cutoff_gap_samples = funnel_rollup.promise_to_cutoff_gap_samples + $8`,
 			funnelCol)
-		if _, err := tx.Exec(ctx, sql, pathId, bucket, basisCapability, basisLeadTime, split, gapSeconds, gapSamples); err != nil {
+		if _, err := tx.Exec(ctx, sql, pathId, bucket, basisCapability, basisLeadTime, basisNetwork, split, gapSeconds, gapSamples); err != nil {
 			return fmt.Errorf("analyticsstore: upsert rollup %s with promise KPIs: %w", funnelCol, err)
 		}
 		return nil

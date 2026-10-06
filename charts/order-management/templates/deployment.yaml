@@ -52,9 +52,35 @@ spec:
               value: {{ .Values.config.httpAddr | quote }}
             - name: EVENT_PUBLISHER
               value: {{ .Values.config.eventPublisher | quote }}
-            {{- if eq .Values.config.eventPublisher "kafka" }}
+            - name: SHUTDOWN_DRAIN_DELAY
+              value: {{ .Values.config.shutdownDrainDelay | quote }}
+            {{- if or .Values.database.url .Values.database.existingSecret }}
+            # ADR-0032 housekeeping sweeper: idempotency_keys TTL +
+            # published outbox_events retention. Only rendered when a
+            # database is configured (the sweeper is Postgres-only); the
+            # binary's own defaults match these values.
+            - name: HOUSEKEEPING_INTERVAL
+              value: {{ .Values.config.housekeepingInterval | quote }}
+            - name: IDEMPOTENCY_KEY_TTL
+              value: {{ .Values.config.idempotencyKeyTtl | quote }}
+            - name: OUTBOX_RETENTION
+              value: {{ .Values.config.outboxRetention | quote }}
+            {{- end }}
+            {{- if or (eq .Values.config.eventPublisher "kafka") .Values.plannedCapacity.consumerGroup }}
             - name: KAFKA_BROKERS
               value: {{ .Values.kafka.brokers | quote }}
+            {{- end }}
+            {{- if .Values.plannedCapacity.consumerGroup }}
+            # ADR 0031: consume warehouse-planning's capacity plans. The
+            # group id is a fixed, stable value (a restarted pod resumes
+            # from its committed offsets); empty (the default) renders
+            # nothing and the integration stays off.
+            - name: PLANNED_CAPACITY_CONSUMER_GROUP
+              value: {{ .Values.plannedCapacity.consumerGroup | quote }}
+            {{- if .Values.plannedCapacity.siteId }}
+            - name: PLANNED_CAPACITY_SITE_ID
+              value: {{ .Values.plannedCapacity.siteId | quote }}
+            {{- end }}
             {{- end }}
             - name: INVENTORY_STORAGE_MODE
               value: {{ .Values.inventoryStorage.mode | quote }}

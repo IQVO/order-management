@@ -1,3 +1,9 @@
+---
+paths:
+  - "internal/domain/**"
+  - "internal/application/**"
+  - "features/**"
+---
 # Domain model
 
 ## Ubiquitous Language (use these exact names)
@@ -8,8 +14,8 @@
   `PromiseGroups []PromiseGroup` — ADR-0014/0017), plus ADR-0020's
   `ReleaseOnAllocation()` (stored inversely as `heldAtIntake`) and
   optional `RequiredShipBy *time.Time`.
-- **OrderLine** — `SKU`, `Quantity`, `PathId` (internal-only default
-  `"pick"` since ADR-0005 — never caller-settable, see below), `GiftWrap
+- **OrderLine** — `SKU`, `Quantity`, `PathId` (internal-only, resolved by
+  `PathSelectionPolicy` since ADR-0005/0021 — never caller-settable, see below), `GiftWrap
   bool`, `LineStatus` (`Pending`/`Allocated`/`Backordered`/`Released`/
   `Cancelled`), `ReservationId *string` (set once allocated; needed to
   cancel).
@@ -37,6 +43,13 @@
   `PromisePolicy.FeasibleBy` instead — the LATEST window at or before the
   deadline, `PromiseBasis=Network`, and NO promise (never a lead-time
   fallback) when the deadline cannot be met (ADR-0020).
+- **Planned capacity** (ADR-0031) — a LOCAL read model of
+  warehouse-planning's CapacityPlans (`order.PlannedCapacityWindow`: plan id,
+  `location` = site code, `[start, end)`, `shortage`, `status`
+  DRAFT|PUBLISHED), fed only by its CloudEvents, last-writer-wins per plan id.
+  A PUBLISHED shortage overlapping an order's `[now, promise cutoff)` at the
+  configured site ANNOTATES the order (`capacityConstraint`, derived at read
+  time). It never moves the promise, rejects an order, or touches allocation.
 - **Hold** (ADR-0020) — `releaseOnAllocation=false` at intake: the order
   allocates and stops ("allocated, not released" — deliberately NOT a new
   status), until `ReleaseHeldOrder` commits it. A held order must be
@@ -63,7 +76,10 @@
   line statuses, never stored redundantly.
 - **OrderLine**: `Quantity` must be > 0; `SKU` must be non-empty; a
   `Backordered` line may transition back to `Allocated` ONLY via
-  `RetryAllocation` — no other path.
+  `RetryAllocation` — no other path. The only `Allocated` -> `Backordered`
+  transition is `Order.LoseReservation`, used when the reconfirm-before-
+  release step (`reconfirmAllocatedLines` in `allocation.go`) gets a 409
+  for a line allocated in an earlier pass.
 - **BR2 (fail closed on ambiguity)**: a `409` from inventory-storage's
   `POST /reservations` is the business fact "no usable stock" and
   backorders that one line. A transport failure, a 5xx, or any other
@@ -103,14 +119,15 @@
 | `OrderAllocated` | Every line `Allocated`, eligible lines released in the same pass | **Yes** — enriched `lines[]` |
 | `OrderPartiallyAllocated` | Some lines allocated/released, some backordered, `AllowPartialShipment=true` | **Yes** — enriched `lines[]` |
 | `OrderAllocationPartiallyFailed` | Hard (non-409) failure mid-allocation; already-succeeded lines kept | No — operational visibility only |
-| `OrderLineReleased` | A line transitioned to `Released` | No |
-| `OrderReleased` | Every line on the order released | No |
+| `OrderLineReleased` | Declared, never raised today (no use case publishes it; see `deferred-and-known-gaps.md`) | No |
+| `OrderReleased` | Declared, never raised today | No |
 | `OrderCancelled` | `CancelOrder` succeeds | No |
 | `OrderRepromised` | `RepromiseOrder` (ADR-0018) finds a shipment group's promise moved after an inbound `TaskCPTMissed`/`PackageManifested` | **Yes** — `{cpt_id_old, cpt_id_new, reason}` |
 
 Only 3 of the 10 are integration events, mirroring `inventory-storage`'s own
-precedent of forwarding a minimal subset. All 10 are fanned to the
-analytics topic when `EVENT_PUBLISHER=kafka` (see `api-contracts.md`).
+precedent of forwarding a minimal subset. Every event that IS raised is
+fanned to the analytics topic when `EVENT_PUBLISHER=kafka` (see
+`api-contracts.md`).
 
 ## Use cases (application layer) — folded flow since ADR-0005
 
@@ -149,12 +166,15 @@ application/adapter-layer redesign, not a domain-layer one.
 
 ## pathId is internal-only (ADR-0005)
 
-The inbound `POST /orders` DTO has no `pathId` field. Every line
-unconditionally gets `shared.NewPathIdOrDefault("")`, which resolves to
-`shared.DefaultPathId` (`"pick"`). The response DTO still shows `pathId` on
-every line — callers can see it, never set it. A caller placing an order has
-no business supplying `wes-work-planning`'s internal routing vocabulary.
-Since ADR-0013/0016 the default is validated against the live
-process-path catalogue and its declared eligibility, but it is still the
-only path this policy can select (`ProcessPathCatalogue` has no "list
-active paths" method yet).
+The inbound `POST /orders` DTO has no `pathId` field. Each line's path is
+resolved by `order.PathSelectionPolicy.Select` (ADR-0013/0016/0021): it
+lists every active path from `ports.ProcessPathCatalogue.ListActive`,
+keeps the ones whose declared `Eligibility` admits the line (max units,
+required/excluded product attributes, gift wrap as the `"giftWrap"`
+attribute), and picks the shortest KNOWN `CycleTimeP95`, ties broken on
+the lower `PathId`. A nil catalogue (`PATH_CATALOGUE_SOURCE=none`) or an
+empty `ListActive()` fails OPEN to `shared.DefaultPathId` (`"pick"`); no
+eligible candidate is `shared.ErrLineIneligibleForResolvedPath` (422). The
+response DTO still shows `pathId` on every line — callers can see it,
+never set it. A caller placing an order has no business supplying
+`wes-work-planning`'s internal routing vocabulary.

@@ -6,6 +6,7 @@ package architecture
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -300,5 +301,154 @@ func assertIntegrationFileUsesTestcontainers(t *testing.T, path, content string)
 	}
 	if !strings.Contains(content, "testcontainers-go/modules/kafka") {
 		t.Errorf("%s: touches Kafka but does not import github.com/testcontainers/testcontainers-go/modules/kafka — Kafka-touching integration tests in this fleet must start their own broker via testcontainers, never assume/skip on an external one", path)
+	}
+}
+
+// postgresEnvGateRE matches reading the Postgres connection URL from the
+// environment: the shape every env-gated Postgres integration test took
+// (`url := os.Getenv("DATABASE_URL"); if url == "" { t.Skip(...) }`).
+var postgresEnvGateRE = regexp.MustCompile(`os\.(Getenv|LookupEnv)\("(ANALYTICS_|MIGRATIONS_)?DATABASE_URL"\)`)
+
+// postgresSkipRE matches a t.Skip/Skipf/SkipNow call whose message names a
+// DB env var — a skip tied to a missing DATABASE_URL.
+var postgresSkipRE = regexp.MustCompile(`t\.Skip(f|Now)?\(.*DATABASE_URL`)
+
+// TestPostgresIntegrationTestsUseTestcontainers is the Postgres twin of
+// TestKafkaIntegrationTestsUseTestcontainers (audit 2026-10-05, F1): a
+// Postgres-touching `-tags=integration` test MUST boot its own Postgres via
+// testcontainers-go/modules/postgres — never read DATABASE_URL /
+// ANALYTICS_DATABASE_URL from the environment and t.Skip when it is unset.
+// An env-gated test passes green when the variable is missing, so it proves
+// nothing wherever the CI integration job provisions no database — which is
+// exactly how the OrderRepo + OutboxPublisher tests were silently skipped in
+// CI until this sensor was added.
+//
+// A file satisfies the import requirement itself or via a shared helper in a
+// sibling _test.go file of the same package directory (outboxDB/newPool),
+// which is how most of this repo's tests reach their container.
+func TestPostgresIntegrationTestsUseTestcontainers(t *testing.T) {
+	// internal/ and cmd/ (cmd/order has a Postgres integration test of its own).
+	var paths []string
+	paths = append(paths, goFilesUnder(t, "..", true)...)
+	paths = append(paths, goFilesUnder(t, "../../cmd", true)...)
+	for _, path := range paths {
+		if !strings.HasSuffix(path, "_integration_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, v := range postgresIntegrationViolations(path, string(src), siblingImportsPostgresTestcontainers(t, path)) {
+			t.Errorf("%s", archViolation("contents", "Postgres integration tests boot their own Postgres via testcontainers-go/modules/postgres", v+
+				" FIX: start a throwaway container (tcpostgres.Run -> ConnectionString -> postgres.RunMigrations -> postgres.NewPool -> t.Cleanup(TerminateContainer)) or reuse the package's shared helper (outboxDB); never read DATABASE_URL or t.Skip."))
+		}
+	}
+}
+
+// siblingImportsPostgresTestcontainers reports whether another _test.go file
+// in the same directory (other than path itself) imports the testcontainers
+// Postgres module — i.e. a shared helper the file under test can call.
+func siblingImportsPostgresTestcontainers(t *testing.T, path string) bool {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("read dir of %s: %v", path, err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		sibling := filepath.Join(filepath.Dir(path), name)
+		if e.IsDir() || sibling == path || !strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(sibling)
+		if err != nil {
+			t.Fatalf("read %s: %v", sibling, err)
+		}
+		if importsPostgresTestcontainers(string(src)) {
+			return true
+		}
+	}
+	return false
+}
+
+func importsPostgresTestcontainers(content string) bool {
+	return strings.Contains(content, "testcontainers-go/modules/postgres")
+}
+
+// integrationTestTouchesPostgres reports whether an integration test's source
+// talks to Postgres: a driver/database import, or this repo's own pool and
+// migration entry points.
+func integrationTestTouchesPostgres(content string) bool {
+	return strings.Contains(content, "jackc/pgx") ||
+		strings.Contains(content, "database/sql") ||
+		strings.Contains(content, "pgxpool") ||
+		strings.Contains(content, "RunMigrations(") ||
+		strings.Contains(content, ".NewPool(")
+}
+
+// postgresIntegrationViolations returns one message per breach of the
+// Postgres-testcontainers rule in an integration test file. Comment lines
+// are skipped so a header explaining "never an external DATABASE_URL" does
+// not false-positive. siblingHelper says a same-package _test.go file
+// imports the testcontainers Postgres module.
+func postgresIntegrationViolations(path, content string, siblingHelper bool) []string {
+	var out []string
+	for i, line := range strings.Split(content, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue
+		}
+		if postgresEnvGateRE.MatchString(line) {
+			out = append(out, fmt.Sprintf("%s:%d reads the Postgres URL from the environment (%s).", path, i+1, strings.TrimSpace(line)))
+		}
+		if postgresSkipRE.MatchString(line) {
+			out = append(out, fmt.Sprintf("%s:%d skips when a DB env var is unset (%s).", path, i+1, strings.TrimSpace(line)))
+		}
+	}
+	if integrationTestTouchesPostgres(content) && !importsPostgresTestcontainers(content) && !siblingHelper {
+		out = append(out, path+" touches Postgres but neither it nor a sibling _test.go helper imports github.com/testcontainers/testcontainers-go/modules/postgres.")
+	}
+	return out
+}
+
+// The detector itself, so a refactor cannot quietly turn the sensor into a
+// test that always passes: each bad fixture must be flagged, each good one not.
+func TestPostgresIntegrationDetector(t *testing.T) {
+	const envGated = "package x\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) {\n" +
+		"	url := os.Getenv(\"DATABASE_URL\")\n	if url == \"\" {\n		t.Skip(\"DATABASE_URL not set\")\n	}\n}\n"
+	const analyticsGated = "func f() string { return os.Getenv(\"ANALYTICS_DATABASE_URL\") }\n"
+	const lookupGated = "u, ok := os.LookupEnv(\"DATABASE_URL\")\n"
+	const skipOnly = "	t.Skipf(\"no DATABASE_URL in this env\")\n"
+	const touchesNoContainer = "import \"github.com/jackc/pgx/v5/pgxpool\"\nvar _ *pgxpool.Pool\n"
+	const touchesViaEntryPoint = "pool, _ := postgres.NewPool(ctx, url)\n"
+	const withContainer = "import tcpostgres \"github.com/testcontainers/testcontainers-go/modules/postgres\"\n" +
+		"import \"github.com/jackc/pgx/v5/pgxpool\"\nvar _ *pgxpool.Pool\n"
+	const commentOnly = "// never an external DATABASE_URL: os.Getenv(\"DATABASE_URL\") is banned, never t.Skip(\"DATABASE_URL\")\n" + withContainer
+	const noPostgres = "package x\n\nfunc TestPure(t *testing.T) {}\n"
+
+	cases := []struct {
+		name    string
+		content string
+		sibling bool
+		want    int // number of violations; 0 means clean
+	}{
+		{"env gate plus skip is flagged twice", envGated, true, 2},
+		{"ANALYTICS_DATABASE_URL read is flagged", analyticsGated, true, 1},
+		{"LookupEnv of DATABASE_URL is flagged", lookupGated, true, 1},
+		{"skip tied to DATABASE_URL is flagged", skipOnly, true, 1},
+		{"pgx without testcontainers or helper is flagged", touchesNoContainer, false, 1},
+		{"NewPool entry point without testcontainers or helper is flagged", touchesViaEntryPoint, false, 1},
+		{"pgx with a sibling testcontainers helper is clean", touchesNoContainer, true, 0},
+		{"pgx importing the testcontainers postgres module is clean", withContainer, false, 0},
+		{"comment mentions of the banned shapes are ignored", commentOnly, false, 0},
+		{"a file that never touches Postgres is clean", noPostgres, false, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := postgresIntegrationViolations("fixture_integration_test.go", tc.content, tc.sibling)
+			if len(got) != tc.want {
+				t.Fatalf("want %d violation(s), got %d: %v", tc.want, len(got), got)
+			}
+		})
 	}
 }

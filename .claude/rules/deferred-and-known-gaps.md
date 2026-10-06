@@ -1,3 +1,10 @@
+---
+paths:
+  - "internal/domain/**"
+  - "internal/application/**"
+  - "README.md"
+  - ".gremlins.yaml"
+---
 # Deferred and known gaps (document them, don't skip silently)
 
 Several items originally listed as "v1 scope — explicitly deferred" have
@@ -19,15 +26,22 @@ Still deferred, as of the last verified pass:
   remains the tagged fallback), i.e. the instant the order leaves the
   building — there is no live carrier or transit-time integration, and no
   such service exists in this fleet to call.
-- **Multi-path selection.** `PathSelectionPolicy` evaluates eligibility
-  (ADR-0016) but can only choose `shared.DefaultPathId`:
-  `ports.ProcessPathCatalogue` has no "list active paths" method.
+- **A fulfillment site on the order (ADR-0031).** Orders carry no site, so
+  the planned-capacity annotation matches `PLANNED_CAPACITY_SITE_ID`
+  (default `DEFAULT_SITE_ID`) like the promise does; if that differs from
+  warehouse-planning's `location`, no order is annotated. Also deferred: a
+  path-level match (planning's `path_id` is its own label), pushing the
+  promise on a shortage (a shortage is a quantity, not a delay) and an
+  `OrderCapacityConstrained` event.
 - **Sweeping an orphaned hold (ADR-0020).** Nothing here expires an order
   held with `releaseOnAllocation=false` that its caller never releases or
   cancels — it keeps real inventory reservations until someone does.
-- **A dedicated problem type for `ErrHeldOrderMustBeShipComplete`.** It
-  maps to 422 in `statusFor` but has no `problemFor` case, so its RFC 7807
-  `type` is `internal-error`.
+- **`OrderLineReleased` / `OrderReleased` are declared but never raised.**
+  `shared.NewOrderLineReleased`/`NewOrderReleased` exist and the analytics
+  publisher/projector handle both types, but no use case publishes them
+  (release is announced only via `OrderAllocated`/
+  `OrderPartiallyAllocated`), so the funnel's `ordersReleased`/
+  `linesReleased` columns stay at zero.
 - **Kafka release-confirmation reply events from wes-work-planning.**
   v1 (ADR-0005) ships fire-and-forget: this service publishes
   `OrderAllocated`/`OrderPartiallyAllocated` and never learns whether

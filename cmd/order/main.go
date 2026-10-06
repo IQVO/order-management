@@ -121,6 +121,13 @@ func run() error {
 	clock := memory.SystemClock{}
 	server := buildInboundServer(orders, publisher, clock, promise, lookups.inventory, lookups.classification, catalogue, orderMetrics, uow, dbPool, readiness)
 
+	// ADR 0031: planned capacity from warehouse-planning. A nil value (the
+	// consumer-group env unset) leaves everything below exactly as before.
+	if pc := buildPlannedCapacity(dbPool, logger); pc != nil {
+		pc.attach(server, clock)
+		defer pc.startConsumer(logger)()
+	}
+
 	repromiseConsumerCtx, cancelRepromiseConsumer := context.WithCancel(context.Background())
 	defer cancelRepromiseConsumer()
 	repromiseOrder := newRepromiseOrder(orders, publisher, clock, promise, repromiseProcessed, uow, logger)
@@ -389,44 +396,83 @@ func serveAndShutdown(
 	case <-ctx.Done():
 	}
 
-	return drainUnderShutdown(logger, httpServer, readiness,
+	return drainUnderShutdown(logger, httpServer, readiness, drainDelayFromEnv(logger),
 		stopRelay, relayDone,
 		repromiseConsumer, repromiseConsumerDone, cancelRepromiseConsumer)
 }
 
+// DefaultShutdownDrainDelay is how long shutdown waits, after flipping
+// /readyz to not-ready and before closing the listener, for Kubernetes'
+// readinessProbe (periodSeconds 5) and the endpoint controller to
+// observe the flip and stop routing NEW traffic to this pod (ADR-0025
+// §8). SHUTDOWN_DRAIN_DELAY overrides it; "0" disables the wait (tests,
+// local dev).
+const DefaultShutdownDrainDelay = 5 * time.Second
+
+// shutdownBudget bounds HTTP drain + consumer stop + relay final pass.
+const shutdownBudget = 10 * time.Second
+
+// drainDelayFromEnv reads SHUTDOWN_DRAIN_DELAY. Unlike durationEnv, 0 is
+// a legal value (disable the delay); negative or unparsable values fall
+// back to DefaultShutdownDrainDelay with a warning.
+func drainDelayFromEnv(logger *slog.Logger) time.Duration {
+	raw := os.Getenv("SHUTDOWN_DRAIN_DELAY")
+	if raw == "" {
+		return DefaultShutdownDrainDelay
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		logger.Warn("ignoring invalid duration env var", "key", "SHUTDOWN_DRAIN_DELAY", "value", raw, "fallback", DefaultShutdownDrainDelay.String())
+		return DefaultShutdownDrainDelay
+	}
+	return d
+}
+
 // drainUnderShutdown performs the ADR-0025 §graceful shutdown sequence:
-// flip readiness first, drain the HTTP server, then stop and await the
-// outbox relay and the repromise consumer, all bounded by one 10s
-// deadline (see the numbered steps below).
+//
+//  1. readiness.SetNotReady() — /readyz answers 503 so the readinessProbe
+//     stops routing new traffic here;
+//  2. wait drainDelay — time for the probe/endpoint controller to observe
+//     the flip BEFORE the listener closes (otherwise requests still being
+//     routed hit a closed port);
+//  3. httpServer.Shutdown — drain in-flight requests (writer #1 of the
+//     outbox);
+//  4. stop and await the repromise consumer, including the commit of the
+//     message it is mid-handling (writer #2 of the outbox);
+//  5. stop and await the outbox relay LAST — it must make its final pass
+//     only after every writer has stopped, otherwise an event committed
+//     by the HTTP drain or the consumer's last message would be stranded
+//     until the next pod boots (ADR-0022).
+//
+// Steps 3-5 share one shutdownBudget deadline; the drain delay is outside
+// it (terminationGracePeriodSeconds must cover delay + budget).
 func drainUnderShutdown(
 	logger *slog.Logger,
-	httpServer *http.Server,
+	httpServer interface {
+		Shutdown(ctx context.Context) error
+	},
 	readiness *inboundhttp.Readiness,
+	drainDelay time.Duration,
 	stopRelay context.CancelFunc,
 	relayDone <-chan struct{},
 	repromiseConsumer *inboundkafka.RepromiseConsumer,
 	repromiseConsumerDone <-chan struct{},
 	cancelRepromiseConsumer context.CancelFunc,
 ) error {
+	readiness.SetNotReady()
+	if drainDelay > 0 {
+		logger.Info("shutdown: readiness flipped to not-ready; waiting for traffic to drain", "drain_delay", drainDelay.String())
+		time.Sleep(drainDelay)
+	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownBudget)
 	defer cancel()
 	err := httpServer.Shutdown(shutdownCtx)
 
-	// Let the relay finish its in-flight pass so an event committed by a
-	// request that completed just before shutdown is not stranded until
-	// the next pod boots.
-	stopRelay()
-	select {
-	case <-relayDone:
-	case <-shutdownCtx.Done():
-		logger.Warn("outbox relay did not stop before the shutdown deadline")
-	}
-
 	// Stop the repromise consumer's loop cleanly: cancel so no NEW
 	// message is fetched, then wait (bounded) for any message already
-	// being handled to finish — including its offset commit — before
-	// this function returns and the deferred repromiseConsumer.Close()/
+	// being handled to finish — including its offset commit — before the
+	// relay's final pass and the deferred repromiseConsumer.Close()/
 	// closeAdapters() calls run.
 	cancelRepromiseConsumer()
 	if repromiseConsumer != nil {
@@ -435,6 +481,16 @@ func drainUnderShutdown(
 		case <-shutdownCtx.Done():
 			logger.Warn("repromise consumer did not stop before the shutdown deadline")
 		}
+	}
+
+	// Every outbox writer has now stopped: let the relay finish its
+	// in-flight pass so events committed by the last HTTP request or the
+	// consumer's last message are not stranded until the next pod boots.
+	stopRelay()
+	select {
+	case <-relayDone:
+	case <-shutdownCtx.Done():
+		logger.Warn("outbox relay did not stop before the shutdown deadline")
 	}
 
 	return err
@@ -536,7 +592,13 @@ func buildRepoAdapters(ctx context.Context, databaseURL, migrationsDatabaseURL, 
 			return nil, nil, nil, nil, nil, noop, err
 		}
 		orders = postgres.NewOrderRepo(pool)
-		closeRepos = pool.Close
+		// ADR-0032: the housekeeping sweeper (idempotency_keys TTL +
+		// published outbox retention + outbox-lag gauge registration
+		// when the outbox is the publish path) starts for EVERY
+		// Postgres-backed process — idempotency keys are written
+		// regardless of EVENT_PUBLISHER — and must be stopped BEFORE
+		// the pool closes, which closeWithSweeper guarantees.
+		closeRepos = closeWithSweeper(pool, strings.EqualFold(eventPublisher, "kafka"), logger)
 	}
 
 	if !strings.EqualFold(eventPublisher, "kafka") {
@@ -638,6 +700,113 @@ func buildRepromiseProcessedEvents(pool *pgxpool.Pool, logger *slog.Logger) port
 		return memory.NewRepromiseProcessedEventsRepo()
 	}
 	return postgres.NewRepromiseProcessedEventsRepo(pool)
+}
+
+// housekeepingSettings is the sweeper's configuration (ADR-0032). A zero
+// duration disables the corresponding behaviour: interval 0 disables the
+// whole sweeper, TTL/retention 0 keep that table's rows forever.
+type housekeepingSettings struct {
+	interval        time.Duration
+	idempotencyTTL  time.Duration
+	outboxRetention time.Duration
+}
+
+// housekeepingSettingsFromEnv reads HOUSEKEEPING_INTERVAL (default 1h),
+// IDEMPOTENCY_KEY_TTL (default 24h) and OUTBOX_RETENTION (default 168h =
+// 7d), mirroring inventory-storage's ADR-0026 env knobs exactly.
+func housekeepingSettingsFromEnv(logger *slog.Logger) housekeepingSettings {
+	return housekeepingSettings{
+		interval:        housekeepingDurationEnv(logger, "HOUSEKEEPING_INTERVAL", postgres.DefaultSweepInterval),
+		idempotencyTTL:  housekeepingDurationEnv(logger, "IDEMPOTENCY_KEY_TTL", postgres.DefaultIdempotencyKeyTTL),
+		outboxRetention: housekeepingDurationEnv(logger, "OUTBOX_RETENTION", postgres.DefaultOutboxRetention),
+	}
+}
+
+// housekeepingDurationEnv parses a Go duration env var. Unset yields def;
+// an invalid or negative value logs a warning and yields def. "0" is valid
+// and means "disabled" to the caller (unlike durationEnv above, which is
+// for knobs where 0 is meaningless).
+func housekeepingDurationEnv(logger *slog.Logger, key string, def time.Duration) time.Duration {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return def
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		logger.Warn("ignoring invalid duration env var, using default", "key", key, "value", raw, "default", def.String())
+		return def
+	}
+	return d
+}
+
+// sweeperShutdownBudget bounds how long shutdown waits for the current
+// sweep pass to finish; a pass is one batched DELETE loop, well under a
+// second on any healthy database.
+const sweeperShutdownBudget = 10 * time.Second
+
+// closeWithSweeper starts the housekeeping sweeper (ADR-0032) for a
+// Postgres-backed process — idempotency keys are written regardless of
+// EVENT_PUBLISHER, so it is not tied to the outbox — plus the
+// outbox-lag gauge when the outbox is the publish path, and returns the
+// closer that stops both BEFORE the pool closes.
+func closeWithSweeper(pool *pgxpool.Pool, outboxEnabled bool, logger *slog.Logger) func() {
+	stopSweeper := startSweeper(pool, housekeepingSettingsFromEnv(logger), logger)
+	var unregisterLagGauge func()
+	if outboxEnabled {
+		// order.outbox.lag_seconds (ADR-0032): only meaningful when the
+		// outbox is the publish path; registered here so its callback
+		// is guaranteed to be unregistered before pool.Close.
+		reg, err := postgres.RegisterOutboxLagGauge(pool)
+		if err != nil {
+			logger.Error("outbox lag gauge unavailable; the relay will run without order.outbox.lag_seconds", "error", err)
+		} else {
+			unregisterLagGauge = func() {
+				if err := reg.Unregister(); err != nil {
+					logger.Warn("outbox lag gauge unregister failed", "error", err)
+				}
+			}
+		}
+	}
+	return func() {
+		stopSweeper()
+		if unregisterLagGauge != nil {
+			unregisterLagGauge()
+		}
+		pool.Close()
+	}
+}
+
+// startSweeper runs the housekeeping Sweeper (ADR-0032) in a goroutine and
+// returns a stop func that cancels it and waits, bounded by
+// sweeperShutdownBudget, for the current pass to finish. With interval 0 it
+// starts nothing and returns a no-op.
+func startSweeper(pool *pgxpool.Pool, cfg housekeepingSettings, logger *slog.Logger) func() {
+	if cfg.interval <= 0 {
+		logger.Info("housekeeping sweeper disabled (HOUSEKEEPING_INTERVAL=0)")
+		return func() {}
+	}
+	sweeper := postgres.NewSweeper(pool,
+		postgres.WithSweeperLogger(logger),
+		postgres.WithSweepInterval(cfg.interval),
+		postgres.WithIdempotencyKeyTTL(cfg.idempotencyTTL),
+		postgres.WithOutboxRetention(cfg.outboxRetention),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = sweeper.Run(ctx) // only ever returns nil, on cancellation
+	}()
+	logger.Info("housekeeping sweeper started", "interval", cfg.interval,
+		"idempotency_key_ttl", cfg.idempotencyTTL, "outbox_retention", cfg.outboxRetention)
+	return func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(sweeperShutdownBudget):
+			logger.Warn("housekeeping sweeper did not stop before the shutdown budget")
+		}
+	}
 }
 
 // buildInventoryClient selects the outbound InventoryReservationClient via

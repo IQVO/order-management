@@ -62,6 +62,12 @@ tags:
       (fail-closed on ambiguity). A backordered line returns to
       `Allocated` only via retry-allocation, which also re-attempts
       release for any lines it newly clears.
+  - name: PlannedCapacity
+    description: >
+      The local read model of warehouse-planning's published CapacityPlans
+      (ADR 0031). Written only by the Kafka consumer; this API only reads it.
+      Present only when the deployment enables the integration
+      (`PLANNED_CAPACITY_CONSUMER_GROUP`).
   - name: Health
     description: Liveness probe.
 
@@ -415,6 +421,87 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /planned-capacity:
+    get:
+      operationId: getPlannedCapacity
+      summary: List a site's planned capacity windows
+      description: >
+        Reads order-management's LOCAL read model of warehouse-planning's
+        CapacityPlans for one site (ADR 0031): a PLANNED statement about a
+        future window — the demand the planned capacity cannot process in
+        it (`shortage`, in orders) — mirrored from the CloudEvents
+        warehouse-planning publishes on `warehouse.warehouse-planning.events`.
+        It is not live execution state and is never refreshed by calling
+        warehouse-planning. Windows of every `status` are listed (a `DRAFT`
+        is visible here but never influences an order; only a `PUBLISHED`
+        plan with `shortage > 0` annotates orders — see `capacityConstraint`
+        on the Order schema). Windows that ended before `from` are omitted.
+        This route exists only when the integration is enabled; otherwise it
+        is a 404.
+      tags: [PlannedCapacity]
+      parameters:
+        - name: site
+          in: query
+          required: true
+          description: >
+            The planning `location` — a site/building code such as `SIM1`
+            (exact, case-sensitive match).
+          schema:
+            type: string
+            minLength: 1
+          example: SIM1
+        - name: from
+          in: query
+          required: false
+          description: >
+            RFC 3339 instant; only windows whose end is after it are listed.
+            Defaults to now.
+          schema:
+            type: string
+            format: date-time
+          example: "2026-10-05T00:00:00Z"
+      responses:
+        "200":
+          description: The site's planned windows ordered by start (possibly none).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlannedCapacity"
+              example:
+                site: SIM1
+                windows:
+                  - planId: 0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10
+                    warehouseId: WH-1
+                    location: SIM1
+                    pathId: pick-rebin-pack
+                    windowStart: "2026-10-05T08:00:00Z"
+                    windowEnd: "2026-10-05T16:00:00Z"
+                    assignedDemand: 12000
+                    capacityOverWindow: 8000
+                    shortage: 4000
+                    bottleneckStep: REBIN
+                    status: PUBLISHED
+                    asOf: "2026-10-04T21:45:10Z"
+        "400":
+          description: The `site` query parameter is missing, or `from` is not an RFC 3339 timestamp.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.order-management.warehouse-systems.dev/invalid-query-parameter
+                title: A required query parameter is missing or invalid
+                status: 400
+                detail: query parameter "site" is required
+                instance: /planned-capacity
+        "404":
+          description: >
+            The planned-capacity integration is not enabled on this
+            deployment (`PLANNED_CAPACITY_CONSUMER_GROUP` unset): the route is
+            not registered, so the router's default 404 answers.
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 components:
   parameters:
     OrderId:
@@ -461,20 +548,34 @@ components:
 
     DownstreamUnavailable:
       description: >
-        inventory-storage could not be reached, answered ambiguously, or
-        is wired in permissive (no-op) mode. Never papered over with a
-        2xx: allocating real stock must not appear to succeed when it did
-        not.
+        inventory-storage could not be reached (transport error, timeout,
+        open circuit breaker), answered with an unexpected status, or is
+        wired in permissive (no-op) mode. Problem `type` is
+        `downstream-unavailable` for an infrastructure failure and
+        `downstream-not-configured` for permissive mode. Never papered
+        over with a 2xx: allocating real stock must not appear to succeed
+        when it did not.
       content:
         application/problem+json:
           schema:
             $ref: "#/components/schemas/Problem"
-          example:
-            type: https://errors.order-management.warehouse-systems.dev/downstream-not-configured
-            title: A downstream service is running in permissive (no-op) mode
-            status: 503
-            detail: downstream client is running in permissive (no-op) mode and cannot perform this operation
-            instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/retry-allocation
+          examples:
+            unavailable:
+              summary: inventory-storage failed or answered unexpectedly
+              value:
+                type: https://errors.order-management.warehouse-systems.dev/downstream-unavailable
+                title: A downstream service is unavailable or answered unexpectedly
+                status: 503
+                detail: "downstream service is unavailable: inventory-storage: unexpected response status: 500"
+                instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/retry-allocation
+            notConfigured:
+              summary: inventory-storage client is in permissive (no-op) mode
+              value:
+                type: https://errors.order-management.warehouse-systems.dev/downstream-not-configured
+                title: A downstream service is running in permissive (no-op) mode
+                status: 503
+                detail: downstream client is running in permissive (no-op) mode and cannot perform this operation
+                instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/retry-allocation
 
     InternalError:
       description: An unexpected internal error occurred.
@@ -684,6 +785,126 @@ components:
             when the line is not allocated.
           example: res-a1b2c3d4-0000-0000-0000-000000000009
 
+    CapacityConstraint:
+      type: object
+      required: [constrained, site, windows]
+      description: >
+        Present on an Order ONLY when its promise overlaps a PUBLISHED
+        warehouse-planning shortage window at the configured site (ADR 0031).
+        The order's work window is `[now, promise cutoff)`; a window
+        overlaps it when both half-open intervals share at least one instant
+        (a window starting exactly at the cutoff does not). It is a derived,
+        read-time annotation: the order is still accepted, allocated and
+        released, its `promiseDate` is NOT moved, and nothing is reserved or
+        revoked. Omitted entirely otherwise, so with no planning events
+        consumed the Order response is unchanged.
+      properties:
+        constrained:
+          type: boolean
+          description: Always true when the object is present.
+          example: true
+        site:
+          type: string
+          description: >
+            The planning `location` the order was matched against — the
+            single configured site (`PLANNED_CAPACITY_SITE_ID`, defaulting to
+            `DEFAULT_SITE_ID`); orders do not carry a site of their own.
+          example: SIM1
+        windows:
+          type: array
+          description: The overlapping shortage windows, ordered by start.
+          items:
+            $ref: "#/components/schemas/CapacityConstraintWindow"
+    CapacityConstraintWindow:
+      type: object
+      required: [planId, windowStart, windowEnd, shortage]
+      properties:
+        planId:
+          type: string
+          description: The warehouse-planning CapacityPlan id.
+          example: 0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10
+        windowStart:
+          type: string
+          format: date-time
+          example: "2026-10-05T08:00:00Z"
+        windowEnd:
+          type: string
+          format: date-time
+          description: Exclusive.
+          example: "2026-10-05T16:00:00Z"
+        shortage:
+          type: number
+          format: double
+          description: Orders the planned capacity cannot process in the window.
+          example: 4000
+        bottleneckStep:
+          type: string
+          description: The path step limiting flow, as warehouse-planning reports it.
+          example: REBIN
+    PlannedCapacityWindow:
+      type: object
+      required: [planId, warehouseId, location, windowStart, windowEnd, assignedDemand, capacityOverWindow, shortage, status, asOf]
+      properties:
+        planId:
+          type: string
+          example: 0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10
+        warehouseId:
+          type: string
+          description: warehouse-planning's own warehouse label (informational).
+          example: WH-1
+        location:
+          type: string
+          description: Site/building code.
+          example: SIM1
+        pathId:
+          type: string
+          description: warehouse-planning's own path label (informational; not an order-management process path id).
+          example: pick-rebin-pack
+        windowStart:
+          type: string
+          format: date-time
+          example: "2026-10-05T08:00:00Z"
+        windowEnd:
+          type: string
+          format: date-time
+          description: Exclusive.
+          example: "2026-10-05T16:00:00Z"
+        assignedDemand:
+          type: number
+          format: double
+          example: 12000
+        capacityOverWindow:
+          type: number
+          format: double
+          example: 8000
+        shortage:
+          type: number
+          format: double
+          example: 4000
+        bottleneckStep:
+          type: string
+          example: REBIN
+        status:
+          type: string
+          enum: [DRAFT, PUBLISHED]
+          description: Only PUBLISHED plans with a shortage annotate orders.
+          example: PUBLISHED
+        asOf:
+          type: string
+          format: date-time
+          description: The CloudEvents `time` of the event that last wrote this row (last writer wins per plan id).
+          example: "2026-10-04T21:45:10Z"
+    PlannedCapacity:
+      type: object
+      required: [site, windows]
+      properties:
+        site:
+          type: string
+          example: SIM1
+        windows:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlannedCapacityWindow"
     Order:
       type: object
       required: [id, status, allowPartialShipment, releaseOnAllocation, lines]
@@ -726,6 +947,8 @@ components:
             configurable static lead time, not a live carrier rate — see
             the README's "Deferred (v1)" section.
           example: "2026-08-27T09:00:00Z"
+        capacityConstraint:
+          $ref: "#/components/schemas/CapacityConstraint"
         lines:
           type: array
           items:

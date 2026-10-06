@@ -19,8 +19,14 @@ import (
 
 	inboundhttp "github.com/claudioed/order-management/internal/adapters/inbound/http"
 	"github.com/claudioed/order-management/internal/adapters/outbound/analyticsstore"
+	"github.com/claudioed/order-management/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/order-management/internal/bootretry"
 )
+
+// telemetryFlushTimeout bounds the final export attempt on shutdown,
+// matching cmd/order. Without a deadline the exporter would retry against
+// an unreachable Collector well past what an orchestrator will wait for.
+const telemetryFlushTimeout = 5 * time.Second
 
 // errMissingAnalyticsURL is returned when ANALYTICS_DATABASE_URL is unset.
 var errMissingAnalyticsURL = errors.New("ANALYTICS_DATABASE_URL is required")
@@ -35,6 +41,28 @@ func main() {
 func run() error {
 	logger := newLogger(getenv("LOG_LEVEL", "info"))
 	slog.SetDefault(logger)
+
+	// ADR-0009 Tier 1: same non-blocking telemetry setup as cmd/order — an
+	// unreachable Collector degrades to dropped telemetry, never a server
+	// that won't start. Without this the otelchi/otelchimetric middleware
+	// in NewReportsRouter would bind to the no-op global providers.
+	serviceName := getenv("OTEL_SERVICE_NAME", inboundhttp.DefaultReportsServiceName)
+	shutdownTelemetry, err := telemetry.Setup(
+		context.Background(),
+		serviceName,
+		getenv("SERVICE_VERSION", telemetry.DefaultServiceVersion),
+		getenv("OTEL_EXPORTER_OTLP_ENDPOINT", telemetry.DefaultEndpoint),
+	)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		flushCtx, cancel := context.WithTimeout(context.Background(), telemetryFlushTimeout)
+		defer cancel()
+		if err := shutdownTelemetry(flushCtx); err != nil {
+			logger.Warn("telemetry flush failed on shutdown", "error", err)
+		}
+	}()
 
 	rootCtx := context.Background()
 
@@ -68,7 +96,7 @@ func run() error {
 	}
 
 	handlers := &inboundhttp.ReportsHandlers{Store: analyticsstore.NewPostgresReport(pool)}
-	router := inboundhttp.NewReportsRouter(handlers, logger)
+	router := inboundhttp.NewReportsRouter(handlers, logger, serviceName)
 
 	srv := &http.Server{Addr: httpAddr, Handler: router, ReadHeaderTimeout: 5 * time.Second}
 

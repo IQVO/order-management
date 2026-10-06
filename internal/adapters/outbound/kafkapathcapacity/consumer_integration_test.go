@@ -268,7 +268,7 @@ func (f *fakeCapability) CycleTimeP95(pathID shared.PathId) (time.Duration, bool
 func newAllocatedOrderForCapacityTest(t *testing.T, path shared.PathId, qty int) *order.Order {
 	t.Helper()
 	line := order.RehydrateOrderLine(1, "SKU-1", qty, path, false, order.LineAllocated, nil)
-	return order.Rehydrate("ord-1", []*order.OrderLine{line}, true, nil, nil, nil)
+	return order.Rehydrate(order.OrderSnapshot{ID: "ord-1", Lines: []*order.OrderLine{line}, AllowPartialShipment: true})
 }
 
 func createTopic(ctx context.Context, brokers []string, topic string) error {

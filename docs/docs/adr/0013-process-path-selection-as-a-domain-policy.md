@@ -10,7 +10,11 @@ description: "ADR 0013 — replace the hardcoded PathID default with a real doma
 
 ## Status
 
-Accepted.
+Accepted — the single-rule scope and catalogue deferral recorded here
+were extended by [ADR 0021](./0021-multi-path-attribute-driven-routing.md)
+(attribute-driven multi-path routing closes the original deferral) and
+[ADR 0016](./0016-eligibility-driven-process-path-selection.md)
+(eligibility filtering).
 
 ## Context
 

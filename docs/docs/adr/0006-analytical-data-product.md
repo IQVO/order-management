@@ -10,7 +10,7 @@ description: ADR 0006 — an analytical read model (the "Order Funnel & Allocati
 
 ## Status
 
-> **Superseded by ADR-0030** (the analytics "Envelope v1" with `schema_version` described here). Every Kafka message is now a
+> **Partially superseded (envelope only) by ADR-0030** (the analytics "Envelope v1" with `schema_version` described here). Every Kafka message is now a
 > CloudEvents 1.0 event — see
 > [ADR 0030](./0030-cloudevents-mandatory-event-envelope.md). The rest of
 > this record stands.
@@ -109,12 +109,17 @@ the analytical side.
 
 ### 4. Served over REST
 
-The reports binary serves the REST report resource. There is **no MCP adapter**
-in this service (none exists in v1 — see CLAUDE.md's deferred scope), so the
-curated MCP report tool the estate's pilot added is deliberately **out of scope
-here**; when an MCP inbound adapter is introduced, a read-only
-`get_order_management_funnel_report` tool calling the reports REST is the
-intended follow-up.
+The reports binary serves the REST report resource. When this record was
+accepted there was **no MCP adapter** in this service, so a curated MCP
+report tool was out of scope. That changed with
+[ADR 0010](./0010-mcp-inbound-adapter.md): `cmd/mcp` now exposes the
+read-only `get_promise_health` tool (added by
+[ADR 0019](./0019-promise-kpis-on-order-funnel.md)), which queries the
+same analytical database directly. **Recorded decision:** the originally
+sketched `get_order_management_funnel_report` tool is NOT planned as a
+separate tool — `get_promise_health` covers the funnel report's MCP
+surface (the promise-basis KPIs are its rows), and the full funnel
+remains available over REST (`GET /reports/funnel`).
 
 ### 5. The report
 

@@ -10,7 +10,14 @@ description: "ADR 0019 — widen ADR 0006's Order Funnel & Allocation Health dat
 
 ## Status
 
-Accepted.
+Accepted. Amended 2026-10 (ADR-conformance audit): the basis distribution
+now has a third bucket, `promiseBasisNetwork` (ADR 0020 §3), end to end —
+projector, `report.Row`, REST `GET /reports/funnel`, and the
+`get_promise_health` MCP tool (migration `0003_promise_basis_network`).
+Before this, the projector had no `"Network"` case and silently dropped
+every network-originated allocation from the distribution, so
+`ordersAllocatedTotal` under-counted. `Network` promises remain excluded
+from the promise-to-cutoff gap (their cutoff was dictated, not chosen).
 
 ## Context
 
