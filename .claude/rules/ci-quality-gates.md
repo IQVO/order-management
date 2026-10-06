@@ -31,17 +31,16 @@ paths:
 - **`bdd`** — `go test ./... -run TestFeatures -v` (godog/Gherkin acceptance
   suite, `features/*.feature`).
 - **`integration`** — `go build/vet -tags=integration ./...` then
-  `go test -tags=integration ./internal/adapters/outbound/kafka` (+
+  `go test -tags=integration` on `./internal/adapters/outbound/kafka`,
   `kafkacatalog`, `kafkacptschedule`, `kafkapathcapacity`,
-  `./internal/adapters/inbound/kafka` and, since ADR-0031,
-  `./internal/adapters/outbound/postgres`) against a **Testcontainers** Kafka
-  broker (and, for the planned-capacity tests, a Testcontainers Postgres) (no external Kafka service in this workflow — do not write a
-  `KAFKA_BROKERS`-skip-gated test, it silently no-ops in CI). NOTE: the
-  job provisions no external Postgres either: the Postgres tests that own a
-  Testcontainers Postgres (the `outbound/postgres` outbox and
-  planned-capacity tests) run, but any `DATABASE_URL`/
-  `ANALYTICS_DATABASE_URL`-skip-gated test (`outbound/analyticsstore`, and
-  any such test left in `outbound/postgres`) is compiled/vetted and skips.
+  `./internal/adapters/inbound/kafka`, `./internal/adapters/inbound/http`,
+  `./internal/adapters/outbound/analyticsstore`, `./cmd/order` and
+  `./internal/adapters/outbound/postgres`. Every test boots its own
+  **Testcontainers** Kafka broker or Postgres: the job has no `services:`
+  container and no `DATABASE_URL`. Never write a `KAFKA_BROKERS`- or
+  `DATABASE_URL`-skip-gated test — it silently no-ops in CI; the arch-test
+  sensors `TestKafkaIntegrationTestsUseTestcontainers` and
+  `TestPostgresIntegrationTestsUseTestcontainers` reject that shape.
 - **`mutation-fast`** — blocking gremlins subset over `internal/domain/order`
   only, every push/PR. Thresholds in `.gremlins.yaml` (gremlins fails when
   the measured value is `<=` the threshold, so the threshold sits strictly
@@ -176,8 +175,8 @@ npm run typecheck && npm run build   # onBrokenLinks / onBrokenAnchors are both 
 go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
 ```
 
-Other make targets: `make integration` (Kafka adapters against a
-Testcontainers broker), `make coverage` (go test -race -coverprofile + the 90%
+Other make targets: `make integration` (Kafka + Postgres adapters, each
+test on its own Testcontainers broker/database), `make coverage` (go test -race -coverprofile + the 90%
 gate), `make bdd` (godog suite), `make mutation-fast` (gremlins subset on
 `internal/domain/order`, thresholds in `.gremlins.yaml`), `make vuln`
 (govulncheck).

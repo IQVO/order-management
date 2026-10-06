@@ -482,9 +482,9 @@ cyclop/gocognit/nestif/funlen only), **`test`** (+ coverage gate), **`bdd`**
 (godog/Gherkin acceptance suite under `features/`), **`contract`**
 (Schemathesis over `apis/openapi.yaml`, `scripts/contract-test.sh`),
 **`evals-tests`** (MCP evals E1–E3), **`integration`**
-(`-tags=integration` Kafka and Postgres adapter suites against
-Testcontainers; `DATABASE_URL`/`ANALYTICS_DATABASE_URL`-gated tests skip in
-CI), **`mutation-fast`** (gremlins on
+(`-tags=integration` Kafka and Postgres adapter suites; every test boots its
+own Testcontainers broker/database, so the job needs only Docker — no
+`services:` container, no `DATABASE_URL`), **`mutation-fast`** (gremlins on
 `./internal/domain/order`, thresholds pinned in `.gremlins.yaml`) with the
 exhaustive weekly **`mutation`** run on schedule, **`vuln`**
 (govulncheck), **`api-lint`** (Spectral on `apis/openapi.yaml` and

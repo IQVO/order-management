@@ -34,7 +34,11 @@ SKU, quantity, gift wrap), which process path each line resolved to, which
 inventory-storage reservation backs each allocated line, the delivery
 promise (per shipment group), and whether the order was held at intake or
 carries an external ship-by deadline. Every line mutation goes through an
-`Order` method, so no invariant can be bypassed from outside.
+`Order` method, so no invariant can be bypassed from outside: `order.New`
+stores its own copy of each `OrderLine`, so the caller's pointers do not
+alias the aggregate's entities. Persisted state comes back through one
+entry point, `order.Rehydrate(OrderSnapshot)`, which does not re-run
+construction invariants.
 
 Key state (`order.go`): `id`, `lines []*OrderLine`, `allowPartialShipment`,
 `promiseDate`/`promiseCptId`/`promiseBasis` (a "latest cutoff" summary of

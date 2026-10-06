@@ -111,7 +111,21 @@ classDiagram
     <<ValueObject>>
     DefaultPathId = pick
   }
+  class OrderSnapshot {
+    <<ValueObject>>
+    +ID OrderId
+    +Lines OrderLine[]
+    +AllowPartialShipment bool
+    +PromiseDate Time
+    +PromiseCptID string
+    +PromiseBasis PromiseBasis
+    +PromiseGroups PromiseGroup[]
+    +HeldAtIntake bool
+    +RequiredShipBy Time
+    +Version int
+  }
 
+  OrderSnapshot ..> Order : Rehydrate
   Order "1" *-- "1..*" OrderLine : lines
   Order "1" *-- "0..*" PromiseGroup : promiseGroups
   PromiseGroup *-- Promise
@@ -127,8 +141,12 @@ classDiagram
 Source: `internal/domain/order/order.go`, `order_line.go`, `status.go`,
 `fulfillment_class.go`, `promise_basis.go`, `promise_group.go`,
 `internal/domain/shared/order_id.go`, `sku.go`, `path_id.go`.
-Omits: constructors (`New`, `NewOrderLine`, `Rehydrate*`), read-only
-getters, and `Order.version`'s persistence-only role (ADR 0024).
+Omits: the constructors `New` and `NewOrderLine` (`New` stores its own
+copy of every line, so the caller's pointers never alias the aggregate's
+entities), read-only getters, and `Order.version`'s persistence-only role
+(ADR 0024). `OrderSnapshot` is the single input of `order.Rehydrate`, the
+one persistence entry point `postgres.OrderRepo.FindByID` calls; a zero
+`Version` rehydrates as 1.
 
 ## 2. Policies, routing and planned capacity
 
