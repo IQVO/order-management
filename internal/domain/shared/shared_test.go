@@ -126,6 +126,7 @@ func TestDomainEventsCarryNameAndTimestamp(t *testing.T) {
 		{"OrderReleased", shared.NewOrderReleased(at, "ord-1"), "OrderReleased"},
 		{"OrderCancelled", shared.NewOrderCancelled(at, "ord-1", 2), "OrderCancelled"},
 		{"OrderRepromised", shared.NewOrderRepromised(at, "ord-1", "sp1-1200", "sp1-1800", "TaskCPTMissed"), "OrderRepromised"},
+		{"SiteSkuDemandChanged", shared.NewSiteSkuDemandChanged(at, "ord-1", 2, "SIM1", "SKU-9", 5, promise, shared.SiteSkuDemandActive, "static-site-v1"), "SiteSkuDemandChanged"},
 	}
 
 	for _, tt := range tests {
@@ -153,6 +154,17 @@ func TestEventPayloadsCarryTheirDetail(t *testing.T) {
 	t.Run("OrderReceived", func(t *testing.T) { assertOrderReceivedDetail(t, at) })
 	t.Run("OrderRepromised", func(t *testing.T) { assertOrderRepromisedDetail(t, at) })
 	t.Run("OrderRepromised with empty CptIdOld (LeadTime basis)", func(t *testing.T) { assertOrderRepromisedEmptyCptIdOldDetail(t, at) })
+	t.Run("SiteSkuDemandChanged", func(t *testing.T) { assertSiteSkuDemandChangedDetail(t, at, promise) })
+}
+
+func assertSiteSkuDemandChangedDetail(t *testing.T, at, dueAt time.Time) {
+	t.Helper()
+	demand := shared.NewSiteSkuDemandChanged(at, "ord-7", 3, "SIM1", "SKU-9", 5, dueAt, shared.SiteSkuDemandRemoved, "static-site-v1")
+	if demand.SourceOrderID != "ord-7" || demand.LineNo != 3 || demand.SiteID != "SIM1" || demand.SKU != "SKU-9" ||
+		demand.DemandedUnits != 5 || !demand.DueAt.Equal(dueAt) ||
+		demand.State != shared.SiteSkuDemandRemoved || demand.AssignmentVersion != "static-site-v1" {
+		t.Fatalf("SiteSkuDemandChanged lost detail: %+v", demand)
+	}
 }
 
 func assertOrderLineAllocatedDetail(t *testing.T, at time.Time) {

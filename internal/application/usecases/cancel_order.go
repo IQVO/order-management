@@ -20,11 +20,14 @@ import (
 // context has no compensating command on that Supplier's published
 // contract to call.
 type CancelOrder struct {
-	Orders     ports.OrderRepo
-	Inventory  ports.InventoryReservationClient
-	Events     ports.EventPublisher
-	Clock      ports.Clock
-	UnitOfWork ports.UnitOfWork
+	Orders    ports.OrderRepo
+	Inventory ports.InventoryReservationClient
+	Events    ports.EventPublisher
+	Clock     ports.Clock
+	// DemandProjection is Phase-1's optional static demand-site scope. It
+	// emits REMOVED only for allocations that cancellation actually removes.
+	DemandProjection DemandProjectionPolicy
+	UnitOfWork       ports.UnitOfWork
 }
 
 func (uc *CancelOrder) Execute(ctx context.Context, id shared.OrderId) (*order.Order, error) {
@@ -43,6 +46,7 @@ func (uc *CancelOrder) Execute(ctx context.Context, id shared.OrderId) (*order.O
 	}
 
 	reservationIDs := o.AllocatedReservationIDs()
+	allocatedLines := o.LinesWithStatus(order.LineAllocated)
 	for _, reservationID := range reservationIDs {
 		if err := uc.Inventory.RevokeReservation(ctx, reservationID); err != nil {
 			// Fail closed: a reservation this context believes it holds
@@ -58,6 +62,13 @@ func (uc *CancelOrder) Execute(ctx context.Context, id shared.OrderId) (*order.O
 	}
 	if err := atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
 		if err := uc.Orders.Save(ctx, o); err != nil {
+			return err
+		}
+		// REMOVED carries the same per-line due_at the ACTIVE facts
+		// carried (the line's own group cutoff where recorded), so a
+		// demand consumer pairs the two on the same key and value
+		// shape. Collected BEFORE o.Cancel flipped the statuses.
+		if err := uc.DemandProjection.publishForGroups(ctx, uc.Events, uc.Clock.Now(), o, allocatedLines, shared.SiteSkuDemandRemoved); err != nil {
 			return err
 		}
 		return uc.Events.Publish(ctx, shared.NewOrderCancelled(uc.Clock.Now(), o.ID(), len(reservationIDs)))

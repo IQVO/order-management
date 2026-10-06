@@ -11,8 +11,8 @@ type DomainEvent interface {
 }
 
 type base struct {
-	Name string    `json:"eventName"`
-	At   time.Time `json:"occurredAt"`
+	Name string
+	At   time.Time
 }
 
 func (b base) EventName() string     { return b.Name }
@@ -279,5 +279,38 @@ func NewOrderRepromised(occurredAt time.Time, orderID OrderId, cptIdOld, cptIdNe
 	return OrderRepromised{
 		base:    newBase("OrderRepromised", occurredAt),
 		OrderID: orderID, CptIdOld: cptIdOld, CptIdNew: cptIdNew, Reason: reason,
+	}
+}
+
+// SiteSkuDemandState is the current demand-projection state for one source
+// order line. It is intentionally a small, PII-free integration vocabulary.
+type SiteSkuDemandState string
+
+const (
+	SiteSkuDemandActive  SiteSkuDemandState = "ACTIVE"
+	SiteSkuDemandRemoved SiteSkuDemandState = "REMOVED"
+)
+
+// SiteSkuDemandChanged is an additive, PII-free site/SKU demand projection
+// fact. SourceOrderID and LineNo identify the source line; SiteID and
+// AssignmentVersion identify the explicitly versioned static scope selected
+// by the application policy, not an attribute of the Order aggregate.
+type SiteSkuDemandChanged struct {
+	base
+	SourceOrderID     OrderId
+	LineNo            int
+	SiteID            string
+	SKU               SKU
+	DemandedUnits     int
+	DueAt             time.Time
+	State             SiteSkuDemandState
+	AssignmentVersion string
+}
+
+func NewSiteSkuDemandChanged(occurredAt time.Time, sourceOrderID OrderId, lineNo int, siteID string, sku SKU, demandedUnits int, dueAt time.Time, state SiteSkuDemandState, assignmentVersion string) SiteSkuDemandChanged {
+	return SiteSkuDemandChanged{
+		base: newBase("SiteSkuDemandChanged", occurredAt), SourceOrderID: sourceOrderID,
+		LineNo: lineNo, SiteID: siteID, SKU: sku, DemandedUnits: demandedUnits,
+		DueAt: dueAt, State: state, AssignmentVersion: assignmentVersion,
 	}
 }

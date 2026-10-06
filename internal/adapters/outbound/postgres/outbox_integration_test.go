@@ -2,8 +2,9 @@
 
 // Integration tests for the transactional outbox (ADR: see
 // docs/docs/adr — this rollout's ADR) against a real Postgres 16, gated
-// behind the `integration` build tag. Testcontainers-only: the test
-// boots and owns its own disposable Postgres container, never reads
+// behind the `integration` build tag. Testcontainers-only: the package's
+// TestMain (main_integration_test.go) boots ONE disposable Postgres
+// container shared by every test here (each test truncates the tables), never reads
 // DATABASE_URL or hardcodes localhost, so CI cannot silently skip this
 // contract and a local run is byte-for-byte identical to CI's.
 package postgres_test
@@ -12,12 +13,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/testcontainers/testcontainers-go"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	outboundkafka "github.com/claudioed/order-management/internal/adapters/outbound/kafka"
 	"github.com/claudioed/order-management/internal/adapters/outbound/postgres"
@@ -25,38 +25,6 @@ import (
 	"github.com/claudioed/order-management/internal/application/usecases"
 	"github.com/claudioed/order-management/internal/domain/shared"
 )
-
-// outboxDB boots a throwaway Postgres (testcontainers — the test owns its
-// own database, never an external DATABASE_URL) and runs every migration
-// in this repo, including the outbox one.
-func outboxDB(t *testing.T) *pgxpool.Pool {
-	t.Helper()
-	ctx := context.Background()
-	container, err := tcpostgres.Run(ctx, "postgres:16-alpine",
-		tcpostgres.WithDatabase("order_management"),
-		tcpostgres.WithUsername("order_management"),
-		tcpostgres.WithPassword("order_management"),
-		tcpostgres.BasicWaitStrategies(),
-	)
-	if err != nil {
-		t.Fatalf("start postgres container: %v", err)
-	}
-	t.Cleanup(func() { _ = testcontainers.TerminateContainer(container) })
-
-	url, err := container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		t.Fatalf("connection string: %v", err)
-	}
-	if err := postgres.RunMigrations(url, "../../../../migrations"); err != nil {
-		t.Fatalf("run migrations: %v", err)
-	}
-	pool, err := postgres.NewPool(ctx, url)
-	if err != nil {
-		t.Fatalf("open pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
-}
 
 // recordingSink is a fake postgres.Sink: it records everything sent, and
 // can be told to fail once on a specific event type so tests can drive
@@ -149,6 +117,72 @@ func TestOutbox_ReceiveOrder_CommitsAggregateAndBothTopicRowsTogether(t *testing
 		t.Fatalf("expected order persisted, got %v err=%v", found, err)
 	}
 }
+
+// TestOutbox_SiteSkuDemandChanged_CommitsWithOrderSaveInOneTransaction
+// pins the Phase-1 site/SKU demand projection's atomicity claim: with the
+// static demand-site scope enabled, ReceiveOrder's allocation pass emits
+// SiteSkuDemandChanged, and the row on the INTEGRATION topic (the event's
+// real destination — its CloudEvents key/subject is the line-scoped
+// "<order>/line/<n>", not the bare order id) is enqueued in the SAME
+// transaction as the Order save. A rollback of the receive must take the
+// demand row with it.
+func TestOutbox_SiteSkuDemandChanged_CommitsWithOrderSaveInOneTransaction(t *testing.T) {
+	pool := outboxDB(t)
+	ctx := context.Background()
+
+	orders := postgres.NewOrderRepo(pool)
+	writer := outboundkafka.NewPublisher(nil)
+	analytics := &outboundkafka.AnalyticsPublisher{Orders: orders, NewID: func() string { return "evt-demand" }}
+	outbox := postgres.NewOutboxPublisher(pool, writer, analytics)
+	uow := postgres.NewUnitOfWork(pool)
+
+	demandType := "com.warehouse.wes.order-management.siteskudemand.SiteSkuDemandChanged"
+
+	uc := &usecases.ReceiveOrder{
+		Orders: orders, Events: outbox, Clock: fixedClock{t: time.Now().UTC().Truncate(time.Microsecond)},
+		Inventory: allocatingInventory{}, UnitOfWork: uow,
+		DemandProjection: usecases.DemandProjectionPolicy{
+			SiteID: "SIM1", AssignmentVersion: usecases.StaticDemandAssignmentVersion,
+		},
+	}
+	o, err := uc.Execute(ctx, []usecases.NewLine{{SKU: "sku-1", Quantity: 3, PathID: "pick"}}, true)
+	if err != nil {
+		t.Fatalf("receive: %v", err)
+	}
+
+	if got := countOutboxWhereTopic(t, pool, outboundkafka.Topic, demandType); got != 1 {
+		t.Fatalf("expected 1 integration-topic SiteSkuDemandChanged row, got %d", got)
+	}
+	var key, value []byte
+	if err := pool.QueryRow(ctx,
+		`SELECT key, value FROM outbox_events WHERE topic = $1 AND event_type = $2`, outboundkafka.Topic, demandType,
+	).Scan(&key, &value); err != nil {
+		t.Fatalf("read demand row: %v", err)
+	}
+	wantKey := o.ID().String() + "/line/1"
+	if string(key) != wantKey {
+		t.Fatalf("outbox key = %q, want the line-scoped subject %q", key, wantKey)
+	}
+	if !strings.Contains(string(value), `"state":"ACTIVE"`) {
+		t.Fatalf("demand row value misses the ACTIVE state: %s", value)
+	}
+
+	// The analytics topic is NOT part of this event's contract: the
+	// projector's funnel does not consume a site demand fact.
+	if got := countOutboxWhereTopic(t, pool, outboundkafka.AnalyticsTopic, demandType); got != 0 {
+		t.Fatalf("expected 0 analytics-topic SiteSkuDemandChanged rows, got %d", got)
+	}
+}
+
+// allocatingInventory always succeeds, so ReceiveOrder's implicit
+// allocation pass genuinely allocates the line (and raises the demand
+// projection) inside the outbox transaction.
+type allocatingInventory struct{}
+
+func (allocatingInventory) Reserve(context.Context, ports.ReservationRequest) (ports.ReservationResult, error) {
+	return ports.ReservationResult{ReservationID: "res-demand-1"}, nil
+}
+func (allocatingInventory) RevokeReservation(context.Context, string) error { return nil }
 
 func countOutboxWhereTopic(t *testing.T, pool *pgxpool.Pool, topic, eventType string) int {
 	t.Helper()

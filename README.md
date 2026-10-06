@@ -193,6 +193,7 @@ Release no longer calls any Supplier synchronously — see
 | `OUTBOX_RETENTION` | `168h` | Age after which PUBLISHED `outbox_events` rows are swept (ADR 0032). |
 | `PLANNED_CAPACITY_CONSUMER_GROUP` | *(unset)* | Stable consumer group for warehouse-planning's capacity plans; unset ⇒ the feature is off and `GET /planned-capacity` is not registered (ADR 0031). |
 | `PLANNED_CAPACITY_SITE_ID` | `DEFAULT_SITE_ID` | Site whose planned-capacity windows annotate orders (ADR 0031). |
+| `DEMAND_PROJECTION_SITE_ID` | *(unset)* | Static demand-site scope for the additive, PII-free `SiteSkuDemandChanged` integration event (keyed `<order_id>/line/<line_no>`, assignment_version `static-site-v1`); unset ⇒ the projection is off and the event is never emitted (ADR 0035). |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:5181` | Console / MFE origins (ADR 0007). |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OTLP/gRPC endpoint for metrics and traces (ADR 0009); there is no `/metrics` scrape route. |
 | `OTEL_SERVICE_NAME` | `order-management` | Service name on telemetry (per binary: `order-management-mcp`, `order-projector`, `order-reports`). |
@@ -214,8 +215,9 @@ announced as a Kafka integration event, which that service (or any other
 subscriber) consumes independently:
 
 - **Topic:** `warehouse.order-management.events`
-- **Forwarded events:** `OrderAllocated`, `OrderPartiallyAllocated` and
-  (ADR 0018) `OrderRepromised` — every other domain event
+- **Forwarded events:** `OrderAllocated`, `OrderPartiallyAllocated`,
+  (ADR 0018) `OrderRepromised`, and (ADR 0035) the additive, PII-free
+  `SiteSkuDemandChanged` projection — every other domain event
   (`OrderReceived`, `OrderLineAllocated`, `OrderLineBackordered`,
   `OrderLineReleased`, `OrderReleased`, `OrderCancelled`,
   `OrderAllocationPartiallyFailed`) stays off the integration topic,
@@ -344,7 +346,7 @@ probes. The full contract, including the RFC 7807 error schema, is in
 | `DELETE` | `/orders/{id}` | CancelOrder |
 | `GET` | `/planned-capacity?site=` | GetPlannedCapacity — registered only when `PLANNED_CAPACITY_CONSUMER_GROUP` is set (ADR 0031) |
 | `GET` | `/healthz` | Liveness probe |
-| `GET` | `/readyz` | Readiness probe — flips to `503` first on shutdown (ADR 0025); not declared in `apis/openapi.yaml` |
+| `GET` | `/readyz` | Readiness probe — flips to `503` first on shutdown (ADR 0025) |
 
 `POST /orders/{id}/allocate` and the old general-purpose
 `POST /orders/{id}/release` were removed by
@@ -633,6 +635,7 @@ GitHub Pages on every push to `main` that touches `docs/**`, publishing to
 31. [0031 — Consume warehouse-planning's capacity plans into a local planned-capacity read model](docs/docs/adr/0031-consume-warehouse-planning-capacity-plans.md)
 32. [0032 — Housekeeping sweeper for idempotency keys and published outbox rows](docs/docs/adr/0032-housekeeping-sweeper-idempotency-keys-and-outbox.md)
 33. [0033 — Boot-time first-dial retry, synchronous-writer BatchTimeout/acks, and DLQ topic-create retry](docs/docs/adr/0033-bootretry-and-kafka-writer-tuning.md)
+34. [0034 — Raise OrderLineReleased and OrderReleased at the release transition](docs/docs/adr/0034-raise-order-line-released-and-order-released.md)
 
 ## License
 

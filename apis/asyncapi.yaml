@@ -96,15 +96,19 @@ channels:
       The outbound integration topic owned by the Order Management bounded
       context (`kafka.Topic` in the code). `OrderAllocated`/
       `OrderPartiallyAllocated` and — since ADR 0018 — `OrderRepromised`
-      are forwarded here; every other domain event is a local concern.
-      wes-work-planning's Kafka consumer derives each line's work unit id
-      from the frozen formula `{orderID}-line-{lineNo}`.
+      are forwarded here; since ADR 0035 the additive, PII-free
+      `SiteSkuDemandChanged` projection is too (keyed by the line-scoped
+      `<order_id>/line/<line_no>`, not the bare order id). Every other
+      domain event is a local concern. wes-work-planning's Kafka consumer
+      derives each line's work unit id from the frozen formula
+      `{orderID}-line-{lineNo}`.
     subscribe:
       operationId: consumeOrderManagementEvents
-      summary: Consume order allocation-outcome and re-promise integration events.
+      summary: Consume order allocation-outcome, re-promise, and site/SKU demand integration events.
       description: >-
         Subscribe to this channel to learn that an order's
-        allocation-then-release pass concluded, or that its promise moved.
+        allocation-then-release pass concluded, that its promise moved,
+        or that one source order line's site/SKU demand changed.
         `OrderAllocated` means every line was allocated (and every
         eligible line released in the same pass); `OrderPartiallyAllocated`
         means some lines allocated and some backordered on a
@@ -113,8 +117,14 @@ channels:
         fulfillment-execution fact (a missed CPT or a SLAM pass) — the
         fleet's "your delivery is delayed" trigger. `data.lines[]` on the
         first two carries exactly the lines released in this pass.
-        Consumers must be idempotent (dedupe on `id`) and should ignore
-        CloudEvents `type` values they do not recognise.
+        `SiteSkuDemandChanged` (ADR 0035) is keyed by
+        `<source_order_id>/line/<line_no>` so one line's demand stream is
+        ordered on its own partition; it is emitted only while
+        `DEMAND_PROJECTION_SITE_ID` is configured, and `state` is
+        `ACTIVE` (line demand exists at the site) or `REMOVED`
+        (cancellation removed it). Consumers must be idempotent (dedupe
+        on `id`) and should ignore CloudEvents `type` values they do not
+        recognise.
       tags:
         - name: order-management
       message:
@@ -122,6 +132,7 @@ channels:
           - $ref: "#/components/messages/OrderAllocatedIntegration"
           - $ref: "#/components/messages/OrderPartiallyAllocatedIntegration"
           - $ref: "#/components/messages/OrderRepromisedIntegration"
+          - $ref: "#/components/messages/SiteSkuDemandChangedIntegration"
 
   warehouse.fulfillment.events:
     description: >-
@@ -426,6 +437,89 @@ components:
               cpt_id_old: sp1-1200
               cpt_id_new: sp1-1800
               reason: TaskCPTMissed
+
+    SiteSkuDemandChangedIntegration:
+      name: SiteSkuDemandChanged
+      title: Site SKU Demand Changed (integration)
+      summary: >-
+        One source order line's site/SKU demand became ACTIVE or REMOVED —
+        the PII-free demand projection for site-level planning (ADR 0035).
+      description: >-
+        Raised inside the same order-save/outbox transaction as the
+        allocation, re-allocation, re-promise, or cancellation that
+        produced the line state, derived purely from the Order aggregate's
+        line (SKU, quantity) plus the explicitly versioned static
+        demand-site scope configured for the deployment
+        (`DEMAND_PROJECTION_SITE_ID`, assignment_version
+        `static-site-v1`). The site is application configuration, never an
+        Order field, and Phase-1 performs no dynamic assignment. subject
+        and the Kafka key are `<source_order_id>/line/<line_no>` — the
+        LINE is the stream identity here, so one line's demand history is
+        totally ordered on its own partition (deliberately not the bare
+        order id every Order* event uses). `due_at` is the line's own
+        promise-group cutoff (ADR 0017) where one is recorded, else the
+        order-level promise date. `demanded_units` is the line quantity;
+        `state` is `ACTIVE` (create / allocate / re-promise) or `REMOVED`
+        (cancellation). No customer PII ever appears on this event.
+      tags:
+        - name: order-management
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/order-management }
+              type: { const: com.warehouse.wes.order-management.siteskudemand.SiteSkuDemandChanged }
+              dataschema: { const: "urn:warehouse:order-management:events:SiteSkuDemandChanged:v1" }
+              subject:
+                type: string
+                pattern: '^.+/line/[1-9][0-9]*$'
+                examples: ["ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2/line/3"]
+              data:
+                $ref: "#/components/schemas/SiteSkuDemandData"
+      examples:
+        - name: siteSkuDemandChangedActive
+          summary: A line's demand becomes ACTIVE at the configured site.
+          payload:
+            specversion: "1.0"
+            id: 7c2d9e1f-3a4b-4c5d-8e9f-0a1b2c3d4e5f
+            source: /warehouse/order-management
+            type: com.warehouse.wes.order-management.siteskudemand.SiteSkuDemandChanged
+            subject: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2/line/3
+            time: "2026-10-06T12:00:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:order-management:events:SiteSkuDemandChanged:v1"
+            data:
+              source_order_id: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
+              line_no: 3
+              site_id: SIM1
+              sku: SKU-TOY-0042
+              demanded_units: 7
+              due_at: "2026-10-08T18:00:00Z"
+              state: ACTIVE
+              assignment_version: static-site-v1
+        - name: siteSkuDemandChangedRemoved
+          summary: Cancellation removes a line's demand at the site.
+          payload:
+            specversion: "1.0"
+            id: 8d3e0f2a-4b5c-4d6e-9f0a-1b2c3d4e5f6a
+            source: /warehouse/order-management
+            type: com.warehouse.wes.order-management.siteskudemand.SiteSkuDemandChanged
+            subject: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2/line/3
+            time: "2026-10-06T15:30:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:order-management:events:SiteSkuDemandChanged:v1"
+            data:
+              source_order_id: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
+              line_no: 3
+              site_id: SIM1
+              sku: SKU-TOY-0042
+              demanded_units: 7
+              due_at: "2026-10-08T18:00:00Z"
+              state: REMOVED
+              assignment_version: static-site-v1
 
     TaskCPTMissedInbound:
       name: TaskCPTMissed
@@ -1172,6 +1266,49 @@ components:
           type: string
           enum: [TaskCPTMissed, PackageManifested]
           description: The name of the fulfillment-execution event that triggered this recompute (the last segment of its CloudEvents type).
+
+    SiteSkuDemandData:
+      type: object
+      description: >-
+        The `data` payload shape for SiteSkuDemandChanged (ADR 0035): a
+        PII-free snapshot of one source order line's demand at the
+        explicitly configured static site. Deliberately does NOT reuse
+        the frozen allocationData shape shared with wes-work-planning —
+        this is a new, additive consumer contract.
+      additionalProperties: false
+      required: [source_order_id, line_no, site_id, sku, demanded_units, due_at, state, assignment_version]
+      properties:
+        source_order_id:
+          type: string
+          pattern: '^ord-[0-9a-f-]{36}$'
+          description: The order whose line this demand derives from.
+        line_no:
+          type: integer
+          minimum: 1
+          description: The 1-based line number within the source order.
+        site_id:
+          type: string
+          description: The static demand site this deployment projects every line to (`DEMAND_PROJECTION_SITE_ID`) — application configuration, never an Order field.
+        sku:
+          type: string
+          description: The line's SKU. No product attributes, no customer data.
+        demanded_units:
+          type: integer
+          minimum: 1
+          description: The line's quantity.
+        due_at:
+          type: string
+          format: date-time
+          description: The line's own promise-group cutoff (ADR 0017) where one is recorded, else the order-level promise date. RFC 3339, UTC.
+        state:
+          type: string
+          enum: [ACTIVE, REMOVED]
+          description: ACTIVE — the line's demand exists at the site (create / allocate / re-promise). REMOVED — cancellation took it away.
+        assignment_version:
+          type: string
+          enum: [static-site-v1]
+          description: The assignment regime that produced this fact. Phase-1 is the static `static-site-v1`; dynamic assignment must introduce a NEW value, never change this one's meaning.
+
 
     TaskCPTMissedData:
       type: object

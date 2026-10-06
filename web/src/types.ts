@@ -26,7 +26,8 @@ export interface OrderLine {
   lineNo: number;
   sku: string;
   quantity: number;
-  /** Always the internal default ("pick") -- read-only, never settable on
+  /** The process path the service chose for this line (ADR 0021; default
+   *  "pick" when no catalogue is configured) -- read-only, never settable on
    *  the intake request. */
   pathId: string;
   giftWrap: boolean;

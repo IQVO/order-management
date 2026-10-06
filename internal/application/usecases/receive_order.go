@@ -121,6 +121,10 @@ type ReceiveOrder struct {
 	// vs. rejected). Optional — a nil Metrics means "not instrumented",
 	// same convention as every other optional port on this use case.
 	Metrics ports.OrderMetrics
+	// DemandProjection is Phase-1's explicit, versioned static demand-site
+	// scope. It is application configuration, never an Order aggregate field;
+	// its zero value leaves the additive projection disabled.
+	DemandProjection DemandProjectionPolicy
 	// UnitOfWork brackets every Save + Publish this use case makes (its
 	// own intake Save+OrderReceived publish, AND the allocateAndRelease
 	// pass it triggers immediately after) atomically (transactional
@@ -198,7 +202,7 @@ func (uc *ReceiveOrder) ExecuteWithDeadline(ctx context.Context, lines []NewLine
 	// pathway (OrderAllocationPartiallyFailed) still fires when any
 	// genuine progress was made before the failure, so this is never a
 	// silent swallow — just never surfaced as a ReceiveOrder failure.
-	deps := allocationDeps{Orders: uc.Orders, Inventory: uc.Inventory, Events: uc.Events, Clock: uc.Clock, Promise: uc.Promise, UnitOfWork: uc.UnitOfWork}
+	deps := allocationDeps{Orders: uc.Orders, Inventory: uc.Inventory, Events: uc.Events, Clock: uc.Clock, Promise: uc.Promise, DemandProjection: uc.DemandProjection, UnitOfWork: uc.UnitOfWork}
 	if _, err := allocateAndRelease(ctx, deps, o, o.LinesWithStatus(order.LinePending), false, releaseOnAllocation); err != nil {
 		return uc.orderAfterAllocationFailure(ctx, o)
 	}

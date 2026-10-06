@@ -39,6 +39,11 @@ type RepromiseOrder struct {
 	Events    ports.EventPublisher
 	Clock     ports.Clock
 	Processed ports.RepromiseProcessedEvents
+	// DemandProjection re-emits the site/SKU demand projection with the
+	// group's FRESH cutoff when a re-promise moves it. Optional: the zero
+	// value leaves the projection off, exactly as on every other use
+	// case that carries it.
+	DemandProjection DemandProjectionPolicy
 	// Logger receives structured, non-fatal records for every fail-soft
 	// path (already processed, order not found, line not found in any
 	// current group, no fresh promise available). Optional: nil
@@ -136,10 +141,37 @@ func (uc *RepromiseOrder) Execute(ctx context.Context, req RepromiseOrderRequest
 		if err := uc.Orders.Save(ctx, o); err != nil {
 			return err
 		}
+		if err := uc.publishMovedDemand(ctx, o, freshGroup); err != nil {
+			return err
+		}
 		return uc.Events.Publish(ctx, shared.NewOrderRepromised(
 			uc.Clock.Now(), o.ID(), currentGroup.Promise.CptId, freshGroup.Promise.CptId, req.Reason,
 		))
 	})
+}
+
+// publishMovedDemand re-emits the site/SKU demand projection for the
+// group whose promise just moved, carrying the FRESH cutoff — the new
+// commitment the site must plan against — still inside the caller's
+// UnitOfWork. A no-op unless the projection is enabled.
+func (uc *RepromiseOrder) publishMovedDemand(ctx context.Context, o *order.Order, freshGroup order.PromiseGroup) error {
+	var movedLines []*order.OrderLine
+	for _, l := range o.Lines() {
+		if lineInGroup(freshGroup, l.LineNo()) {
+			movedLines = append(movedLines, l)
+		}
+	}
+	return uc.DemandProjection.publishForGroups(ctx, uc.Events, uc.Clock.Now(), o, movedLines, shared.SiteSkuDemandActive)
+}
+
+// lineInGroup reports whether lineNo is a member of group.
+func lineInGroup(group order.PromiseGroup, lineNo int) bool {
+	for _, n := range group.LineNos {
+		if n == lineNo {
+			return true
+		}
+	}
+	return false
 }
 
 // freshPromiseGroups recomputes the order's promise groups from current

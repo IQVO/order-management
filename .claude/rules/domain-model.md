@@ -99,15 +99,16 @@ paths:
   `Released`, v1 does NOT claw back released work — a documented,
   deliberate known gap (ADR-0004), not an oversight.
 
-## Domain events (past tense, 10 total — `internal/domain/shared/events.go`)
+## Domain events (past tense, 11 total — `internal/domain/shared/events.go`)
 
 `ports.EventPublisher` has two real implementations selected by
 `EVENT_PUBLISHER` (env, default `log`):
 
 - **`log`**: every event logged as JSON, in-process only.
 - **`kafka`**: same local behavior PLUS `OrderAllocated`,
-  `OrderPartiallyAllocated` and `OrderRepromised` forwarded to the
-  integration topic
+  `OrderPartiallyAllocated`, `OrderRepromised` and (ADR 0035, only while
+  `DEMAND_PROJECTION_SITE_ID` is set) `SiteSkuDemandChanged` forwarded
+  to the integration topic
   `warehouse.order-management.events`, and the full analytics-relevant
   event set fanned to `warehouse.order-management.analytics` (ADR-0006).
 
@@ -119,15 +120,17 @@ paths:
 | `OrderAllocated` | Every line `Allocated`, eligible lines released in the same pass | **Yes** — enriched `lines[]` |
 | `OrderPartiallyAllocated` | Some lines allocated/released, some backordered, `AllowPartialShipment=true` | **Yes** — enriched `lines[]` |
 | `OrderAllocationPartiallyFailed` | Hard (non-409) failure mid-allocation; already-succeeded lines kept | No — operational visibility only |
-| `OrderLineReleased` | Declared, never raised today (no use case publishes it; see `deferred-and-known-gaps.md`) | No |
-| `OrderReleased` | Declared, never raised today | No |
+| `OrderLineReleased` | `allocateAndRelease` moves a line Allocated -> Released (one per line released in that pass; ADR-0034) | No — analytics topic only |
+| `OrderReleased` | That pass leaves every line of the order Released (ADR-0034) | No — analytics topic only |
 | `OrderCancelled` | `CancelOrder` succeeds | No |
 | `OrderRepromised` | `RepromiseOrder` (ADR-0018) finds a shipment group's promise moved after an inbound `TaskCPTMissed`/`PackageManifested` | **Yes** — `{cpt_id_old, cpt_id_new, reason}` |
+| `SiteSkuDemandChanged` | a line allocates / re-allocates / is re-promised (`ACTIVE`) or a legal cancellation removes it (`REMOVED`) — only while `DEMAND_PROJECTION_SITE_ID` is set | **Yes** — PII-free line demand at the static site, key `<order>/line/<line_no>` (ADR-0035) |
 
-Only 3 of the 10 are integration events, mirroring `inventory-storage`'s own
+4 of the 11 are integration events, mirroring `inventory-storage`'s own
 precedent of forwarding a minimal subset. Every event that IS raised is
 fanned to the analytics topic when `EVENT_PUBLISHER=kafka` (see
-`api-contracts.md`).
+`api-contracts.md`) — except `SiteSkuDemandChanged`, which is
+integration-only by design (ADR-0035).
 
 ## Use cases (application layer) — folded flow since ADR-0005
 

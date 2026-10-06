@@ -85,6 +85,7 @@ running a long coexistence period.
     com.warehouse.wes.order-management.order.OrderAllocated            (events + analytics)
     com.warehouse.wes.order-management.order.OrderPartiallyAllocated   (events + analytics)
     com.warehouse.wes.order-management.order.OrderRepromised           (events + analytics)
+    com.warehouse.wes.order-management.siteskudemand.SiteSkuDemandChanged (events only, ADR 0035)
     com.warehouse.wes.order-management.order.OrderReceived             (analytics)
     com.warehouse.wes.order-management.order.OrderAllocationPartiallyFailed (analytics)
     com.warehouse.wes.order-management.order.OrderReleased             (analytics)
@@ -95,6 +96,10 @@ running a long coexistence period.
 
 `OrderAllocated` and `OrderPartiallyAllocated` are consumed by
 wes-work-planning with these exact strings.
+`SiteSkuDemandChanged` (ADR 0035) is the one type raised outside the
+`order` entity: its `subject`/Kafka key is the line-scoped
+`<order_id>/line/<line_no>`, not the bare order id, and it is emitted
+only while `DEMAND_PROJECTION_SITE_ID` is configured.
 
 ### Types this service consumes (exact, fleet cross-service table)
 
