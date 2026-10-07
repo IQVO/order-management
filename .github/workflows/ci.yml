@@ -227,6 +227,7 @@ jobs:
           go test -tags=integration ./internal/adapters/outbound/analyticsstore
           go test -tags=integration ./cmd/order
           go test -tags=integration -v ./internal/adapters/outbound/postgres
+          go test -tags=integration ./internal/adapters/outbound/productclassificationcopy
 
 
   # ============================================================
