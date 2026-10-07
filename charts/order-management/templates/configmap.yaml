@@ -7,8 +7,14 @@ metadata:
 data:
   HTTP_ADDR: {{ .Values.config.httpAddr | quote }}
   EVENT_PUBLISHER: {{ .Values.config.eventPublisher | quote }}
-  {{- if or (eq .Values.config.eventPublisher "kafka") .Values.plannedCapacity.consumerGroup }}
+  {{- if or (eq .Values.config.eventPublisher "kafka") .Values.plannedCapacity.consumerGroup .Values.productClassification.consumerGroup }}
   KAFKA_BROKERS: {{ .Values.kafka.brokers | quote }}
+  {{- end }}
+  {{- if .Values.productClassification.mode }}
+  PRODUCT_CLASSIFICATION_MODE: {{ .Values.productClassification.mode | quote }}
+  {{- end }}
+  {{- if .Values.productClassification.consumerGroup }}
+  PRODUCT_CLASSIFICATION_CONSUMER_GROUP: {{ .Values.productClassification.consumerGroup | quote }}
   {{- end }}
   {{- if .Values.plannedCapacity.consumerGroup }}
   PLANNED_CAPACITY_CONSUMER_GROUP: {{ .Values.plannedCapacity.consumerGroup | quote }}
