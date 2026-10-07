@@ -13,7 +13,8 @@ import (
 // prometheus exporter turns the dot-separated instrument name into the
 // underscore-separated series `circuit_breaker_state` the plan
 // (section 2.2) and the new ADR ask for, labelled
-// dependency="inventory-storage"|"product-classification".
+// dependency="inventory-storage" (the product-classification breaker was
+// removed with its HTTP client by ADR 0036).
 const circuitBreakerGaugeName = "circuit_breaker.state"
 
 // dependencyKey is the one attribute this gauge carries: which
