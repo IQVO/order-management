@@ -21,14 +21,15 @@ is `com.warehouse.wes.<context>.<entity>.<EventName>` — see
 sequenceDiagram
   autonumber
   actor Customer as Customer channel
+  participant PM as product-master
   participant OM as order-management
   participant INV as inventory-storage
   participant WP as wes-work-planning
   participant PJ as order-projector
 
+  PM-)OM: evt: ProductClassified (kept in a local copy, ADR 0036)
   Customer->>OM: cmd: POST /orders
-  OM->>INV: qry: GET /products/sku/classification
-  INV-->>OM: tags for path selection
+  Note over OM: reads the SKU's tags from the local copy for path selection
   loop every line
     OM->>INV: cmd: POST /reservations
     INV-->>OM: 201 reserved, or 409 insufficient stock
@@ -41,7 +42,8 @@ sequenceDiagram
 
 Source: `internal/application/usecases/receive_order.go`, `allocation.go`,
 `internal/adapters/outbound/inventorystorage/client.go`,
-`productclassification/client.go`, `outbound/kafka/publisher.go`.
+`inbound/kafka/product_classification_consumer.go`,
+`outbound/productclassificationcopy/`, `outbound/kafka/publisher.go`.
 Omits: the backordered branch (`OrderLineBackordered`, then
 `OrderPartiallyAllocated` for a partial-shipment order, nothing to
 wes-work-planning for a ship-complete one), the

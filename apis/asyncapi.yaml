@@ -240,6 +240,41 @@ channels:
           - $ref: "#/components/messages/CapacityShortageDetectedInbound"
           - $ref: "#/components/messages/BottleneckDetectedInbound"
 
+  warehouse.product-master.events:
+    description: >-
+      product-master's integration topic (key and CloudEvents subject = the
+      SKU). Consumed under a STABLE shared consumer group (env
+      `PRODUCT_CLASSIFICATION_CONSUMER_GROUP`, ADR 0036) when
+      `PRODUCT_CLASSIFICATION_MODE=kafka` — a normal process-and-commit
+      consumer feeding a durable local copy, not a full-replay cache. Only
+      ProductClassified is applied; every other CloudEvents `type` on the
+      topic (ProductRegistered, ProductDescriptionChanged,
+      ProductDimensionsDeclared, ProductMeasured, anything new) is ignored.
+      A message that is not a valid CloudEvent, or whose payload cannot be
+      applied, is logged at WARN and committed past (no DLQ: the payload is
+      a full-state replacement).
+    subscribe:
+      operationId: consumeProductMasterEvents
+      summary: Maintain the local product-classification copy read at order intake.
+      description: >-
+        Dispatch is on the FULL CloudEvents type
+        com.warehouse.wms.product-master.product.ProductClassified. The copy
+        keeps one row per SKU with the classification and product-master's
+        aggregate `version`; a message is applied only when its `version`
+        is greater than the stored one (inserted when absent). The
+        idempotency claim on the CloudEvents `id` and the upsert commit in
+        ONE database transaction; the Kafka offset is committed only
+        afterwards, and a transient failure is retried on the same message.
+        ReceiveOrder reads the copy through ports.ProductClassificationLookup
+        to evaluate path eligibility (ADR 0016); an unknown SKU stays
+        "no derived attributes" (fail-open). This contract is
+        product-master's own — see its apis/asyncapi.yaml — decoded
+        independently here, never imported.
+      tags:
+        - name: order-management
+      message:
+        $ref: "#/components/messages/ProductClassifiedInbound"
+
   warehouse.order-management.analytics:
     description: >-
       The analytics fan-out topic (`kafka.AnalyticsTopic` in the code),
@@ -1174,6 +1209,51 @@ components:
               data:
                 $ref: "#/components/schemas/BottleneckData"
 
+    ProductClassifiedInbound:
+      name: ProductClassified
+      title: ProductClassified (inbound, product-master)
+      summary: "A product's handling classification was set or replaced (full state; applied when version > stored)."
+      description: >-
+        Consumed from warehouse.product-master.events (ADR 0036). Subject and
+        Kafka key = the SKU. Full-state replacement of the classification;
+        `temperature_class` and `dot_hazard_class` are omitted when unset.
+        Tags come in product-master's stable order (Hazmat, Fragile,
+        TemperatureSensitive, Oversized, HighValue). There is no
+        "unclassify" event in v1.
+      tags:
+        - name: order-management
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/product-master }
+              type: { const: com.warehouse.wms.product-master.product.ProductClassified }
+              dataschema: { const: "urn:warehouse:product-master:events:ProductClassified:v1" }
+              data:
+                $ref: "#/components/schemas/ProductClassifiedData"
+      examples:
+        - name: hazmatFrozen
+          summary: SKU-1 classified Hazmat + TemperatureSensitive (Frozen), DOT class 3.
+          payload:
+            specversion: "1.0"
+            id: 0f6d8a2b-3c4e-4d5f-8a9b-7c6d5e4f3a2b
+            source: /warehouse/product-master
+            type: com.warehouse.wms.product-master.product.ProductClassified
+            subject: SKU-1
+            time: "2026-10-06T21:02:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:product-master:events:ProductClassified:v1"
+            data:
+              sku: SKU-1
+              handling_tags: [Hazmat, TemperatureSensitive]
+              temperature_class: Frozen
+              dot_hazard_class: 3
+              classification_source: native
+              version: 3
+
   messageTraits:
     CloudEventsStructured:
       contentType: application/cloudevents+json
@@ -1638,3 +1718,24 @@ components:
         plan_id: { type: string }
         bottleneck_step: { type: string }
         path_capacity: { type: number, format: double }
+    ProductClassifiedData:
+      type: object
+      description: >-
+        product-master's ProductClassified payload (its apis/asyncapi.yaml,
+        ADR 0004 there). order-management stores sku, handling_tags,
+        temperature_class, dot_hazard_class and version;
+        classification_source is decoded and ignored. A payload with an
+        empty sku, a version below 1, or a sku that disagrees with the
+        CloudEvents subject is skipped.
+      required: [sku, handling_tags, classification_source, version]
+      properties:
+        sku: { type: string, description: "Equals the CloudEvents subject." }
+        handling_tags:
+          type: array
+          items:
+            type: string
+            enum: [Hazmat, Fragile, TemperatureSensitive, Oversized, HighValue]
+        temperature_class: { type: string, enum: [Ambient, Chilled, Frozen] }
+        dot_hazard_class: { type: integer, minimum: 1, maximum: 9 }
+        classification_source: { type: string, enum: [native, legacy-import] }
+        version: { type: integer, format: int64, minimum: 1, description: "product-master's aggregate version after the change; applied only when greater than the stored one." }

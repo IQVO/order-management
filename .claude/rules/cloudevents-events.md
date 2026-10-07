@@ -46,5 +46,8 @@ Kafka key are the order id. Consumed types (exact):
 `com.warehouse.wes.work-planning.workpool.PathCapacityChanged`,
 `com.warehouse.wes.warehouse-planning.capacityplan.{CapacityPlanCreated,CapacityPlanPublished,CapacityShortageDetected}`
 (+ `BottleneckDetected`, recognised and ignored; ADR-0031, topic
-`warehouse.warehouse-planning.events`, key/subject = plan id), plus this
+`warehouse.warehouse-planning.events`, key/subject = plan id),
+`com.warehouse.wms.product-master.product.ProductClassified` (ADR-0036,
+topic `warehouse.product-master.events`, key/subject = SKU; other
+product-master types ignored), plus this
 service's own analytics types (projector).

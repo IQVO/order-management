@@ -7,7 +7,10 @@ already-published, already-stable REST API, and reacts to
 `process-path-management` (catalogue + CPT schedule), `wes-work-planning`
 (`PathCapacityChanged`) and `fulfillment-execution` (`TaskCPTMissed`/
 `PackageManifested`), each decoded into its own local struct; and since
-ADR-0020 `network-fulfillment` is an inbound HTTP caller. It is a
+ADR-0020 `network-fulfillment` is an inbound HTTP caller. Since ADR-0036
+product classification comes from `product-master`'s `ProductClassified`
+events, kept in a local copy — no synchronous classification call to any
+service. It is a
 **separate Go module in a separate repository**:
 
 - MUST NOT import any Go package from `inventory-storage`,

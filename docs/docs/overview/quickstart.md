@@ -44,7 +44,8 @@ integration test or deployment:
 ```bash
 export INVENTORY_STORAGE_MODE=http
 export INVENTORY_STORAGE_BASE_URL=http://localhost:8080
-export PRODUCT_CLASSIFICATION_MODE=http     # optional, ADR 0016
+export PRODUCT_CLASSIFICATION_MODE=kafka    # optional, ADR 0036: local copy of product-master classifications
+export PRODUCT_CLASSIFICATION_CONSUMER_GROUP=om-classification-local   # required with kafka mode
 export EVENT_PUBLISHER=kafka                # optional: publish release events
 export PATH_CATALOGUE_SOURCE=kafka          # optional: capability-derived promise
 export KAFKA_BROKERS=localhost:9092
