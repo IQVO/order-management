@@ -27,8 +27,8 @@ type EligibilitySource interface {
 // PathSelectionPolicy decides which wes-work-planning process path an
 // OrderLine's work should be enqueued onto, based on attributes known at
 // intake (SKU, Quantity, GiftWrap) and the line's derived product
-// attributes (e.g. "hazmat", "fragile", looked up via the fleet's
-// product-classification sync edge -- see ReceiveOrder), evaluated
+// attributes (e.g. "hazmat", "fragile", looked up by ReceiveOrder from
+// the local product-classification copy, ADR 0036), evaluated
 // against every currently active path's declared Eligibility. It is a
 // pure domain policy: no I/O of its own. The application layer
 // (ReceiveOrder) performs the classification lookup and passes plain

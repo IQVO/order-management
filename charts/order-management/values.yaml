@@ -177,10 +177,26 @@ database:
   migrationsExistingSecretKey: "MIGRATIONS_DATABASE_URL"
 
 # KAFKA_BROKERS is rendered when config.eventPublisher is "kafka" OR
-# plannedCapacity.consumerGroup is set (the planned-capacity consumer needs
-# a broker even when events are only logged).
+# plannedCapacity.consumerGroup OR productClassification.consumerGroup is set
+# (those consumers need a broker even when events are only logged).
 kafka:
   brokers: "kafka:9092"
+
+# Product classification from a local copy of product-master's events
+# (ADR 0036). Replaces the live inventory-storage lookup: mode "http" was
+# REMOVED and the binary refuses to boot with it.
+productClassification:
+  # PRODUCT_CLASSIFICATION_MODE: "kafka" (local copy fed by
+  # warehouse.product-master.events; requires consumerGroup) or
+  # "permissive" (no copy, every SKU unclassified). EMPTY (the default)
+  # renders nothing and the binary defaults to permissive, so an
+  # environment that sets the variable through extraEnv is not duplicated.
+  mode: ""
+  # PRODUCT_CLASSIFICATION_CONSUMER_GROUP. A fixed, stable id: a restarted
+  # pod resumes from its committed offsets (the copy is durable in
+  # Postgres) and N replicas share partitions. Required with mode "kafka";
+  # there is deliberately no default in the binary.
+  consumerGroup: ""
 
 # Planned capacity from warehouse-planning (ADR 0031). When consumerGroup is
 # set, cmd/order consumes warehouse.warehouse-planning.events into a local

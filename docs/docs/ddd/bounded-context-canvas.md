@@ -73,7 +73,7 @@ holding network-originated orders until their caller commits.
 | --- | --- | --- | --- | --- |
 | inventory-storage | Reserve stock for a line | Command | REST `POST /reservations` (Idempotency-Key, ADR 0028) | Customer/Supplier, ACL |
 | inventory-storage | Revoke a reservation | Command | REST `DELETE /reservations/{id}` | Customer/Supplier, ACL |
-| inventory-storage | Product classification | Query | REST `GET /products/{sku}/classification` (fail-open) | Customer/Supplier, ACL |
+| product-master | Product classification | Event | Kafka `warehouse.product-master.events`, `com.warehouse.wms.product-master.product.ProductClassified` → local copy read at intake (ADR 0036, fail-open for unknown SKUs) | Customer/Supplier, ACL |
 | wes-work-planning | OrderAllocated | Event | Kafka `warehouse.order-management.events`, `com.warehouse.wes.order-management.order.OrderAllocated` | Published Language |
 | wes-work-planning | OrderPartiallyAllocated | Event | Kafka `warehouse.order-management.events`, `com.warehouse.wes.order-management.order.OrderPartiallyAllocated` | Published Language |
 | any subscriber (none known) | OrderRepromised | Event | Kafka `warehouse.order-management.events`, `com.warehouse.wes.order-management.order.OrderRepromised` | Published Language |

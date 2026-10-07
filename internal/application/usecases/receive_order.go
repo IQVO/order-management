@@ -108,13 +108,13 @@ type ReceiveOrder struct {
 	// change, only a new caller.
 	Catalogue ports.ProcessPathCatalogue
 	// Classification looks up a line's derived product attributes
-	// (hazmat/fragile/etc.) from inventory-storage, ONCE per line at
-	// intake, so PathPolicy can evaluate them against the resolved
-	// path's Eligibility (ADR-0016). A nil Classification means "not
-	// wired": every line is evaluated with no derived attributes beyond
-	// its own GiftWrap flag, exactly PermissiveLookup's own always-
-	// Known=false behaviour — see
-	// internal/adapters/outbound/productclassification's package doc
+	// (hazmat/fragile/etc.) from the local copy of product-master's
+	// classifications (ADR 0036), ONCE per line at intake, so PathPolicy
+	// can evaluate them against the resolved path's Eligibility
+	// (ADR-0016). A nil Classification means "not wired": every line is
+	// evaluated with no derived attributes beyond its own GiftWrap flag,
+	// exactly PermissiveLookup's own always-Known=false behaviour — see
+	// internal/adapters/outbound/productclassificationcopy's package doc
 	// comment for why this fails open rather than blocking intake.
 	Classification ports.ProductClassificationLookup
 	// Metrics records the business-fact outcome of order intake (accepted

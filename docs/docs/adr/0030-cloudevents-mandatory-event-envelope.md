@@ -110,6 +110,7 @@ only while `DEMAND_PROJECTION_SITE_ID` is configured.
     com.warehouse.wes.process-path-management.processpath.ProcessPathDeactivated (kafkacatalog)
     com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged   (kafkacptschedule)
     com.warehouse.wes.work-planning.workpool.PathCapacityChanged               (kafkapathcapacity)
+    com.warehouse.wms.product-master.product.ProductClassified                 (product-classification copy, ADR 0036)
     com.warehouse.wes.order-management.order.*  (the ten above, analytics projector)
 
 ## Consequences

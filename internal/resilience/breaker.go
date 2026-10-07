@@ -5,17 +5,16 @@
 // top-level internal package (a sibling of internal/bootretry and
 // internal/pgtx), not a domain/application/adapter layer itself, so the
 // hexagonal fitness tests place no restriction on who may import it —
-// only the outbound adapters (inventorystorage, productclassification,
-// telemetry) do today.
+// only the outbound adapters (inventorystorage, telemetry) do today.
 //
 // One gobreaker.CircuitBreaker instance is constructed PER downstream
 // dependency (never one global breaker) — see
-// internal/adapters/outbound/inventorystorage.NewBreakerClient and
-// internal/adapters/outbound/productclassification.NewBreakerClient, the
-// two call sites that build a breaker using this package's shared
-// tuning. A slow or failing dependency's breaker tripping can never
-// affect the other dependency's breaker or its own bulkheaded
-// *http.Client.
+// internal/adapters/outbound/inventorystorage.NewBreakerClient, today the
+// only call site that builds a breaker using this package's shared
+// tuning (the product-classification HTTP client and its breaker were
+// removed by ADR 0036: classification is read from a local copy). A slow
+// or failing dependency's breaker tripping can never affect another
+// dependency's breaker or its own bulkheaded *http.Client.
 package resilience
 
 import (

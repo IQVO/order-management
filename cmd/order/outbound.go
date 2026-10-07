@@ -7,45 +7,29 @@ import (
 	"strings"
 
 	"github.com/claudioed/order-management/internal/adapters/outbound/inventorystorage"
-	"github.com/claudioed/order-management/internal/adapters/outbound/productclassification"
 	"github.com/claudioed/order-management/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/order-management/internal/application/ports"
 	"github.com/claudioed/order-management/internal/domain/order"
 	"github.com/claudioed/order-management/internal/resilience"
 )
 
-// outboundLookups bundles the two cross-context outbound clients: the
-// inventory reservation client and the product-classification lookup
-// (ADR-0016 / ADR-0014 step B), each behind the shared circuit-breaker
-// recorder.
-type outboundLookups struct {
-	inventory      ports.InventoryReservationClient
-	classification ports.ProductClassificationLookup
-}
-
-// wireOutboundLookups wires both outbound clients plus their shared
-// circuit-breaker gauge. circuitBreakerMetrics wires both outbound
-// breakers' OnStateChange into the circuit_breaker.state gauge
-// (ADR-0025), reusing the SAME OTel MeterProvider telemetry.Setup already
-// installed rather than standing up a second Prometheus registry. Errors
-// here mirror NewOrderMetrics' contract (invalid instrument name only, a
-// programming error) -- non-fatal: a nil recorder just means this
-// process runs without the gauge, never without the breaker itself.
+// wireInventoryClient wires the inventory reservation client plus its
+// circuit-breaker gauge. circuitBreakerMetrics wires the breaker's
+// OnStateChange into the circuit_breaker.state gauge (ADR-0025), reusing
+// the SAME OTel MeterProvider telemetry.Setup already installed rather than
+// standing up a second Prometheus registry. Errors here mirror
+// NewOrderMetrics' contract (invalid instrument name only, a programming
+// error) -- non-fatal: a nil recorder just means this process runs without
+// the gauge, never without the breaker itself.
 //
-// The product-classification lookup shares INVENTORY_STORAGE_BASE_URL
-// with the inventory reservation client -- both call the SAME downstream
-// service, so there is deliberately no second base-URL knob for it, only
-// its own independent PRODUCT_CLASSIFICATION_MODE switch, mirroring
-// wes-work-planning's exact convention.
-func wireOutboundLookups(logger *slog.Logger) outboundLookups {
+// The product-classification lookup is no longer an outbound HTTP client:
+// since ADR 0036 it reads a local copy (see product_classification.go).
+func wireInventoryClient(logger *slog.Logger) ports.InventoryReservationClient {
 	circuitBreakerMetrics, err := telemetry.NewCircuitBreakerMetrics()
 	if err != nil {
 		logger.Warn("circuit breaker metrics unavailable; breakers will run without the circuit_breaker.state gauge", "error", err)
 	}
-	return outboundLookups{
-		inventory:      buildInventoryClient(getenv("INVENTORY_STORAGE_MODE", "permissive"), os.Getenv("INVENTORY_STORAGE_BASE_URL"), circuitBreakerMetrics, logger),
-		classification: buildClassificationLookup(getenv("PRODUCT_CLASSIFICATION_MODE", "permissive"), os.Getenv("INVENTORY_STORAGE_BASE_URL"), circuitBreakerMetrics, logger),
-	}
+	return buildInventoryClient(getenv("INVENTORY_STORAGE_MODE", "permissive"), os.Getenv("INVENTORY_STORAGE_BASE_URL"), circuitBreakerMetrics, logger)
 }
 
 // wireCatalogue resolves the process-path catalogue and its two sibling
@@ -122,31 +106,4 @@ func buildInventoryClient(mode, baseURL string, recorder resilience.StateRecorde
 	}
 	logger.Info("inventory-storage client configured", "mode", "http", "base_url", baseURL, "circuit_breaker", "enabled")
 	return inventorystorage.NewBreakerClient(inventorystorage.NewClient(baseURL, nil), recorder)
-}
-
-// buildClassificationLookup selects the outbound
-// ports.ProductClassificationLookup adapter via PRODUCT_CLASSIFICATION_MODE
-// (http|permissive), defaulting to "permissive" so existing tests, CI and
-// deployments that do not set the env var are unaffected -- mirroring
-// wes-work-planning's own buildClassificationLookup convention exactly
-// (see ADR-0016 / ADR-0014 step B). Unlike buildInventoryClient's
-// permissive mode (which fails LOUD because reserving real stock must
-// never appear to succeed against a no-op), this permissive mode fails
-// OPEN: a classification lookup is a soft routing/enrichment input, not a
-// mutation of real state.
-//
-// In http mode the real Client is wrapped in retry (jittered, max 3
-// attempts -- GET is safe to retry, unlike inventory-storage's mutating
-// calls) plus a per-dependency circuit breaker (ADR-0025): on a trip,
-// calls fall back to the SAME fail-open behaviour this client already
-// had. recorder feeds the breaker's state transitions into the
-// circuit_breaker.state gauge; nil is fine.
-func buildClassificationLookup(mode, inventoryStorageBaseURL string, recorder resilience.StateRecorder, logger *slog.Logger) ports.ProductClassificationLookup {
-	if !strings.EqualFold(mode, "http") {
-		logger.Warn("product classification lookup in permissive (fail-open) mode; path eligibility routing will see no derived product attributes",
-			"hint", "set PRODUCT_CLASSIFICATION_MODE=http and INVENTORY_STORAGE_BASE_URL for a real deployment")
-		return productclassification.NewPermissiveLookup()
-	}
-	logger.Info("product classification lookup configured", "mode", "http", "inventory_storage_base_url", inventoryStorageBaseURL, "circuit_breaker", "enabled", "retry", "enabled")
-	return productclassification.NewBreakerClient(productclassification.NewClient(inventoryStorageBaseURL, nil), recorder)
 }

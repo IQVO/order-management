@@ -8,7 +8,8 @@
 //	config.go        env readers (getenv, durations, DB/migration settings)
 //	adapters.go      repo + event-publisher selection (memory vs Postgres)
 //	kafka.go         Kafka publishing, outbox relay, RepromiseOrder consumer
-//	outbound.go      cross-context clients, catalogue, promise policy
+//	outbound.go      inventory-storage client, catalogue, promise policy
+//	product_classification.go  ADR 0036 local classification copy + consumer
 //	http.go          inbound server + http.Server construction
 //	housekeeping.go  idempotency/outbox sweeper
 //	shutdown.go      serve loop and ADR-0025 graceful shutdown
@@ -60,6 +61,13 @@ func run() error {
 	httpAddr := getenv("HTTP_ADDR", ":8080")
 	db := dbConfigFromEnv()
 
+	// ADR 0036: validate PRODUCT_CLASSIFICATION_* before anything else is
+	// built, so a stale PRODUCT_CLASSIFICATION_MODE=http fails boot first.
+	classificationCfg, err := classificationConfigFromEnv()
+	if err != nil {
+		return err
+	}
+
 	orders, publisher, dbPool, uow, relay, closeAdapters, err := buildRepoAdapters(ctx, db.url, db.migrationsURL, db.migrationsPath, getenv("EVENT_PUBLISHER", "log"), logger)
 	if err != nil {
 		return err
@@ -71,7 +79,8 @@ func run() error {
 	// readiness gates GET /readyz (ADR-0025); see drainUnderShutdown.
 	readiness := &inboundhttp.Readiness{}
 
-	lookups := wireOutboundLookups(logger)
+	inventory := wireInventoryClient(logger)
+	classification := buildProductClassification(classificationCfg, dbPool, logger)
 
 	catalogue, cptSchedule, capacity, closeCatalogue, err := wireCatalogue(ctx, logger)
 	if err != nil {
@@ -82,7 +91,12 @@ func run() error {
 	promise := buildPromisePolicy(catalogue, cptSchedule, capacity, logger)
 
 	clock := memory.SystemClock{}
-	server := buildInboundServer(orders, publisher, clock, promise, lookups.inventory, lookups.classification, catalogue, orderMetrics, uow, dbPool, readiness, logger)
+	server := buildInboundServer(orders, publisher, clock, promise, inventory, classification.lookup, catalogue, orderMetrics, uow, dbPool, readiness, logger)
+
+	// ADR 0036: in kafka mode the local classification copy's consumer
+	// runs for the process lifetime; its stop runs after the HTTP drain
+	// (serveAndShutdown returns first) and before the pool closes.
+	defer classification.startConsumer(logger)()
 
 	// ADR 0031 planned capacity: a nil value (consumer-group env unset)
 	// leaves everything below exactly as before.

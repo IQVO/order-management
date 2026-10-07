@@ -76,6 +76,18 @@ erDiagram
     TEXT event_id PK "CloudEvents id"
     TIMESTAMPTZ processed_at
   }
+  product_classification_copy {
+    TEXT sku PK
+    TEXT_ARRAY handling_tags
+    TEXT temperature_class "nullable"
+    SMALLINT dot_hazard_class "nullable, 1 to 9"
+    BIGINT version "check gte 1"
+    TIMESTAMPTZ updated_at
+  }
+  product_classification_processed_events {
+    TEXT event_id PK "CloudEvents id"
+    TIMESTAMPTZ processed_at
+  }
   outbox_events {
     BIGSERIAL id PK
     TEXT topic
@@ -108,13 +120,13 @@ erDiagram
   orders ||--o{ order_promise_groups : "promised as"
 ```
 
-Source: `migrations/0001_init.up.sql` … `migrations/0010_planned_capacity.up.sql`;
+Source: `migrations/0001_init.up.sql` … `migrations/0011_product_classification_copy.up.sql`;
 `schema_migrations` is golang-migrate's own bookkeeping table
 (`internal/adapters/outbound/postgres/migrate.go`). Omits: secondary
 indexes (`idx_order_lines_sku`, `idx_order_lines_status`,
 `idx_outbox_events_unpublished` partial on `published_at IS NULL`,
 `idx_idempotency_keys_created_at`, `planned_capacity_windows_location_end`).
-`INT_ARRAY` stands for Postgres `INT[]`, `DOUBLE_PRECISION` for
+`INT_ARRAY` stands for Postgres `INT[]`, `TEXT_ARRAY` for `TEXT[]`, `DOUBLE_PRECISION` for
 `DOUBLE PRECISION`.
 
 Only two real `FOREIGN KEY`s exist: `order_lines.order_id` and
@@ -131,9 +143,12 @@ deliberately unlinked:
   (`Order.SetPromiseGroups`), not by the database.
 - `outbox_events.key` holds the `OrderId` as the Kafka key — infrastructure,
   not a relation.
-- `repromise_processed_events.event_id` and
-  `planned_capacity_processed_events.event_id` hold **inbound** CloudEvents
-  ids from other contexts.
+- `repromise_processed_events.event_id`,
+  `planned_capacity_processed_events.event_id` and
+  `product_classification_processed_events.event_id` hold **inbound**
+  CloudEvents ids from other contexts.
+- `product_classification_copy.sku` is a product-master SKU (ADR 0036): a
+  local copy, never joined to `order_lines.sku` by a constraint.
 
 ## Analytics database
 
@@ -198,6 +213,8 @@ database: every table is a projection or an idempotency ledger.
 | `planned_capacity_windows` | Read model of another context's data | none — `order.PlannedCapacityWindow` (ADR 0031) |
 | `repromise_processed_events` | Infrastructure: inbound idempotency ledger | `ports.RepromiseProcessedEvents` |
 | `planned_capacity_processed_events` | Infrastructure: inbound idempotency ledger | `ports.PlannedCapacityProcessedEvents` |
+| `product_classification_copy` | Local copy of another context's data (product-master, ADR 0036) | none — `ports.ProductClassificationCopy` / `ProductClassificationLookup` |
+| `product_classification_processed_events` | Infrastructure: inbound idempotency ledger | `ports.ProductClassificationProcessedEvents` |
 | `outbox_events` | Infrastructure: transactional outbox (ADR 0022) | `postgres.OutboxPublisher` / `OutboxRelay` |
 | `idempotency_keys` | Infrastructure: HTTP request de-duplication (ADR 0023) | `inbound/http.RequireIdempotencyKey` |
 | `schema_migrations` | Infrastructure: golang-migrate | — |

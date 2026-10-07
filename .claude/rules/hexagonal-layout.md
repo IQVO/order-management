@@ -19,11 +19,12 @@ type ever appears in the domain layer.
   (analytics writer, ADR-0006, FirstOffset consumer), `cmd/order-reports`
   (analytics read-only REST API).
 - **Suppliers:** `inventory-storage` (synchronous HTTP, `POST /reservations`,
-  `GET /products/{sku}/classification`) and `wes-work-planning` (release via
+  `DELETE /reservations/{id}`) and `wes-work-planning` (release via
   Kafka choreography — no HTTP call). Consumes Kafka facts from
-  `process-path-management`, `wes-work-planning` and `fulfillment-execution`
-  (ADR-0013..0018). `network-fulfillment` is an inbound HTTP caller
-  (ADR-0020). See `bounded-context-boundary.md`.
+  `process-path-management`, `wes-work-planning`, `fulfillment-execution`,
+  `warehouse-planning` (ADR-0013..0018, 0031) and `product-master`
+  (`ProductClassified` into a local copy, ADR-0036). `network-fulfillment`
+  is an inbound HTTP caller (ADR-0020). See `bounded-context-boundary.md`.
 
 ## Non-obvious layout facts
 
@@ -34,22 +35,27 @@ type ever appears in the domain layer.
   OrderMetrics, InventoryReservationClient, ProcessPathCatalogue,
   CPTScheduleCache, ProductClassificationLookup, PathCapacity,
   RepromiseProcessedEvents, PlannedCapacityRepo,
-  PlannedCapacityProcessedEvents (ADR-0031). **No `WorkReleaseClient` —
+  PlannedCapacityProcessedEvents (ADR-0031), ProductClassificationCopy,
+  ProductClassificationProcessedEvents (ADR-0036). **No `WorkReleaseClient` —
   deleted, ADR-0005.**
 - `internal/application/usecases/`: ReceiveOrder, RetryAllocation,
   ReleaseHeldOrder, CancelOrder, GetOrder, RepromiseOrder (Kafka-driven),
   ApplyPlannedCapacity (Kafka-driven), GetPlannedCapacity,
-  OrderCapacityConstraints (ADR-0031).
+  OrderCapacityConstraints (ADR-0031), ApplyProductClassification
+  (Kafka-driven, ADR-0036).
   AllocateOrder/ReleaseOrder were deleted as public types (ADR-0005); the
   shared allocate-then-release logic lives in `allocation.go`.
 - Inbound adapters: `inbound/http/` (chi handlers, DTOs, RFC 7807 error
   mapping, CORS, `Idempotency-Key` middleware, `/readyz`), `inbound/kafka/`
   (RepromiseConsumer on `warehouse.fulfillment.events`, ADR-0018;
   PlannedCapacityConsumer on `warehouse.warehouse-planning.events`,
-  ADR-0031; AnalyticsConsumer for `cmd/order-projector`, ADR-0006),
+  ADR-0031; ProductClassificationConsumer on
+  `warehouse.product-master.events`, ADR-0036; AnalyticsConsumer for
+  `cmd/order-projector`, ADR-0006),
   `inbound/mcp/` (read-only tools `get_order`, `get_promise_health`).
 - Outbound adapters: `inventorystorage/` (HTTP `POST /reservations`,
-  `DELETE /reservations/{id}`), `productclassification/`,
+  `DELETE /reservations/{id}`), `productclassificationcopy/` (local copy
+  of product-master classifications + permissive lookup, ADR-0036),
   `kafkacatalog/`+`kafkacptschedule/`+`kafkapathcapacity/` (capability caches,
   `PATH_CATALOGUE_SOURCE=kafka`), `pathcapacity/` ("unknown capacity" default),
   `kafka/` (integration + analytics publishers, `EVENT_PUBLISHER=kafka`),

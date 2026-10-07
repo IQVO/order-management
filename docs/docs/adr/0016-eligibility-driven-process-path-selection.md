@@ -12,7 +12,11 @@ description: "ADR 0016 — order.PathSelectionPolicy evaluates a line's product 
 
 Accepted — extended by [ADR 0021](./0021-multi-path-attribute-driven-routing.md),
 which made the eligibility rules this record sketched attribute-driven
-and multi-path.
+and multi-path. The live HTTP lookup of §2 (`productclassification`
+client, `PRODUCT_CLASSIFICATION_MODE=http`) is superseded by
+[ADR 0036](./0036-product-classification-local-copy.md): the same port is
+now answered from a local copy of product-master's `ProductClassified`
+events.
 
 ## Context
 
