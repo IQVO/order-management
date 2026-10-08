@@ -72,7 +72,7 @@ holding network-originated orders until their caller commits.
 
 | Collaborator | Message | Type | Channel | Relationship |
 | --- | --- | --- | --- | --- |
-| inventory-storage | Reserve stock for a line | Command | REST `POST /reservations` (Idempotency-Key, ADR 0028) | Customer/Supplier, ACL |
+| inventory-storage | Reserve stock for a line | Command | REST `POST /reservations` (body `sku`, `quantity`, `demandRef` and the optional `lineNo` so inventory-storage can confirm a pick per line — decision 18, ADR 0037; Idempotency-Key, ADR 0028) | Customer/Supplier, ACL |
 | inventory-storage | Revoke a reservation | Command | REST `DELETE /reservations/{id}` | Customer/Supplier, ACL |
 | wes-work-planning | OrderAllocated | Event | Kafka `warehouse.order-management.events`, `com.warehouse.wes.order-management.order.OrderAllocated` | Published Language |
 | wes-work-planning | OrderPartiallyAllocated | Event | Kafka `warehouse.order-management.events`, `com.warehouse.wes.order-management.order.OrderPartiallyAllocated` | Published Language |

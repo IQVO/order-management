@@ -652,6 +652,7 @@ GitHub Pages on every push to `main` that touches `docs/**`, publishing to
 34. [0034 — Raise OrderLineReleased and OrderReleased at the release transition](docs/docs/adr/0034-raise-order-line-released-and-order-released.md)
 35. [0035 — SiteSkuDemandChanged — an additive, PII-free site/SKU demand projection event](docs/docs/adr/0035-site-sku-demand-projection-event.md)
 36. [0036 — Product classification from a local copy of product-master events](docs/docs/adr/0036-product-classification-local-copy.md)
+37. [0037 — Send the order line number (lineNo) on POST /reservations](docs/docs/adr/0037-send-line-no-on-reservations.md)
 
 ## License
 

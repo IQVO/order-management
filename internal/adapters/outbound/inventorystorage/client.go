@@ -101,6 +101,21 @@ type reserveRequest struct {
 	SKU       string `json:"sku"`
 	Quantity  int    `json:"quantity"`
 	DemandRef string `json:"demandRef"`
+	// LineNo is the order line this reservation is for (decision 18,
+	// ADR 0037). Optional and additive: nil (omitted) means "unknown".
+	// inventory-storage's handler decodes with a plain json.Decoder, so
+	// a body carrying it is accepted whether or not that service has
+	// shipped the field yet.
+	LineNo *int `json:"lineNo,omitempty"`
+}
+
+// lineNoField returns the wire value of lineNo: the line number when it
+// is a real one (>= 1), nil otherwise so the field is omitted.
+func lineNoField(lineNo int) *int {
+	if lineNo < 1 {
+		return nil
+	}
+	return &lineNo
 }
 
 // reservationResponse mirrors inventory-storage's Reservation response.
@@ -121,6 +136,7 @@ func (c *Client) Reserve(ctx context.Context, req ports.ReservationRequest) (por
 		SKU:       req.SKU.String(),
 		Quantity:  req.Quantity,
 		DemandRef: req.DemandRef.String(),
+		LineNo:    lineNoField(req.LineNo),
 	})
 	if err != nil {
 		return ports.ReservationResult{}, err

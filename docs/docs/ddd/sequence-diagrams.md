@@ -110,7 +110,7 @@ sequenceDiagram
   participant OB as Outbox
 
   loop every line to allocate
-    UC->>INV: POST /reservations, Idempotency-Key res-orderId-line-n-att-version
+    UC->>INV: POST /reservations {sku, quantity, demandRef, lineNo}, Idempotency-Key res-orderId-line-n-att-version
     alt 201 or 200
       UC->>O: Allocate or RetryAllocate(lineNo, reservationId)
       UC->>OB: Publish(OrderLineAllocated)
@@ -137,7 +137,7 @@ sequenceDiagram
     UC->>OB: Publish(OrderAllocated or OrderPartiallyAllocated) without lines
   else release on allocation
     loop every line allocated in an earlier pass
-      UC->>INV: POST /reservations again to reconfirm
+      UC->>INV: POST /reservations again to reconfirm (same body, lineNo included)
       alt reserved
         UC->>O: ReconfirmReservation(lineNo, id)
       else 409

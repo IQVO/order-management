@@ -111,7 +111,8 @@ Not a public use case (`internal/application/usecases/allocation.go`); it
 runs inside one `UnitOfWork` transaction.
 
 1. Calls inventory-storage's `POST /reservations` once per line to
-   allocate, with this order's id as `demandRef` and a deterministic
+   allocate, with this order's id as `demandRef`, the line's number as the
+   optional `lineNo` (decision 18, ADR 0037) and a deterministic
    `Idempotency-Key` (ADR 0028). **BR2:** a `409` is the business fact
    "not enough usable stock" — that line becomes `Backordered` and the pass
    continues. Anything else is ambiguous: the pass hard-fails, keeps what
