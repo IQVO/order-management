@@ -461,7 +461,10 @@ classDiagram
   InventoryReservationClient ..> ReservationRequest
 ```
 
-Source: `internal/application/ports/ports.go`. Omits: the sentinel errors
+Source: `internal/application/ports/ports.go`. `ReservationRequest.LineNo`
+is sent on `POST /reservations` as the optional `lineNo` (when at least 1) and
+also scopes the Idempotency-Key ([ADR 0037](/docs/adr/0037-send-line-no-on-reservations)).
+Omits: the sentinel errors
 (`ErrInsufficientStock`, `ErrDownstreamNotConfigured`,
 `ErrDownstreamUnavailable`, `ErrConcurrentModification`) and the
 `ProductClassification`/`ReservationResult` result structs.

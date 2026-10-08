@@ -142,9 +142,11 @@ type OrderMetrics interface {
 // pass's Save commits) and to have moved on by the time a genuinely
 // later, independent pass re-attempts the same line — exactly the
 // "same across a retry of this attempt, different for a new attempt"
-// shape the header contract requires. Neither field is meaningful to
-// inventory-storage's own request body; they are transport-adapter
-// concerns of the OUTBOUND client only.
+// shape the header contract requires. Attempt is a transport-adapter
+// concern of the OUTBOUND client only. LineNo (when >= 1) is ALSO sent as
+// the optional `lineNo` body field (decision 18 / ADR 0037) so
+// inventory-storage can record which line a reservation is for; that does
+// not change the Idempotency-Key derivation.
 type ReservationRequest struct {
 	SKU       shared.SKU
 	Quantity  int
