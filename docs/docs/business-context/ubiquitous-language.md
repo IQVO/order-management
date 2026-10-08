@@ -52,7 +52,7 @@ wes-work-planning or fulfillment-execution — see
 | **Default path** | `pick`, used when no catalogue is wired or nothing better is eligible. | `shared.DefaultPathId` |
 | **Eligibility** | A path's admission rules: max units per line, required and excluded product attributes, non-sortable. | `shared.Eligibility` |
 | **Path selection** | Choosing, per line, the eligible active path with the shortest known `CycleTimeP95`, ties to the lower `PathId` (ADR 0021). Never caller-supplied. | `order.PathSelectionPolicy` |
-| **Product classification** | inventory-storage's attribute tags for a SKU, used only as a routing hint (fail-open). | `ports.ProductClassificationLookup` |
+| **Product classification** | A SKU's handling tags (Hazmat, Fragile, TemperatureSensitive, Oversized, HighValue), owned by **product-master** and read here from a local copy of its `ProductClassified` events (ADR 0036). Used only as a routing hint (fail-open: an unknown SKU has no tags). | `ports.ProductClassificationLookup`, `product_classification_copy` |
 | **Work unit id** | `{orderId}-line-{lineNo}`, derived identically here and in wes-work-planning; never transmitted. | `usecases.WorkUnitID`, `ParseWorkUnitID` |
 
 ## Planned capacity terms (ADR 0031)

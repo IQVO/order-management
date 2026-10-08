@@ -165,8 +165,11 @@ there is no separate migrate step to remember.
 
 ### 3. Wired to the real Supplier
 
-The outbound inventory-storage clients default to **permissive (no-op)
-mode**, so tests and CI never reach the network. For reservations,
+The outbound inventory-storage reservation client defaults to **permissive
+(no-op) mode**, so tests and CI never reach the network. (Product
+classification is no longer read from inventory-storage: it comes from a
+local copy of product-master's events, `PRODUCT_CLASSIFICATION_MODE=kafka`,
+ADR 0036.) For reservations,
 permissive does *not* mean fail-open: allocating real stock must never
 appear to succeed against a no-op, so a permissive client refuses the
 operation with a clear `downstream-not-configured` problem. Only `http` mode is suitable

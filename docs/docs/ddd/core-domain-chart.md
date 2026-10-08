@@ -57,9 +57,9 @@ are not off-the-shelf either.
 | Enforced invariants | 15 in the aggregate, 4 more checked in use cases |
 | Domain policies | `PromisePolicy`, `LeadTimePolicy`, `PathSelectionPolicy` |
 | Promise bases | 3 (`Capability`, `LeadTime`, `Network`) |
-| Use cases | 9 |
-| Upstream contexts integrated | 5 (inventory-storage, process-path-management, wes-work-planning, fulfillment-execution, warehouse-planning) |
-| ADRs | 33 |
+| Use cases | 10 |
+| Upstream contexts integrated | 6 (inventory-storage, product-master, process-path-management, wes-work-planning, fulfillment-execution, warehouse-planning) |
+| ADRs | 36 |
 
 Most of the complexity is integration and promise computation, not a deep
 model: one aggregate, five line states, a derived order status.
@@ -83,8 +83,9 @@ contexts.
   tests, but no carrier-rate or transit-time modelling (that is
   commodity).
 - **Own references, not truth.** Only `reservationId` is kept from
-  inventory-storage; process paths, CPT schedules and capacity are local
-  read models of upstream data.
+  inventory-storage; process paths, CPT schedules, capacity and product
+  classifications (from product-master, ADR 0036) are local read models
+  of upstream data.
 - **Same quality gates as a Core context anyway** — coverage, BDD,
   mutation and architecture tests — because the invariants above are real
   (see [Architecture](/docs/overview/architecture#quality-gates)).

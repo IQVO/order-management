@@ -169,9 +169,13 @@ from the first offset), which de-duplicates on the CloudEvents `id`; see
 | warehouse-planning | `com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanCreated` | `warehouse.warehouse-planning.events` | `plan_id`, `warehouse_id`, `location`, `path_id`, `window_start`, `window_end`, `assigned_demand`, `capacity_over_window`, `shortage`, `bottleneck_step` | `inbound/kafka.PlannedCapacityConsumer`, group from `PLANNED_CAPACITY_CONSUMER_GROUP` | upsert window as `DRAFT` |
 | warehouse-planning | `com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanPublished` | same | same | same | upsert window as `PUBLISHED` |
 | warehouse-planning | `com.warehouse.wes.warehouse-planning.capacityplan.CapacityShortageDetected` | same | same | same | upsert window as `PUBLISHED` |
+| product-master | `com.warehouse.wms.product-master.product.ProductClassified` | `warehouse.product-master.events` | `sku`, `handling_tags`, `temperature_class`, `dot_hazard_class`, `version` (`classification_source` decoded, not stored) | `inbound/kafka.ProductClassificationConsumer`, group from `PRODUCT_CLASSIFICATION_CONSUMER_GROUP` (only with `PRODUCT_CLASSIFICATION_MODE=kafka`) | ApplyProductClassification: version-guarded upsert into `product_classification_copy` (ADR 0036) |
 
 `com.warehouse.wes.warehouse-planning.capacityplan.BottleneckDetected` is
-recognised and ignored. Unknown types are ignored on every consumer.
+recognised and ignored, and so are product-master's other types on its
+topic (`ProductRegistered`, `ProductDescriptionChanged`,
+`ProductDimensionsDeclared`, `ProductMeasured`). Unknown types are ignored
+on every consumer.
 
 Delivery guarantees by consumer:
 
@@ -183,6 +187,14 @@ Delivery guarantees by consumer:
   offset is committed
   ([ADR 0025](/docs/adr/0025-resilience-circuit-breakers-retry-dlq-shutdown)).
   A non-CloudEvents message is dead-lettered immediately.
+- **ProductClassificationConsumer** — stable shared group from
+  `PRODUCT_CLASSIFICATION_CONSUMER_GROUP` (no default), idempotent on the
+  CloudEvents `id` (`product_classification_processed_events`) in the same
+  transaction as the upsert. A transient failure retries the same message
+  until it succeeds; a non-CloudEvents message or an invalid payload is
+  logged at WARN and committed past. No dead-letter topic: the next
+  `ProductClassified` for the SKU repairs the copy
+  ([ADR 0036](/docs/adr/0036-product-classification-local-copy)).
 - **Catalogue, CPT-schedule and path-capacity caches** — run only with
   `PATH_CATALOGUE_SOURCE=kafka`, each under a fresh per-process group that
   replays from the first offset; `cmd/order` waits up to 60s for each to

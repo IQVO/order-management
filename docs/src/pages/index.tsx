@@ -46,7 +46,9 @@ function HomepageHeader() {
           unvalidated string reinvented three different ways. Order
           Management makes <code>Order</code> and <code>OrderLine</code>{' '}
           first-class aggregates, and becomes the Customer that calls
-          inventory-storage and wes-work-planning's published REST APIs.
+          inventory-storage's published REST API, announces released work to
+          wes-work-planning over Kafka, and reads product-master's
+          classifications from a local copy.
         </p>
         <div className={styles.buttons}>
           <Link className="button button--primary button--lg" to="/docs/overview">
