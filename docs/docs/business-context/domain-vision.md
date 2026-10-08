@@ -85,13 +85,18 @@ section — not an oversight to silently paper over.
 
 ## Why this context calls, rather than shares code with, its Suppliers
 
-Order Management is a **pure HTTP consumer** of inventory-storage's and
-wes-work-planning's already-published, already-stable REST APIs. It is a
+Order Management is a **pure HTTP consumer** of inventory-storage's
+already-published, already-stable REST API (reservations). Since
+[ADR 0005](/docs/adr/0005-choreographed-release-via-kafka) it no longer
+calls wes-work-planning — release is a published Kafka event — and since
+[ADR 0036](/docs/adr/0036-product-classification-local-copy) it reads
+product classification from a local copy of **product-master**'s
+`ProductClassified` events instead of asking inventory-storage. It is a
 separate Go module in a separate repository — it imports no Go package
-from either repo, and it gets no write access to their internal aggregates
-(`Reservation`, `WorkPool`, `WorkUnit`), only to their published HTTP
-contracts. Order Management is the **Customer**; inventory-storage and
-wes-work-planning are the **Suppliers / Open Host Services** — the same
+from any sibling repo, and it gets no write access to their internal
+aggregates (`Reservation`, `WorkPool`, `WorkUnit`), only to their published
+HTTP and Kafka contracts. Order Management is the **Customer**;
+inventory-storage is the **Supplier / Open Host Service** — the same
 directional Customer/Supplier relationship the fleet's DDD reference docs
 already use for WMS → WES. See
 [ADR 0002](/docs/adr/0002-http-consumer-of-inventory-and-wes-not-shared-code)

@@ -48,6 +48,10 @@ Source: ddd-crew cheat-sheet colours. Omits: nothing — legend only.
 flowchart LR
   CUS["Customer channel"]:::actor
   CAT["Process path catalogue, CPT schedule, path capacity"]:::readmodel
+  PMX["product-master"]:::external
+  EPC["Product Classified"]:::event
+  APC["Apply Product Classification"]:::command
+  CLS["Product classification copy"]:::readmodel
   RO["Receive Order"]:::command
   PS["Path selection policy"]:::policy
   O1["Order"]:::aggregate
@@ -70,6 +74,7 @@ flowchart LR
 
   CUS --> RO --> O1
   CAT --> PS --> O1
+  PMX --> EPC --> APC --> CLS --> PS
   O1 --> E1 --> P1
   P1 --> INV
   INV --> E2
@@ -97,7 +102,9 @@ flowchart LR
 ```
 
 Source: `internal/application/usecases/receive_order.go`, `allocation.go`,
-`retry_allocation.go`, `internal/domain/order/path_selection.go`,
+`retry_allocation.go`, `product_classification.go`,
+`internal/adapters/inbound/kafka/product_classification_consumer.go`,
+`internal/domain/order/path_selection.go`,
 `promise_policy.go`. Omits: the reconfirm `Order Line Backordered` (lost
 reservation) and the analytics fan-out of every event.
 
@@ -204,10 +211,12 @@ Omits: the analytics projector (a read model built from every event, see
 | Cancel Order | Command | `usecases.CancelOrder`, `DELETE /orders/{id}` |
 | Repromise Order | Command | `usecases.RepromiseOrder` |
 | Apply Planned Capacity | Command | `usecases.ApplyPlannedCapacity` |
+| Apply Product Classification | Command | `usecases.ApplyProductClassification` (ADR 0036) |
 | Order | Aggregate | `order.Order` |
 | Order Received … Order Repromised | Domain Event | `internal/domain/shared/events.go` |
 | Task CPT Missed, Package Manifested | Domain Event (upstream) | `inbound/kafka/repromise_consumer.go` |
 | Capacity Plan Created, Published, Shortage Detected | Domain Event (upstream) | `inbound/kafka/planned_capacity_consumer.go` |
+| Product Classified | Domain Event (upstream, product-master) | `inbound/kafka/product_classification_consumer.go` |
 | Path selection policy | Policy | `order.PathSelectionPolicy` (ADR 0021) |
 | Promise policy | Policy | `order.PromisePolicy` (ADR 0014, 0017, 0020) |
 | Allocate every line on receipt | Policy | `ReceiveOrder` calls `allocateAndRelease` |
@@ -217,8 +226,9 @@ Omits: the analytics projector (a read model built from every event, see
 | Re-promise on CPT missed or package manifested | Policy | `RepromiseConsumer` → `RepromiseOrder` |
 | Catalogue, CPT schedule and capacity caches | Read Model | `kafkacatalog`, `kafkacptschedule`, `kafkapathcapacity` |
 | Planned capacity windows | Read Model | `planned_capacity_windows`, `order.PlannedCapacityWindow` |
+| Product classification copy | Read Model | `product_classification_copy`, `ports.ProductClassificationLookup` (ADR 0036) |
 | Order view with promiseDate | Read Model | `GET /orders/{id}` response (`orderResponse`) |
-| inventory-storage, wes-work-planning, process-path-management, fulfillment-execution, warehouse-planning, network-fulfillment | External System | outbound and inbound adapters listed on [Context Map](/docs/ecosystem/context-map) |
+| inventory-storage, product-master, wes-work-planning, process-path-management, fulfillment-execution, warehouse-planning, network-fulfillment | External System | outbound and inbound adapters listed on [Context Map](/docs/ecosystem/context-map) |
 | Order Line Released and Order Released raised only on the analytics topic | Event | `publishReleaseFacts` in `allocation.go`, [ADR 0034](/docs/adr/0034-raise-order-line-released-and-order-released) |
 | No release confirmation from wes-work-planning | Hotspot | README Deferred list, ADR 0005 |
 | Orphaned hold is never swept | Hotspot | ADR 0020, README Deferred list |
