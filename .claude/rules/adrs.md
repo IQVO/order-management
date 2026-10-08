@@ -2,7 +2,7 @@
 paths:
   - "docs/docs/adr/**"
 ---
-# Architecture Decision Records (0001-0020 summarized in order here; 0021-0036 summarized below; read the file in `docs/docs/adr/` before acting)
+# Architecture Decision Records (0001-0020 summarized in order here; 0021-0037 summarized below; read the file in `docs/docs/adr/` before acting)
 
 1. **0001 — Hexagonal (ports & adapters) architecture.** The dependency
    rule this whole repo enforces (`internal/architecture/` fitness test).
@@ -376,6 +376,16 @@ Other ADR-adjacent facts worth knowing without opening every file:
   one UnitOfWork). `PRODUCT_CLASSIFICATION_MODE=kafka|permissive`; `http`
   and the inventory-storage HTTP client are gone and `http` fails boot.
   Unknown SKU stays fail-open. Read it before touching classification.
+
+- **0037 — ACCEPTED: send `lineNo` on `POST /reservations`.** The
+  inventory-storage client puts the order line number in the request body as
+  the optional integer `lineNo` (only when it is >= 1), so inventory-storage
+  can store which line a reservation is for and confirm a pick per line
+  (additive). The `Idempotency-Key` derivation (ADR 0028) is byte-identical and
+  `OrderAllocated` is untouched. Caveat: inventory-storage hashes the request
+  body for idempotency, so a retry of the same (order, line, attempt) key first
+  sent before this deploy and retried after it gets a 422, bounded by that
+  key's lifetime; recover by retrying the allocation (next attempt number).
 
 - Gateway API `HTTPRoute` chart template exists (`charts/order-management`
   `values.yaml` `gatewayApi:` block, `enabled: false` by default) —

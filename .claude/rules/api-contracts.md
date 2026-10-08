@@ -74,8 +74,8 @@ Base URL via env `INVENTORY_STORAGE_BASE_URL`, mode via
 `INVENTORY_STORAGE_MODE` (default `permissive`):
 
 - `POST /reservations` — request
-  `{"sku":"...","quantity":N,"demandRef":"..."}` (this Order's `OrderId` as
-  `demandRef`) — 201 response:
+  `{"sku":"...","quantity":N,"demandRef":"...","lineNo":N}` (this Order's `OrderId` as
+  `demandRef`; `lineNo` is the order line, optional, sent only when >= 1, ADR 0037) — 201 response:
   `{"id":"...","sku":"...","quantity":N,"demandRef":"...","status":"...","allocations":[{"stockUnitId":"...","quantity":N}],"expiresAt":"..."}`.
   A 409 (RFC 7807) means insufficient usable stock → `Backordered` for that
   line (BR2). Any other non-2xx or transport error propagates as a hard
