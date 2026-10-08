@@ -75,7 +75,7 @@ Typos, broken links and formatting are of course fair game.
 | [0013](./0013-process-path-selection-as-a-domain-policy.md) | Process-path selection as a real domain policy, validated against a live catalogue | Accepted; extended by ADR 0021 |
 | [0014](./0014-promise-derived-from-fulfillment-capability.md) | The delivery promise is a CPT window derived from fulfillment capability, not a configured lead time | Accepted |
 | [0015](./0015-wes-work-planning-path-capacity-changed-wired.md) | wes-work-planning's PathCapacityChanged is wired as the real PathCapacity adapter | Accepted; flat-envelope dispatch superseded by ADR 0030 |
-| [0016](./0016-eligibility-driven-process-path-selection.md) | Eligibility-driven process-path selection (ADR 0014 step B, routing only) | Accepted; extended by ADR 0021 |
+| [0016](./0016-eligibility-driven-process-path-selection.md) | Eligibility-driven process-path selection (ADR 0014 step B, routing only) | Accepted; extended by ADR 0021; live classification lookup superseded by ADR 0036 |
 | [0017](./0017-per-shipment-group-promising.md) | Per-shipment-group promising (ADR 0014 step B, the second half) | Accepted |
 | [0018](./0018-repromise-order-consumer-and-order-repromised.md) | RepromiseOrder consumer and OrderRepromised — closing ADR 0014's feedback loop | Accepted; flat inbound envelope superseded by ADR 0030 |
 | [0019](./0019-promise-kpis-on-order-funnel.md) | Promise KPIs on the Order Funnel data product (ADR 0014 §6, order-management half) | Accepted; amended 2026-10 (Network basis bucket) |
@@ -84,7 +84,7 @@ Typos, broken links and formatting are of course fair game.
 | [0022](./0022-transactional-outbox.md) | Transactional outbox for order-management's dual-topic event publishing | Accepted |
 | [0023](./0023-idempotency-key-middleware.md) | Transactional Idempotency-Key middleware for POST /orders | Accepted |
 | [0024](./0024-optimistic-concurrency-version-column.md) | Optimistic concurrency (version column) for the Order aggregate | Accepted |
-| [0025](./0025-resilience-circuit-breakers-retry-dlq-shutdown.md) | Resilience — circuit breakers, retry, DLQ, graceful shutdown | Accepted |
+| [0025](./0025-resilience-circuit-breakers-retry-dlq-shutdown.md) | Resilience — circuit breakers, retry, DLQ, graceful shutdown | Accepted; product-classification breaker and retry superseded by ADR 0036 |
 | [0026](./0026-horizontal-autoscaling-and-pgxpool-tuning.md) | Horizontal autoscaling and pgxpool tuning | Accepted |
 | [0027](./0027-kafka-integration-publisher-partition-key.md) | Partition key (OrderId) on the integration publisher's Kafka messages | Accepted |
 | [0028](./0028-inventory-storage-reservations-idempotency-key.md) | Idempotency-Key on inventory-storage reservation calls | Accepted |
@@ -95,6 +95,8 @@ Typos, broken links and formatting are of course fair game.
 | [0033](./0033-bootretry-and-kafka-writer-tuning.md) | Boot-time first-dial retry, synchronous-writer BatchTimeout/acks, and DLQ topic-create retry | Accepted |
 | [0034](./0034-raise-order-line-released-and-order-released.md) | Raise OrderLineReleased and OrderReleased at the release transition | Accepted |
 | [0035](./0035-site-sku-demand-projection-event.md) | SiteSkuDemandChanged — an additive, PII-free site/SKU demand projection event | Accepted |
+| [0036](./0036-product-classification-local-copy.md) | Product classification from a local copy of product-master events | Accepted |
+| [0037](./0037-send-line-no-on-reservations.md) | Send the order line number (lineNo) on POST /reservations | Accepted |
 
 Each of these reconstructs a decision that is actually visible in this
 repository's `CLAUDE.md` and code — none is a generic placeholder.

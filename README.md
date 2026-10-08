@@ -20,14 +20,17 @@ threaded independently through three other services.
 ## Bounded-context boundary (read this first)
 
 This service is a **pure HTTP consumer** of `inventory-storage`'s
-already-published REST API (reservations, product classification) and
+already-published REST API (reservations) and
 integrates with the rest of the fleet only through published Kafka events:
 it announces release to `wes-work-planning`
 ([ADR 0005](docs/docs/adr/0005-choreographed-release-via-kafka.md)) and
 consumes capability, CPT-schedule, capacity and fulfillment facts from
 `process-path-management`, `wes-work-planning` and `fulfillment-execution`
 (ADR 0013–0018), plus — opt-in — `warehouse-planning`'s capacity plans
-([ADR 0031](docs/docs/adr/0031-consume-warehouse-planning-capacity-plans.md)).
+([ADR 0031](docs/docs/adr/0031-consume-warehouse-planning-capacity-plans.md))
+and `product-master`'s product classifications, kept in a local copy that
+order intake reads
+([ADR 0036](docs/docs/adr/0036-product-classification-local-copy.md)).
 `network-fulfillment` calls it over HTTP to raise held,
 deadline-constrained orders
 ([ADR 0020](docs/docs/adr/0020-network-originated-demand-hold-and-deadline-feasibility.md)).
@@ -67,24 +70,31 @@ internal/
                                   PathCapacity, ProductClassificationLookup,
                                   RepromiseProcessedEvents,
                                   PlannedCapacityRepo,
-                                  PlannedCapacityProcessedEvents
+                                  PlannedCapacityProcessedEvents,
+                                  ProductClassificationCopy,
+                                  ProductClassificationProcessedEvents
     usecases/                     ReceiveOrder (allocates+releases
                                   implicitly), RetryAllocation (retries+
                                   releases), ReleaseHeldOrder, CancelOrder,
                                   GetOrder, RepromiseOrder (Kafka-driven),
                                   ApplyPlannedCapacity (Kafka-driven),
-                                  GetPlannedCapacity, OrderCapacityConstraints
+                                  GetPlannedCapacity, OrderCapacityConstraints,
+                                  ApplyProductClassification (Kafka-driven)
   adapters/
     inbound/http/                 chi handlers, DTOs, RFC 7807 error mapping,
                                   Idempotency-Key middleware, /readyz gate
     inbound/kafka/                re-promise consumer (warehouse.fulfillment.events),
                                   planned-capacity consumer
                                   (warehouse.warehouse-planning.events),
+                                  product-classification consumer
+                                  (warehouse.product-master.events),
                                   analytics consumer (cmd/order-projector)
     inbound/mcp/                  MCP tools
     kafka/cloudevents/            the only CloudEvents 1.0 New/Decode helper
     outbound/inventorystorage/    POST /reservations, DELETE /reservations/{id}
-    outbound/productclassification/ GET /products/{sku}/classification
+    outbound/productclassificationcopy/ local copy of product-master
+                                  classifications (Postgres/in-memory) +
+                                  permissive lookup (ADR 0036)
     outbound/kafkacatalog/, kafkacptschedule/, kafkapathcapacity/
                                   capability caches (PATH_CATALOGUE_SOURCE=kafka)
     outbound/pathcapacity/        "unknown capacity" default
@@ -155,8 +165,11 @@ there is no separate migrate step to remember.
 
 ### 3. Wired to the real Supplier
 
-The outbound inventory-storage clients default to **permissive (no-op)
-mode**, so tests and CI never reach the network. For reservations,
+The outbound inventory-storage reservation client defaults to **permissive
+(no-op) mode**, so tests and CI never reach the network. (Product
+classification is no longer read from inventory-storage: it comes from a
+local copy of product-master's events, `PRODUCT_CLASSIFICATION_MODE=kafka`,
+ADR 0036.) For reservations,
 permissive does *not* mean fail-open: allocating real stock must never
 appear to succeed against a no-op, so a permissive client refuses the
 operation with a clear `downstream-not-configured` problem. Only `http` mode is suitable
@@ -182,11 +195,12 @@ Release no longer calls any Supplier synchronously — see
 | `MIGRATIONS_PATH` | `migrations` | golang-migrate source directory. |
 | `DEFAULT_SITE_ID` | `site-1` | Site whose CPT schedule the promise uses (ADR 0014). |
 | `INVENTORY_STORAGE_MODE` | `permissive` | `http` or `permissive`. |
-| `INVENTORY_STORAGE_BASE_URL` | *(unset)* | Required when mode is `http`; also the product-classification base URL. |
-| `PRODUCT_CLASSIFICATION_MODE` | `permissive` | `http` or `permissive` — eligibility lookup for path selection (ADR 0016); fails open. |
+| `INVENTORY_STORAGE_BASE_URL` | *(unset)* | Required when mode is `http` (reservations only). |
+| `PRODUCT_CLASSIFICATION_MODE` | `permissive` | `kafka` or `permissive` — where path-selection eligibility gets a SKU's handling tags (ADR 0016/0036). `kafka` keeps a local copy of product-master's `ProductClassified` events; `permissive` treats every SKU as unclassified. Both fail open for an unknown SKU. `http` was removed and **fails boot** (ADR 0036). |
+| `PRODUCT_CLASSIFICATION_CONSUMER_GROUP` | *(unset)* | Stable consumer group of the classification copy's consumer on `warehouse.product-master.events`; **required** when `PRODUCT_CLASSIFICATION_MODE=kafka` (ADR 0036). |
 | `PATH_CATALOGUE_SOURCE` | `none` | `kafka` enables the process-path catalogue, CPT-schedule and path-capacity caches that drive the capability-derived promise (ADR 0013–0015); `none` ⇒ lead-time promise only. |
 | `EVENT_PUBLISHER` | `log` | `log` (default, structured-log publisher) or `kafka` — forwards `OrderAllocated`/`OrderPartiallyAllocated`/`OrderRepromised` to the integration topic **and** fans every domain event out to the analytics topic (ADR 0006). With `DATABASE_URL` set, `kafka` goes through the transactional outbox (`outbox_events` + in-process relay, ADR 0022); without it, events are written to Kafka directly. |
-| `KAFKA_BROKERS` | `localhost:9092` for the publishers; unset disables the consumers | Comma-separated broker addresses. When set, `cmd/order` also runs the re-promise consumer (ADR 0018) and, if enabled, the planned-capacity consumer (ADR 0031). |
+| `KAFKA_BROKERS` | `localhost:9092` for the publishers; unset disables the consumers | Comma-separated broker addresses. When set, `cmd/order` also runs the re-promise consumer (ADR 0018) and, if enabled, the planned-capacity consumer (ADR 0031); required by `PRODUCT_CLASSIFICATION_MODE=kafka` (ADR 0036). |
 | `OUTBOX_RELAY_INTERVAL` | `1s` | Outbox relay poll interval (ADR 0022). |
 | `HOUSEKEEPING_INTERVAL` | `1h` | Sweeper period; `0` disables it (ADR 0032). |
 | `IDEMPOTENCY_KEY_TTL` | `24h` | Age after which `idempotency_keys` rows are swept (ADR 0032). |
@@ -636,6 +650,9 @@ GitHub Pages on every push to `main` that touches `docs/**`, publishing to
 32. [0032 — Housekeeping sweeper for idempotency keys and published outbox rows](docs/docs/adr/0032-housekeeping-sweeper-idempotency-keys-and-outbox.md)
 33. [0033 — Boot-time first-dial retry, synchronous-writer BatchTimeout/acks, and DLQ topic-create retry](docs/docs/adr/0033-bootretry-and-kafka-writer-tuning.md)
 34. [0034 — Raise OrderLineReleased and OrderReleased at the release transition](docs/docs/adr/0034-raise-order-line-released-and-order-released.md)
+35. [0035 — SiteSkuDemandChanged — an additive, PII-free site/SKU demand projection event](docs/docs/adr/0035-site-sku-demand-projection-event.md)
+36. [0036 — Product classification from a local copy of product-master events](docs/docs/adr/0036-product-classification-local-copy.md)
+37. [0037 — Send the order line number (lineNo) on POST /reservations](docs/docs/adr/0037-send-line-no-on-reservations.md)
 
 ## License
 

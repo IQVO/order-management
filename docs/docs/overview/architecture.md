@@ -34,23 +34,27 @@ internal/
                                ProcessPathCatalogue, CPTScheduleCache,
                                ProductClassificationLookup, PathCapacity,
                                RepromiseProcessedEvents, PlannedCapacityRepo,
-                               PlannedCapacityProcessedEvents
+                               PlannedCapacityProcessedEvents,
+                               ProductClassificationCopy,
+                               ProductClassificationProcessedEvents
     usecases/                 ReceiveOrder, RetryAllocation, CancelOrder,
                                GetOrder, ReleaseHeldOrder, RepromiseOrder,
                                ApplyPlannedCapacity, GetPlannedCapacity,
-                               OrderCapacityConstraints
+                               OrderCapacityConstraints, ApplyProductClassification
                                (allocation + release folded into allocateAndRelease)
   adapters/
     inbound/http/             chi handlers, DTOs, RFC 7807 error mapping,
                                Idempotency-Key middleware, readiness gate
     inbound/kafka/            RepromiseConsumer (warehouse.fulfillment.events),
                                PlannedCapacityConsumer (warehouse.warehouse-planning.events),
+                               ProductClassificationConsumer (warehouse.product-master.events),
                                AnalyticsConsumer (cmd/order-projector)
     inbound/mcp/              MCP tools
     kafka/cloudevents/        the only CloudEvents 1.0 New/Decode helper (ADR 0030)
     outbound/inventorystorage/  HTTP client: POST /reservations,
                                  DELETE /reservations/{id}
-    outbound/productclassification/  HTTP client: GET /products/{sku}/classification
+    outbound/productclassificationcopy/  local copy of product-master classifications
+                                 (Postgres / in-memory) + permissive lookup (ADR 0036)
     outbound/kafka/           integration + analytics publishers
     outbound/kafkacatalog/    process-path catalogue cache (Kafka)
     outbound/kafkacptschedule/  CPT schedule cache (Kafka)
@@ -74,13 +78,13 @@ docs/docs/adr/                Architecture Decision Records
 ```mermaid
 flowchart TB
   HTTP["inbound/http<br/>chi handlers, DTOs, RFC 7807"]
-  KIN["inbound/kafka<br/>RepromiseConsumer · PlannedCapacityConsumer"]
-  UC["application/usecases<br/>ReceiveOrder, RetryAllocation, CancelOrder,<br/>GetOrder, ReleaseHeldOrder, RepromiseOrder,<br/>ApplyPlannedCapacity, GetPlannedCapacity"]
+  KIN["inbound/kafka<br/>RepromiseConsumer · PlannedCapacityConsumer<br/>ProductClassificationConsumer"]
+  UC["application/usecases<br/>ReceiveOrder, RetryAllocation, CancelOrder,<br/>GetOrder, ReleaseHeldOrder, RepromiseOrder,<br/>ApplyPlannedCapacity, GetPlannedCapacity,<br/>ApplyProductClassification"]
   P["application/ports<br/>OrderRepo · EventPublisher · Clock<br/>InventoryReservationClient · ProcessPathCatalogue<br/>CPTScheduleCache · PathCapacity · ..."]
   D["domain<br/>order · processpath · shared"]
   PG["outbound/postgres · memory"]
   EV["outbound/events · kafka"]
-  INVC["outbound/inventorystorage<br/>productclassification"]
+  INVC["outbound/inventorystorage<br/>productclassificationcopy"]
   CACHE["outbound/kafkacatalog<br/>kafkacptschedule · kafkapathcapacity"]
 
   HTTP --> UC
@@ -118,7 +122,9 @@ The rule is enforced by `internal/architecture` (the `arch-test` CI job).
 | `Clock` | `Now()` — makes promise computation deterministic in tests | `memory.SystemClock`, fixed clocks in tests |
 | `OrderMetrics` | Order accepted/rejected counter | `telemetry` (OpenTelemetry) |
 | `InventoryReservationClient` | `Reserve`/`Revoke` against inventory-storage | `outbound/inventorystorage` (http), permissive no-op |
-| `ProductClassificationLookup` | Product attributes for path eligibility (ADR 0016) | `outbound/productclassification` (http), permissive |
+| `ProductClassificationLookup` | Product attributes for path eligibility (ADR 0016), read from a local copy of product-master events (ADR 0036) | `outbound/productclassificationcopy` (Postgres, memory), permissive |
+| `ProductClassificationCopy` | Version-guarded write side of that copy (ADR 0036) | `outbound/productclassificationcopy` (Postgres, memory) |
+| `ProductClassificationProcessedEvents` | Idempotency gate for the product-classification consumer (ADR 0036) | `outbound/productclassificationcopy` (Postgres, memory) |
 | `ProcessPathCatalogue` | Active paths + capability (ADR 0013/0014) | `outbound/kafkacatalog` |
 | `CPTScheduleCache` | Site CPT schedule (ADR 0014) | `outbound/kafkacptschedule` |
 | `PathCapacity` | Remaining path capacity per cutoff (ADR 0015) | `outbound/kafkapathcapacity`, `pathcapacity.Unknown` |
@@ -126,8 +132,11 @@ The rule is enforced by `internal/architecture` (the `arch-test` CI job).
 | `PlannedCapacityRepo` | Local read model of warehouse-planning's capacity windows (ADR 0031) | `postgres`, `memory` |
 | `PlannedCapacityProcessedEvents` | Idempotency gate for the planned-capacity consumer (ADR 0031) | `postgres`, `memory` |
 
-Both inventory-storage ports are env-selected `MODE=http|permissive`
-(defaulting to `permissive`, so unit tests never hit the network). The
+The inventory-storage reservation client is env-selected
+`INVENTORY_STORAGE_MODE=http|permissive` and the classification lookup
+`PRODUCT_CLASSIFICATION_MODE=kafka|permissive` (both defaulting to
+`permissive`, so unit tests never hit the network; `http` for
+classification was removed by ADR 0036 and fails boot). The
 classification lookup fails open like the fleet's other soft lookups; the
 reservation client does not — allocation against a permissive client
 returns a clear `ErrDownstreamNotConfigured` rather than a fabricated
@@ -151,8 +160,9 @@ environment variable is read there:
 | `MIGRATIONS_DATABASE_URL` | `DATABASE_URL` | Direct (non-PgBouncer) DSN for the migration step only (ADR 0029) |
 | `MIGRATIONS_PATH` | `migrations` | Where golang-migrate looks for SQL files |
 | `INVENTORY_STORAGE_MODE` | `permissive` | `http` or `permissive` |
-| `INVENTORY_STORAGE_BASE_URL` | *(unset)* | Required when mode is `http`; also used by the classification lookup |
-| `PRODUCT_CLASSIFICATION_MODE` | `permissive` | `http` or `permissive` (ADR 0016) |
+| `INVENTORY_STORAGE_BASE_URL` | *(unset)* | Required when mode is `http` (reservations only) |
+| `PRODUCT_CLASSIFICATION_MODE` | `permissive` | `kafka` or `permissive` (ADR 0036); `http` fails boot |
+| `PRODUCT_CLASSIFICATION_CONSUMER_GROUP` | *(unset)* | Stable consumer group of the classification copy's consumer; required with mode `kafka` (ADR 0036) |
 | `EVENT_PUBLISHER` | `log` | `kafka` adds the integration + analytics topics (through the outbox when `DATABASE_URL` is set) |
 | `KAFKA_BROKERS` | `localhost:9092` when publishing; unset disables the re-promise and planned-capacity consumers | Comma-separated brokers |
 | `OUTBOX_RELAY_INTERVAL` | `1s` | Outbox relay poll interval (ADR 0022) |

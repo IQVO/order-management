@@ -11,6 +11,9 @@ description: "ADR 0025 — Phase 2 resilience for order-management: sony/gobreak
 ## Status
 
 Accepted — implemented in the same change that introduced this record.
+The product-classification breaker and its read-only retry are superseded
+by [ADR 0036](./0036-product-classification-local-copy.md): that HTTP
+client was removed and classification is read from a local copy.
 This is Phase 2 (resilience) of the fleet production-readiness plan,
 built on top of the already-merged Phase 0 (boot-retry) and Phase 1
 (idempotency: outbox, inbox/dedup, idempotency-key middleware,

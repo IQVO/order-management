@@ -74,19 +74,17 @@ Base URL via env `INVENTORY_STORAGE_BASE_URL`, mode via
 `INVENTORY_STORAGE_MODE` (default `permissive`):
 
 - `POST /reservations` — request
-  `{"sku":"...","quantity":N,"demandRef":"..."}` (this Order's `OrderId` as
-  `demandRef`) — 201 response:
+  `{"sku":"...","quantity":N,"demandRef":"...","lineNo":N}` (this Order's `OrderId` as
+  `demandRef`; `lineNo` is the order line, optional, sent only when >= 1, ADR 0037) — 201 response:
   `{"id":"...","sku":"...","quantity":N,"demandRef":"...","status":"...","allocations":[{"stockUnitId":"...","quantity":N}],"expiresAt":"..."}`.
   A 409 (RFC 7807) means insufficient usable stock → `Backordered` for that
   line (BR2). Any other non-2xx or transport error propagates as a hard
   failure — never silently backordered.
 - `DELETE /reservations/{id}` — 204 on success. Used by `CancelOrder`.
-- `GET /products/{sku}/classification` — product-classification lookup
-  for eligibility-driven path selection (ADR-0016), same
-  `INVENTORY_STORAGE_BASE_URL`, mode via `PRODUCT_CLASSIFICATION_MODE`
-  (default `permissive`). Unlike reservations this one fails OPEN: a 404,
-  transport error or non-2xx yields "unknown classification", never an
-  intake rejection.
+- Product classification is NOT an HTTP call any more (ADR-0036): the old
+  `GET /products/{sku}/classification` lookup was removed and
+  `PRODUCT_CLASSIFICATION_MODE=http` fails boot. See the
+  `warehouse.product-master.events` channel below.
 
 **Permissive mode is NOT soft here.** Unlike other fleet adapters that
 fail-open on optional/soft lookups, allocating real stock is never allowed
@@ -155,6 +153,21 @@ before `cmd/order` serves traffic:
 - `kafkapathcapacity` — `warehouse.work-planning.events`,
   `com.warehouse.wes.work-planning.workpool.PathCapacityChanged` (ADR-0015).
 - Non-CloudEvents messages are logged at WARN and skipped.
+
+### Channel: `warehouse.product-master.events` (inbound, ADR-0036)
+
+- `subscribe` operationId `consumeProductMasterEvents`, only with
+  `PRODUCT_CLASSIFICATION_MODE=kafka` (`kafka|permissive`, default
+  `permissive`; `http` is a boot error). Applies ONLY
+  `com.warehouse.wms.product-master.product.ProductClassified` into the
+  local copy `product_classification_copy` (one row per SKU, applied only
+  when `version` > stored), claim on the CloudEvents `id` + upsert in one
+  transaction; every other type ignored; invalid CloudEvents/payloads
+  logged at WARN and committed past (no DLQ); transient failures retried
+  on the same message. STABLE group from
+  `PRODUCT_CLASSIFICATION_CONSUMER_GROUP` (required in kafka mode).
+- `ports.ProductClassificationLookup` reads the copy; an unknown SKU is
+  `Known=false` (fail-open), exactly as the removed HTTP lookup's 404.
 
 ### Channel: `warehouse.order-management.analytics`
 

@@ -92,6 +92,7 @@ integration:
 	$(GO) test -tags=integration ./internal/adapters/outbound/analyticsstore
 	$(GO) test -tags=integration ./cmd/order
 	$(GO) test -tags=integration ./internal/adapters/outbound/postgres
+	$(GO) test -tags=integration ./internal/adapters/outbound/productclassificationcopy
 
 coverage:
 	$(GO) test ./... -race -coverprofile=$(COVERAGE_OUT) -coverpkg=$(COVERAGE_PKGS)

@@ -66,14 +66,14 @@ holding network-originated orders until their caller commits.
 | process-path-management | CPTScheduleChanged | Event | Kafka `warehouse.process-path-management.events`, `com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged` | Published Language, ACL |
 | wes-work-planning | PathCapacityChanged | Event | Kafka `warehouse.work-planning.events`, `com.warehouse.wes.work-planning.workpool.PathCapacityChanged` | Published Language, ACL |
 | warehouse-planning | CapacityPlanCreated, CapacityPlanPublished, CapacityShortageDetected | Event | Kafka `warehouse.warehouse-planning.events`, `com.warehouse.wes.warehouse-planning.capacityplan.*` (opt-in) | Published Language, ACL |
+| product-master | ProductClassified | Event | Kafka `warehouse.product-master.events`, `com.warehouse.wms.product-master.product.ProductClassified` → local copy read at intake (opt-in `PRODUCT_CLASSIFICATION_MODE=kafka`, ADR 0036, fail-open for unknown SKUs) | Published Language, ACL (local copy) |
 
 ## Outbound Communication
 
 | Collaborator | Message | Type | Channel | Relationship |
 | --- | --- | --- | --- | --- |
-| inventory-storage | Reserve stock for a line | Command | REST `POST /reservations` (Idempotency-Key, ADR 0028) | Customer/Supplier, ACL |
+| inventory-storage | Reserve stock for a line | Command | REST `POST /reservations` (body `sku`, `quantity`, `demandRef` and the optional `lineNo` so inventory-storage can confirm a pick per line — decision 18, ADR 0037; Idempotency-Key, ADR 0028) | Customer/Supplier, ACL |
 | inventory-storage | Revoke a reservation | Command | REST `DELETE /reservations/{id}` | Customer/Supplier, ACL |
-| inventory-storage | Product classification | Query | REST `GET /products/{sku}/classification` (fail-open) | Customer/Supplier, ACL |
 | wes-work-planning | OrderAllocated | Event | Kafka `warehouse.order-management.events`, `com.warehouse.wes.order-management.order.OrderAllocated` | Published Language |
 | wes-work-planning | OrderPartiallyAllocated | Event | Kafka `warehouse.order-management.events`, `com.warehouse.wes.order-management.order.OrderPartiallyAllocated` | Published Language |
 | any subscriber (none known) | OrderRepromised | Event | Kafka `warehouse.order-management.events`, `com.warehouse.wes.order-management.order.OrderRepromised` | Published Language |
@@ -120,6 +120,10 @@ Top terms:
 
 - inventory-storage is the single source of truth for stock; this context
   never caches stock levels.
+- product-master is the single source of truth for product classification;
+  this context keeps a version-guarded local copy of its
+  `ProductClassified` events and never calls it. The copy is eventually
+  consistent, so a SKU it has not seen yet fails open (ADR 0036).
 - One site per deployment: the promise uses `DEFAULT_SITE_ID`, and the
   planned-capacity annotation uses `PLANNED_CAPACITY_SITE_ID` (defaulting to
   the same value).

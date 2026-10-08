@@ -142,9 +142,11 @@ type OrderMetrics interface {
 // pass's Save commits) and to have moved on by the time a genuinely
 // later, independent pass re-attempts the same line — exactly the
 // "same across a retry of this attempt, different for a new attempt"
-// shape the header contract requires. Neither field is meaningful to
-// inventory-storage's own request body; they are transport-adapter
-// concerns of the OUTBOUND client only.
+// shape the header contract requires. Attempt is a transport-adapter
+// concern of the OUTBOUND client only. LineNo (when >= 1) is ALSO sent as
+// the optional `lineNo` body field (decision 18 / ADR 0037) so
+// inventory-storage can record which line a reservation is for; that does
+// not change the Idempotency-Key derivation.
 type ReservationRequest struct {
 	SKU       shared.SKU
 	Quantity  int
@@ -253,18 +255,16 @@ type CPTScheduleCache interface {
 }
 
 // ProductClassification is this context's own minimal view of a SKU's
-// product classification, as looked up from inventory-storage's
-// GET /products/{sku}/classification (see ProductClassificationLookup).
-// It carries only what order.PathSelectionPolicy's eligibility evaluation
-// needs -- the raw handling tags as free-form strings from the fleet's
-// existing product-classification vocabulary (e.g. "Hazmat", "Fragile",
-// "TemperatureSensitive") -- not inventory-storage's fuller
-// ProductClassification resource (temperatureClass, dotHazardClass are
-// omitted; narrow port, ADR-0013's own stated philosophy). Known
-// distinguishes "SKU has no registered classification, or the lookup is
-// unavailable" (Known=false, both treated identically -- permissive/
-// fail-open, mirroring wes-work-planning's ADR-0009) from "classification
-// confirmed" (Known=true).
+// product classification (see ProductClassificationLookup). It carries
+// only what order.PathSelectionPolicy's eligibility evaluation needs --
+// the raw handling tags as free-form strings from the fleet's
+// product-classification vocabulary (e.g. "Hazmat", "Fragile",
+// "TemperatureSensitive") -- not product-master's fuller classification
+// (temperature class and DOT hazard class are omitted; narrow port,
+// ADR-0013's own stated philosophy). Known distinguishes "SKU has no
+// classification in this context's local copy, or the copy is
+// unreadable" (Known=false, both treated identically -- fail-open,
+// ADR-0016) from "classification confirmed" (Known=true).
 type ProductClassification struct {
 	SKU          string
 	HandlingTags []string
@@ -282,29 +282,57 @@ func (c ProductClassification) HasTag(tag string) bool {
 	return false
 }
 
-// ProductClassificationLookup is the outbound port for the synchronous
-// cross-context read from inventory-storage's product-classification
-// endpoint (GET /products/{sku}/classification), used at intake time so
-// order.PathSelectionPolicy can evaluate a line's derived product
-// attributes (hazmat/fragile/etc.) against a candidate path's declared
-// Eligibility -- see ADR-0016 (ADR-0014 step B). This mirrors
-// wes-work-planning's own ports.ProductClassificationLookup (its
-// ADR-0009) exactly in shape and intent; order-management never imports
-// that service's Go packages (see .claude/rules/bounded-context-boundary.md)
-// -- this is an independently-owned copy of the same pattern, calling the
-// same real inventory-storage endpoint.
+// ProductClassificationLookup is the outbound port ReceiveOrder uses at
+// intake so order.PathSelectionPolicy can evaluate a line's derived
+// product attributes (hazmat/fragile/etc.) against a candidate path's
+// declared Eligibility -- see ADR-0016 (ADR-0014 step B). Since ADR 0036
+// it is answered from a LOCAL copy of product-master's ProductClassified
+// events (internal/adapters/outbound/productclassificationcopy), never
+// from a live cross-context call; the shape of the port is unchanged.
 //
 // GetClassification MUST fail open on anything short of a real
-// classification: a 404 (unclassified SKU), a transport error, or any
-// non-2xx/404 status are all Known=false, never an error returned to the
-// caller -- see PermissiveLookup and Client in
-// internal/adapters/outbound/productclassification for the two
-// implementations. This is a soft routing/enrichment input, not a stock
-// reservation, so it follows this fleet's "fail loud for anything that
-// mutates real state, fail quiet/open for a soft enrichment input" rule
-// -- the opposite of InventoryReservationClient above.
+// classification: an unknown SKU or an unreadable copy are both
+// Known=false, never an error returned to the caller. This is a soft
+// routing/enrichment input, not a stock reservation, so it follows this
+// fleet's "fail loud for anything that mutates real state, fail quiet/open
+// for a soft enrichment input" rule -- the opposite of
+// InventoryReservationClient above.
 type ProductClassificationLookup interface {
 	GetClassification(ctx context.Context, sku string) (ProductClassification, error)
+}
+
+// ProductClassificationRecord is one row of the local copy of
+// product-master's classifications (ADR 0036): the full-state payload of a
+// ProductClassified event plus the product's aggregate Version after that
+// change. TemperatureClass is "" and DotHazardClass is 0 when product-master
+// left them unset.
+type ProductClassificationRecord struct {
+	SKU              string
+	HandlingTags     []string
+	TemperatureClass string
+	DotHazardClass   int
+	Version          int64
+}
+
+// ProductClassificationCopy is the write side of the local copy (ADR
+// 0036). It is written only by the ApplyProductClassification use case,
+// inside a UnitOfWork together with the idempotency claim.
+type ProductClassificationCopy interface {
+	// Upsert stores rec under rec.SKU when no row exists yet or the stored
+	// Version is LOWER than rec.Version; an equal or older version is a
+	// no-op. It reports whether the row was written.
+	Upsert(ctx context.Context, rec ProductClassificationRecord) (applied bool, err error)
+}
+
+// ProductClassificationProcessedEvents is ApplyProductClassification's
+// idempotency gate on the CloudEvents id. MarkProcessed MUST be called
+// inside the same UnitOfWork as the Upsert it guards, so a rolled-back
+// handling un-claims the id. Its own table
+// (product_classification_processed_events), like every other consumer's.
+type ProductClassificationProcessedEvents interface {
+	// MarkProcessed records eventId if absent, returning true iff this
+	// call newly recorded it.
+	MarkProcessed(ctx context.Context, eventId string) (bool, error)
 }
 
 // PathCapacity is the read-only outbound port for remaining capacity per

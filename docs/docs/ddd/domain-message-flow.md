@@ -12,7 +12,8 @@ Follows
 Participants are bounded contexts, actors and external systems; every
 arrow is a real message, prefixed `cmd:` (command), `evt:` (event) or
 `qry:` (query). Kafka arrows use the event name; the full CloudEvents type
-is `com.warehouse.wes.<context>.<entity>.<EventName>` — see
+is `com.warehouse.<tier>.<context>.<entity>.<EventName>` — `wms` for
+product-master, `wes` for every other context on this page — see
 [Domain Events](./domain-events.md).
 
 ## 1. Customer order to released work
@@ -21,16 +22,17 @@ is `com.warehouse.wes.<context>.<entity>.<EventName>` — see
 sequenceDiagram
   autonumber
   actor Customer as Customer channel
+  participant PM as product-master
   participant OM as order-management
   participant INV as inventory-storage
   participant WP as wes-work-planning
   participant PJ as order-projector
 
+  PM-)OM: evt: ProductClassified (kept in a local copy, ADR 0036)
   Customer->>OM: cmd: POST /orders
-  OM->>INV: qry: GET /products/sku/classification
-  INV-->>OM: tags for path selection
+  Note over OM: reads the SKU's tags from the local copy for path selection
   loop every line
-    OM->>INV: cmd: POST /reservations
+    OM->>INV: cmd: POST /reservations with lineNo (ADR 0037)
     INV-->>OM: 201 reserved, or 409 insufficient stock
   end
   OM-->>Customer: 201 order with status and promiseDate
@@ -41,7 +43,8 @@ sequenceDiagram
 
 Source: `internal/application/usecases/receive_order.go`, `allocation.go`,
 `internal/adapters/outbound/inventorystorage/client.go`,
-`productclassification/client.go`, `outbound/kafka/publisher.go`.
+`inbound/kafka/product_classification_consumer.go`,
+`outbound/productclassificationcopy/`, `outbound/kafka/publisher.go`.
 Omits: the backordered branch (`OrderLineBackordered`, then
 `OrderPartiallyAllocated` for a partial-shipment order, nothing to
 wes-work-planning for a ship-complete one), the
@@ -60,7 +63,7 @@ sequenceDiagram
 
   Net->>NF: purchase order
   NF->>OM: cmd: POST /orders held, ship-complete, requiredShipBy
-  OM->>INV: cmd: POST /reservations per line
+  OM->>INV: cmd: POST /reservations per line, with lineNo (ADR 0037)
   OM-)WP: evt: OrderAllocated with no lines, held
   OM-->>NF: 201 order, promiseDate absent if the deadline cannot be met
   alt network commits

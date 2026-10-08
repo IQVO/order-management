@@ -33,8 +33,12 @@ boot; there is no separate migrate step to remember.
 
 ### Option C — wired to the real Suppliers
 
-Both inventory-storage clients default to **permissive (no-op) mode**, so
-tests and CI never reach the network. For reservations, permissive does
+The inventory-storage reservation client (`INVENTORY_STORAGE_MODE`) and the
+product-classification lookup (`PRODUCT_CLASSIFICATION_MODE`) both default
+to **permissive mode**, so tests and CI never reach the network or Kafka.
+Classification is no longer read from inventory-storage: in `kafka` mode it
+comes from a local copy of product-master's `ProductClassified` events
+(ADR 0036), and `PRODUCT_CLASSIFICATION_MODE=http` fails boot. For reservations, permissive does
 not mean fail-open: allocating real stock must never appear to succeed
 against a no-op, so the implicit allocation pass fails with
 `downstream-not-configured` (the order is still received; an explicit
@@ -44,7 +48,8 @@ integration test or deployment:
 ```bash
 export INVENTORY_STORAGE_MODE=http
 export INVENTORY_STORAGE_BASE_URL=http://localhost:8080
-export PRODUCT_CLASSIFICATION_MODE=http     # optional, ADR 0016
+export PRODUCT_CLASSIFICATION_MODE=kafka    # optional, ADR 0036: local copy of product-master classifications
+export PRODUCT_CLASSIFICATION_CONSUMER_GROUP=om-classification-local   # required with kafka mode
 export EVENT_PUBLISHER=kafka                # optional: publish release events
 export PATH_CATALOGUE_SOURCE=kafka          # optional: capability-derived promise
 export KAFKA_BROKERS=localhost:9092

@@ -66,9 +66,20 @@ spec:
             - name: OUTBOX_RETENTION
               value: {{ .Values.config.outboxRetention | quote }}
             {{- end }}
-            {{- if or (eq .Values.config.eventPublisher "kafka") .Values.plannedCapacity.consumerGroup }}
+            {{- if or (eq .Values.config.eventPublisher "kafka") .Values.plannedCapacity.consumerGroup .Values.productClassification.consumerGroup }}
             - name: KAFKA_BROKERS
               value: {{ .Values.kafka.brokers | quote }}
+            {{- end }}
+            {{- if .Values.productClassification.mode }}
+            # ADR 0036: kafka|permissive ("http" was removed and fails boot).
+            - name: PRODUCT_CLASSIFICATION_MODE
+              value: {{ .Values.productClassification.mode | quote }}
+            {{- end }}
+            {{- if .Values.productClassification.consumerGroup }}
+            # ADR 0036: stable group of the local classification copy's
+            # consumer on warehouse.product-master.events.
+            - name: PRODUCT_CLASSIFICATION_CONSUMER_GROUP
+              value: {{ .Values.productClassification.consumerGroup | quote }}
             {{- end }}
             {{- if .Values.plannedCapacity.consumerGroup }}
             # ADR 0031: consume warehouse-planning's capacity plans. The

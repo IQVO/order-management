@@ -25,6 +25,7 @@ flowchart TB
     end
     subgraph WMS["WMS tier"]
         INV["<b>inventory-storage</b><br/>Core subdomain"]
+        PM["<b>product-master</b><br/>Supporting subdomain"]
     end
     subgraph WES["WES tier"]
         PPM["<b>process-path-management</b><br/>Generic subdomain"]
@@ -38,7 +39,8 @@ flowchart TB
     end
 
     NF ==>|"HTTP POST /orders (held, requiredShipBy)<br/>POST /orders/{id}/release<br/>DELETE /orders/{id}"| OM
-    OM ==>|"HTTP POST /reservations<br/>DELETE /reservations/{id}<br/>GET /products/{sku}/classification"| INV
+    OM ==>|"HTTP POST /reservations<br/>DELETE /reservations/{id}"| INV
+    PM -.->|"warehouse.product-master.events (opt-in)<br/>ProductClassified"| OM
     OM -->|"warehouse.order-management.events<br/>OrderAllocated · OrderPartiallyAllocated"| WP
     PPM -->|"warehouse.process-path-management.events<br/>ProcessPath* · CPTScheduleChanged"| OM
     WP -->|"warehouse.work-planning.events<br/>PathCapacityChanged"| OM
@@ -53,12 +55,13 @@ flowchart TB
     classDef console fill:#0f766e,stroke:#134e4a,color:#fff,stroke-dasharray: 3 3;
     class OM this;
     class INV,WP,FE,WPL core;
-    class PPM,NF supp;
+    class PPM,NF,PM supp;
     class BFF,MFE console;
 ```
 
 **Bold edges are synchronous HTTP; thin edges are Kafka topics; the dashed
-warehouse-planning edge is opt-in (`PLANNED_CAPACITY_CONSUMER_GROUP`); dashed
+warehouse-planning edge is opt-in (`PLANNED_CAPACITY_CONSUMER_GROUP`), and so
+is the dashed product-master edge (`PRODUCT_CLASSIFICATION_MODE=kafka`); dashed
 teal edges are the read-mostly console callers** (see
 [ADR-0007](../adr/0007-adopt-fleet-micro-frontend-console.md)). Only the
 Kafka edges this context itself publishes or consumes are drawn — the other
@@ -71,6 +74,7 @@ this repo's own `cmd/order-projector`, so it is not a context edge.
 ```mermaid
 flowchart LR
   INV["inventory-storage"]
+  PM["product-master"]
   PPM["process-path-management"]
   WP["wes-work-planning"]
   FE["fulfillment-execution"]
@@ -79,7 +83,8 @@ flowchart LR
   NF["network-fulfillment"]
   CON["warehouse-ops-agent and order-mgmt-mfe"]
 
-  INV -->|"U OHS/PL -> D C/S ACL<br/>REST POST /reservations, DELETE /reservations/id,<br/>GET /products/sku/classification"| OM
+  INV -->|"U OHS/PL -> D C/S ACL<br/>REST POST /reservations, DELETE /reservations/id"| OM
+  PM -.->|"U PL -> D ACL, opt-in<br/>Kafka product.ProductClassified (local copy)"| OM
   PPM -->|"U PL -> D ACL<br/>Kafka processpath.ProcessPath* and cptschedule.CPTScheduleChanged"| OM
   WP -->|"U PL -> D ACL<br/>Kafka workpool.PathCapacityChanged"| OM
   FE -->|"U PL -> D ACL<br/>Kafka task.TaskCPTMissed, package.PackageManifested"| OM
@@ -89,19 +94,21 @@ flowchart LR
   OM -->|"U OHS -> D CF<br/>REST GET /orders/id, MCP get_order"| CON
 ```
 
-Source: `internal/adapters/outbound/{inventorystorage,productclassification,kafka,kafkacatalog,kafkacptschedule,kafkapathcapacity}`,
+Source: `internal/adapters/outbound/{inventorystorage,productclassificationcopy,kafka,kafkacatalog,kafkacptschedule,kafkapathcapacity}`,
 `internal/adapters/inbound/{kafka,http,mcp}`, `cmd/order/main.go`.
 Omits: the analytics topic (internal to this repo), the
 `OrderRepromised` integration event (published, no known consumer), the
 `SiteSkuDemandChanged` projection (ADR 0035, opt-in via
 `DEMAND_PROJECTION_SITE_ID`, no known consumer yet), and the
-CloudEvents type prefix `com.warehouse.wes.<context>.` on every Kafka label.
+CloudEvents type prefix on every Kafka label (`com.warehouse.wms.product-master.`
+for product-master, `com.warehouse.wes.<context>.` for the others).
 Arrows point from upstream to downstream; `id` and `sku` stand for the path
 parameters.
 
 | Upstream | Downstream | Pattern (upstream side) | Pattern (downstream side) | Channel | Status | Evidence |
 | --- | --- | --- | --- | --- | --- | --- |
-| inventory-storage | order-management | Open Host Service, Published Language | Customer/Supplier, Anti-Corruption Layer | REST `POST /reservations`, `DELETE /reservations/{id}`, `GET /products/{sku}/classification` | live with `INVENTORY_STORAGE_MODE=http`, `PRODUCT_CLASSIFICATION_MODE=http` | `outbound/inventorystorage`, `outbound/productclassification` |
+| inventory-storage | order-management | Open Host Service, Published Language | Customer/Supplier, Anti-Corruption Layer | REST `POST /reservations`, `DELETE /reservations/{id}` | live with `INVENTORY_STORAGE_MODE=http` | `outbound/inventorystorage` |
+| product-master | order-management | Published Language | Anti-Corruption Layer (local copy) | Kafka `warehouse.product-master.events` | opt-in, `PRODUCT_CLASSIFICATION_MODE=kafka` + `PRODUCT_CLASSIFICATION_CONSUMER_GROUP` | `inbound/kafka/product_classification_consumer.go`, `outbound/productclassificationcopy` (ADR 0036) |
 | order-management | wes-work-planning | Published Language (CloudEvents, `apis/asyncapi.yaml`) | Conformist on the frozen four line fields | Kafka `warehouse.order-management.events` | live with `EVENT_PUBLISHER=kafka` | `outbound/kafka.Publisher` |
 | process-path-management | order-management | Published Language | Anti-Corruption Layer (local read model) | Kafka `warehouse.process-path-management.events` | live with `PATH_CATALOGUE_SOURCE=kafka` | `outbound/kafkacatalog`, `outbound/kafkacptschedule` |
 | wes-work-planning | order-management | Published Language | Anti-Corruption Layer (local read model) | Kafka `warehouse.work-planning.events` | live with `PATH_CATALOGUE_SOURCE=kafka` | `outbound/kafkapathcapacity` |
@@ -125,6 +132,18 @@ with a `capacityConstraint` and backs `GET /planned-capacity`; no promise
 moves and nothing is published back. Enabled only when
 `PLANNED_CAPACITY_CONSUMER_GROUP` is set; failures go to
 `warehouse.warehouse-planning.events.dlq`.
+
+## product-master (Kafka, inbound, opt-in — ADR 0036)
+
+`inbound/kafka.ProductClassificationConsumer` applies
+`com.warehouse.wms.product-master.product.ProductClassified` into
+`product_classification_copy` (one row per SKU, applied only when the
+event's `version` is greater than the stored one); every other
+product-master type is ignored. `ReceiveOrder` reads the copy through
+`ports.ProductClassificationLookup` to evaluate path eligibility; an unknown
+SKU fails open. Enabled with `PRODUCT_CLASSIFICATION_MODE=kafka` and a
+stable `PRODUCT_CLASSIFICATION_CONSUMER_GROUP`; this replaced the live
+`GET /products/{sku}/classification` call to inventory-storage.
 
 ## Console callers (ADR-0007)
 
@@ -161,13 +180,13 @@ to `Backordered` for that line; any other non-2xx status or a transport
 error propagates as a hard failure — never silently treated as
 backordered.
 
-A second, independent adapter
-(`internal/adapters/outbound/productclassification`,
-`PRODUCT_CLASSIFICATION_MODE`, same base URL) calls
-`GET /products/{sku}/classification` to feed eligibility-driven path
-selection ([ADR 0016](/docs/adr/0016-eligibility-driven-process-path-selection)).
-Unlike the reservation client it fails **open**: a miss only drops a
-routing hint and never rejects intake.
+Product classification for eligibility-driven path selection
+([ADR 0016](/docs/adr/0016-eligibility-driven-process-path-selection)) is
+no longer read from inventory-storage: since
+[ADR 0036](/docs/adr/0036-product-classification-local-copy) it comes from a
+local copy of product-master's `ProductClassified` events (see above). It
+still fails **open**: an unknown SKU only drops a routing hint and never
+rejects intake.
 
 ### → `wes-work-planning` (Kafka choreography, no HTTP)
 
@@ -225,10 +244,11 @@ for the full reasoning behind this boundary.
 
 ## Failure-mode discipline (`MODE=http|permissive`)
 
-Both inventory-storage adapters follow the fleet's env-selected
+The inventory-storage reservation client follows the fleet's env-selected
 `MODE=http|permissive` pattern, defaulting to `permissive` so unit tests
-never hit the network. The classification lookup fails open like the rest
-of the fleet's soft lookups. The reservation client does **not**:
+never hit the network. The classification lookup
+(`PRODUCT_CLASSIFICATION_MODE=kafka|permissive`, ADR 0036) fails open like
+the rest of the fleet's soft lookups. The reservation client does **not**:
 allocating real stock must never silently "succeed" against a no-op, so in
 permissive mode allocation returns `ErrDownstreamNotConfigured` (`503`
 `downstream-not-configured`). Only `http` mode is suitable for any real
