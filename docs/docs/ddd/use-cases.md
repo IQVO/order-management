@@ -2,16 +2,16 @@
 title: Use Cases
 sidebar_label: Use Cases
 sidebar_position: 1
-description: The nine application-layer use cases, their HTTP, MCP and Kafka triggers, the events they raise and their failure modes.
+description: The ten application-layer use cases, their HTTP, MCP and Kafka triggers, the events they raise and their failure modes.
 ---
 
 # Use Cases
 
-Nine use cases, one struct each, in `internal/application/usecases`. Each
+Ten use cases, one struct each, in `internal/application/usecases`. Each
 depends only on the domain and on `application/ports` — never on an
 adapter. Dependencies are plain struct fields, wired in `cmd/order`
-(`main.go`, `wiring.go`, `planned_capacity.go`) and, for `GetOrder` over
-MCP, in `cmd/mcp`.
+(`main.go`, `wiring.go`, `planned_capacity.go`, `product_classification.go`)
+and, for `GetOrder` over MCP, in `cmd/mcp`.
 
 Per [ADR 0005](/docs/adr/0005-choreographed-release-via-kafka), allocation
 and release are not public use cases. They are folded into one shared
@@ -31,6 +31,7 @@ this service attempts allocation and then release as one flow.
 | 7 | `ApplyPlannedCapacity` | Kafka `CapacityPlan*`/`CapacityShortageDetected` on `warehouse.warehouse-planning.events` (opt-in) | — (read model write) |
 | 8 | `GetPlannedCapacity` | `GET /planned-capacity?site=&from=` (registered only when the read model is wired) | — (query) |
 | 9 | `OrderCapacityConstraints` | every order response, when the read model is wired | — (query) |
+| 10 | `ApplyProductClassification` | Kafka `ProductClassified` on `warehouse.product-master.events` (opt-in, `PRODUCT_CLASSIFICATION_MODE=kafka`) | — (local copy write) |
 
 Step-by-step diagrams for every row are on
 [Sequence Diagrams](./sequence-diagrams.md).
@@ -215,6 +216,27 @@ an order with a promise gets a `capacityConstraint` annotation listing the
 published shortage windows its promise overlaps, for the single configured
 site (`PLANNED_CAPACITY_SITE_ID`, defaulting to `DEFAULT_SITE_ID`). Neither
 changes a promise.
+
+## 10. ApplyProductClassification (Kafka-driven, opt-in)
+
+Runs only when `PRODUCT_CLASSIFICATION_MODE=kafka`, which also requires
+`PRODUCT_CLASSIFICATION_CONSUMER_GROUP` and `KAFKA_BROKERS`
+([ADR 0036](/docs/adr/0036-product-classification-local-copy)).
+`ProductClassificationConsumer` applies only
+`com.warehouse.wms.product-master.product.ProductClassified` from
+product-master's `warehouse.product-master.events`; every other type is
+committed past. The use case rejects an empty event id, an empty `sku` or a
+`version` below 1 (`ErrInvalidProductClassification`, logged and skipped),
+then, in one `UnitOfWork`, claims the CloudEvents id
+(`ports.ProductClassificationProcessedEvents`) and upserts the row into
+`product_classification_copy` only when the incoming `version` is greater
+than the stored one (`ports.ProductClassificationCopy`). No order changes
+and no event is raised. `ReceiveOrder` reads the copy through
+`ports.ProductClassificationLookup`; an unknown SKU fails open.
+
+**Fails when:** a transient error (database down, deadlock) — the same
+message is retried with backoff and the offset is committed only after
+success.
 
 ## REST endpoint summary
 

@@ -69,6 +69,7 @@ proxy.
 | --- | --- | --- | --- |
 | **order-management** | upstream front door | **Generic/Supporting** | Order intake is commodity; the allocation/release/cancellation orchestration rules are real, tested business logic layered on top. |
 | inventory-storage | WMS | Core | Owns inventory truth: bin-accurate location + usable inventory. |
+| product-master | WMS | Supporting | Single source of truth for SKU master data (handling classification, declared vs measured dimensions and weight). This context reads its `ProductClassified` events into a local copy (ADR 0036). |
 | wes-work-planning | WES | Core | The conductor — waveless release and flow balance. |
 | fulfillment-execution | WES | Core | The Pick/Pack/SLAM task lifecycle; throughput and accuracy at scale. |
 | workforce-management | — | Supporting | Labour & workforce allocation: "important, industry-common," not the differentiator. |

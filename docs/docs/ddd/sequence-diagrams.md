@@ -460,3 +460,53 @@ Source: `internal/adapters/outbound/postgres/outbox_relay.go`,
 published rows and the `order.outbox.lag_seconds` gauge (both ADR 0032).
 `OrderRepromised` is also written to the integration topic; no consumer of
 it is known from this repository.
+
+## 10. ApplyProductClassification — Kafka `warehouse.product-master.events`
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant PMX as product-master
+  participant K as ProductClassificationConsumer
+  participant UC as ApplyProductClassification
+  participant PE as ProductClassificationProcessedEvents
+  participant CP as ProductClassificationCopy
+
+  PMX-)K: ProductClassified CloudEvent, key and subject = SKU
+  K->>K: FetchMessage then cloudevents.Decode
+  alt not a CloudEvent
+    K->>K: log WARN, CommitMessages, skip
+  end
+  alt any other product-master type
+    K->>K: CommitMessages, ignore
+  end
+  K->>K: decode data, subject must equal data.sku
+  alt undecodable data or subject mismatch
+    K->>K: log WARN, CommitMessages, skip
+  end
+  K->>UC: Execute(eventId, sku, handling_tags, temperature_class, dot_hazard_class, version)
+  UC->>UC: Validate, non-empty sku and version at least 1
+  alt invalid payload
+    UC-->>K: ErrInvalidProductClassification
+    K->>K: log WARN, CommitMessages, skip
+  end
+  UC->>PE: MarkProcessed(ce id) in UnitOfWork
+  alt already processed
+    UC-->>K: nil
+  end
+  UC->>CP: Upsert(record), only when stored version is lower
+  alt transient failure
+    UC-->>K: error, claim and upsert rolled back
+    K->>K: retry the same message with backoff
+  end
+  K->>K: CommitMessages
+```
+
+Source: `internal/adapters/inbound/kafka/product_classification_consumer.go`,
+`internal/application/usecases/product_classification.go`,
+`internal/adapters/outbound/productclassificationcopy/postgres.go`,
+`cmd/order/product_classification.go`. Omits: OpenTelemetry spans and the
+in-memory configuration (no `DATABASE_URL`, no `UnitOfWork`). There is no
+dead-letter topic: the payload is a full-state replacement, so the next
+`ProductClassified` for the SKU repairs the copy
+([ADR 0036](/docs/adr/0036-product-classification-local-copy)).

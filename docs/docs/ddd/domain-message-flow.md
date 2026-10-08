@@ -12,7 +12,8 @@ Follows
 Participants are bounded contexts, actors and external systems; every
 arrow is a real message, prefixed `cmd:` (command), `evt:` (event) or
 `qry:` (query). Kafka arrows use the event name; the full CloudEvents type
-is `com.warehouse.wes.<context>.<entity>.<EventName>` — see
+is `com.warehouse.<tier>.<context>.<entity>.<EventName>` — `wms` for
+product-master, `wes` for every other context on this page — see
 [Domain Events](./domain-events.md).
 
 ## 1. Customer order to released work

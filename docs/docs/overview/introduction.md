@@ -68,6 +68,10 @@ Naming the boundary is as important as naming the capability. This service:
 - **does not plan labour or headcount** — that is `workforce-management`;
 - **does not model the physical building** (site, area, zone, aisle, bay,
   level, position) — that is `facility-layout`;
+- **does not own product master data** (handling classification,
+  dimensions, weight) — that is `product-master`; this context keeps only a
+  local copy of its `ProductClassified` events to evaluate path
+  eligibility ([ADR 0036](/docs/adr/0036-product-classification-local-copy));
 - **does not claw back released work on cancellation** — once any line is
   `Released`, v1 does not attempt to recall it; this is a documented,
   deliberate known gap (see [ADR 0004](/docs/adr/0004-cancellation-boundary-at-release)),
@@ -90,6 +94,7 @@ flowchart LR
   end
   subgraph WMS["WMS tier — what & where"]
     INV["inventory-storage<br/>(Core)<br/>stock truth"]
+    PMX["product-master<br/>(Supporting)<br/>SKU master data"]
   end
   subgraph WES["WES tier — when & in what order"]
     PPM["process-path-management<br/>capability & CPT schedule"]
@@ -100,6 +105,7 @@ flowchart LR
 
   NF -- "HTTP: POST /orders (held)<br/>POST /orders/{id}/release" --> OM
   OM -- "HTTP: POST /reservations<br/>DELETE /reservations/{id}" --> INV
+  PMX -. "Kafka: ProductClassified<br/>(local copy, opt-in)" .-> OM
   OM -- "Kafka: OrderAllocated /<br/>OrderPartiallyAllocated" --> WP
   PPM -- "Kafka: catalogue, CPT schedule" --> OM
   WP -- "Kafka: PathCapacityChanged" --> OM
@@ -111,14 +117,14 @@ flowchart LR
   classDef supp fill:#7c3aed,stroke:#4c1d95,color:#fff;
   class OM this;
   class INV,WP,FE core;
-  class PPM,NF,WPL supp;
+  class PPM,NF,WPL,PMX supp;
 ```
 
-Allocation is synchronous HTTP; release, capability, re-promise and
-planned-capacity facts are Kafka events (when `EVENT_PUBLISHER=kafka` /
-`PATH_CATALOGUE_SOURCE=kafka` / `KAFKA_BROKERS` /
-`PLANNED_CAPACITY_CONSUMER_GROUP` are set — see
-[Domain Events](/docs/ddd/domain-events)).
+Allocation is synchronous HTTP; release, capability, re-promise,
+planned-capacity and product-classification facts are Kafka events (when
+`EVENT_PUBLISHER=kafka` / `PATH_CATALOGUE_SOURCE=kafka` / `KAFKA_BROKERS` /
+`PLANNED_CAPACITY_CONSUMER_GROUP` / `PRODUCT_CLASSIFICATION_MODE=kafka` are
+set — see [Domain Events](/docs/ddd/domain-events)).
 See [the context map](/docs/ecosystem/context-map) for the full relationship
 analysis, including exactly which fields cross each wire.
 
