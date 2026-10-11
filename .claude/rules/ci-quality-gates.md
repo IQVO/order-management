@@ -30,12 +30,13 @@ paths:
   then a 90% coverage gate on that coverprofile.
 - **`bdd`** — `go test ./... -run TestFeatures -v` (godog/Gherkin acceptance
   suite, `features/*.feature`).
-- **`integration`** — `go build/vet -tags=integration ./...` then
-  `go test -tags=integration` on `./internal/adapters/outbound/kafka`,
-  `kafkacatalog`, `kafkacptschedule`, `kafkapathcapacity`,
-  `./internal/adapters/inbound/kafka`, `./internal/adapters/inbound/http`,
-  `./internal/adapters/outbound/analyticsstore`, `./cmd/order` and
-  `./internal/adapters/outbound/postgres`. Every test boots its own
+- **`integration`** — `go vet -tags=integration ./...` then
+  `go test -tags=integration ./... -race -count=1` (Ryuk disabled on the
+  runner). Always `./...`, never a hand-kept package list: such a list once
+  omitted `internal/adapters/inbound/mcp` and `internal/application/usecases`,
+  so their suites never ran in CI. `TestEveryIntegrationPackageRunsInCI`
+  (`internal/architecture`) fails if any `//go:build integration` package is
+  not reached by the job. Every test boots its own
   **Testcontainers** Kafka broker or Postgres: the job has no `services:`
   container and no `DATABASE_URL`. Never write a `KAFKA_BROKERS`- or
   `DATABASE_URL`-skip-gated test — it silently no-ops in CI; the arch-test
@@ -172,8 +173,8 @@ npm run typecheck && npm run build   # onBrokenLinks / onBrokenAnchors are both 
 go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1
 ```
 
-Other make targets: `make integration` (Kafka + Postgres adapters, each
-test on its own Testcontainers broker/database), `make coverage` (go test -race -coverprofile + the 90%
+Other make targets: `make integration` (`go test -tags=integration ./...`,
+the CI job's command; each test on its own Testcontainers broker/database), `make coverage` (go test -race -coverprofile + the 90%
 gate), `make bdd` (godog suite), `make mutation-fast` (gremlins subset on
 `internal/domain/order`, thresholds in `.gremlins.yaml`), `make vuln`
 (govulncheck).

@@ -5,6 +5,7 @@ package kafka_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,13 +24,27 @@ import (
 // capturingPublisher records every event RepromiseOrder publishes, so
 // the test can assert the exact OrderRepromised fact a real broker
 // message drove — end to end, no fake reader.
+//
+// The consumer publishes from its own goroutine while the test body reads,
+// so every access goes through the mutex: read with snapshot(), never the
+// slice field (go test -race flagged the unguarded append).
 type capturingPublisher struct {
+	mu     sync.Mutex
 	events []shared.DomainEvent
 }
 
 func (p *capturingPublisher) Publish(_ context.Context, e shared.DomainEvent) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.events = append(p.events, e)
 	return nil
+}
+
+// snapshot returns a copy of the events published so far.
+func (p *capturingPublisher) snapshot() []shared.DomainEvent {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]shared.DomainEvent(nil), p.events...)
 }
 
 var _ ports.EventPublisher = (*capturingPublisher)(nil)
@@ -135,12 +150,12 @@ func TestRepromiseConsumer_RealTaskCPTMissedMessage_DrivesRepromiseOrder(t *test
 		t.Error("consumer did not stop after context cancellation")
 	}
 
-	if len(events.events) != 1 {
-		t.Fatalf("published events = %d, want 1 OrderRepromised", len(events.events))
+	if len(events.snapshot()) != 1 {
+		t.Fatalf("published events = %d, want 1 OrderRepromised", len(events.snapshot()))
 	}
-	repromised, ok := events.events[0].(shared.OrderRepromised)
+	repromised, ok := events.snapshot()[0].(shared.OrderRepromised)
 	if !ok {
-		t.Fatalf("published event = %T, want shared.OrderRepromised", events.events[0])
+		t.Fatalf("published event = %T, want shared.OrderRepromised", events.snapshot()[0])
 	}
 	if repromised.OrderID != orderID {
 		t.Errorf("OrderRepromised.OrderID = %q, want %q", repromised.OrderID, orderID)
@@ -320,12 +335,12 @@ func TestRepromiseConsumer_RedeliveredSameCloudEventsId_FiresRepromiseExactlyOnc
 		t.Error("consumer did not stop after context cancellation")
 	}
 
-	if len(events.events) != 1 {
-		t.Fatalf("published events = %d, want exactly 1 -- the use case's CloudEvents-id idempotency gate must dedupe the redelivered message", len(events.events))
+	if len(events.snapshot()) != 1 {
+		t.Fatalf("published events = %d, want exactly 1 -- the use case's CloudEvents-id idempotency gate must dedupe the redelivered message", len(events.snapshot()))
 	}
-	repromised, ok := events.events[0].(shared.OrderRepromised)
+	repromised, ok := events.snapshot()[0].(shared.OrderRepromised)
 	if !ok {
-		t.Fatalf("published event = %T, want shared.OrderRepromised", events.events[0])
+		t.Fatalf("published event = %T, want shared.OrderRepromised", events.snapshot()[0])
 	}
 	if repromised.OrderID != orderID {
 		t.Errorf("OrderRepromised.OrderID = %q, want %q", repromised.OrderID, orderID)
