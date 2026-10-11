@@ -37,62 +37,98 @@ func savedOrder(t *testing.T, repo *memory.OrderRepo) *order.Order {
 	return o
 }
 
-func TestOrderRepoFindByIDReturnsAnIndependentCopy(t *testing.T) {
-	ctx := context.Background()
-	repo := memory.NewOrderRepo()
-	saved := savedOrder(t, repo)
-
-	got, err := repo.FindByID(ctx, "ord-copy")
+func findOrder(t *testing.T, repo *memory.OrderRepo) *order.Order {
+	t.Helper()
+	got, err := repo.FindByID(context.Background(), "ord-copy")
 	if err != nil || got == nil {
 		t.Fatalf("FindByID: %v, %v", got, err)
 	}
+	return got
+}
+
+func TestOrderRepoFindByIDReturnsFreshInstances(t *testing.T) {
+	repo := memory.NewOrderRepo()
+	saved := savedOrder(t, repo)
+	got := findOrder(t, repo)
 	if got == saved {
 		t.Fatal("FindByID returned the very instance passed to Save")
 	}
-	again, _ := repo.FindByID(ctx, "ord-copy")
-	if again == got {
+	if findOrder(t, repo) == got {
 		t.Fatal("two FindByID calls returned the same instance")
 	}
+}
 
-	// Every persisted field survives the copy.
+// Every field the Postgres adapter persists survives the copy.
+func TestOrderRepoCopyKeepsEveryPersistedField(t *testing.T) {
+	repo := memory.NewOrderRepo()
+	saved := savedOrder(t, repo)
+	got := findOrder(t, repo)
+	assertOrderScalars(t, got, saved)
+	assertOrderPromise(t, got)
+	assertOrderLine(t, got.Lines()[0])
+}
+
+func assertOrderScalars(t *testing.T, got, saved *order.Order) {
+	t.Helper()
 	if got.Version() != 3 || !got.AllowPartialShipment() || got.ReleaseOnAllocation() {
 		t.Fatalf("scalar fields lost: version=%d partial=%v releaseOnAllocation=%v", got.Version(), got.AllowPartialShipment(), got.ReleaseOnAllocation())
 	}
 	if rsb := got.RequiredShipBy(); rsb == nil || !rsb.Equal(*saved.RequiredShipBy()) {
 		t.Fatalf("RequiredShipBy = %v", rsb)
 	}
-	if pd := got.PromiseDate(); pd == nil || got.PromiseBasis() == nil || got.PromiseCptId() == nil || *got.PromiseCptId() != "cpt-1" {
-		t.Fatalf("promise fields lost: date=%v basis=%v cpt=%v", pd, got.PromiseBasis(), got.PromiseCptId())
+}
+
+func assertOrderPromise(t *testing.T, got *order.Order) {
+	t.Helper()
+	if got.PromiseDate() == nil || got.PromiseBasis() == nil {
+		t.Fatalf("promise fields lost: date=%v basis=%v", got.PromiseDate(), got.PromiseBasis())
+	}
+	if cpt := got.PromiseCptId(); cpt == nil || *cpt != "cpt-1" {
+		t.Fatalf("PromiseCptId = %v", cpt)
 	}
 	if gs := got.PromiseGroups(); len(gs) != 1 || gs[0].Promise.CptId != "cpt-1" {
 		t.Fatalf("PromiseGroups = %+v", gs)
 	}
-	l := got.Lines()[0]
-	if l.SKU() != "SKU-1" || l.Quantity() != 2 || !l.GiftWrap() || l.Status() != order.LineAllocated || *l.ReservationID() != "res-1" {
+}
+
+func assertOrderLine(t *testing.T, l *order.OrderLine) {
+	t.Helper()
+	if l.SKU() != "SKU-1" || l.Quantity() != 2 || !l.GiftWrap() || l.Status() != order.LineAllocated {
 		t.Fatalf("line fields lost: %+v", l)
 	}
+	if res := l.ReservationID(); res == nil || *res != "res-1" {
+		t.Fatalf("ReservationID = %v", res)
+	}
+}
 
-	// A mutation of a read copy is invisible until it is saved...
+func assertStoredLineStatus(t *testing.T, repo *memory.OrderRepo, want order.LineStatus, why string) {
+	t.Helper()
+	if got := findOrder(t, repo).Lines()[0].Status(); got != want {
+		t.Fatalf("stored line status = %s, want %s: %s", got, want, why)
+	}
+}
+
+// Only Save changes what the repository holds: neither a mutated read copy
+// nor a later mutation of the instance that was saved leaks into it.
+func TestOrderRepoUnsavedMutationsStayPrivate(t *testing.T) {
+	repo := memory.NewOrderRepo()
+	saved := savedOrder(t, repo)
+
+	got := findOrder(t, repo)
 	if err := got.Release(1); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
-	if fresh, _ := repo.FindByID(ctx, "ord-copy"); fresh.Lines()[0].Status() != order.LineAllocated {
-		t.Fatal("an unsaved mutation leaked into the repository")
-	}
-	// ...and a later mutation of the saved instance never reaches it either.
+	assertStoredLineStatus(t, repo, order.LineAllocated, "an unsaved mutation of a read copy leaked")
+
 	if err := saved.Release(1); err != nil {
 		t.Fatalf("Release saved: %v", err)
 	}
-	if fresh, _ := repo.FindByID(ctx, "ord-copy"); fresh.Lines()[0].Status() != order.LineAllocated {
-		t.Fatal("mutating the instance passed to Save changed the stored order")
-	}
-	// Saving makes it durable.
-	if err := repo.Save(ctx, got); err != nil {
+	assertStoredLineStatus(t, repo, order.LineAllocated, "mutating the instance passed to Save changed the stored order")
+
+	if err := repo.Save(context.Background(), got); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	if fresh, _ := repo.FindByID(ctx, "ord-copy"); fresh.Lines()[0].Status() != order.LineReleased {
-		t.Fatal("a saved mutation was not stored")
-	}
+	assertStoredLineStatus(t, repo, order.LineReleased, "a saved mutation was not stored")
 }
 
 // Run with -race: a writer that reads, mutates and saves while readers poll
