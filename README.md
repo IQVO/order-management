@@ -589,10 +589,26 @@ above — have been removed from it.)
   (ADR 0020); it keeps its inventory reservations until someone does.
 - **Clawing back released work on cancellation.** Documented in detail in
   [ADR 0004](docs/docs/adr/0004-cancellation-boundary-at-release.md).
-- **Killing the surviving promise boundary mutants.** The mutation gate
-  is pinned just under the measured baseline (efficacy 89 / mutant-coverage
-  83 — see `.gremlins.yaml`); ratcheting those thresholds toward the fleet's
-  99/99 is tracked follow-up work.
+- **Killing the surviving promise boundary mutants.** Done for
+  2026-10-10's unit-test hardening: efficacy 93.85% -> 97.86%,
+  mutant-coverage 92.20% -> 99.29%, thresholds ratcheted to 97/99. The
+  three remaining survivors are accepted near-equivalents (killing them
+  would pin a tie-break order the domain deliberately leaves unspecified —
+  same treatment as the fleet's other documented tie-break mutants):
+    - `order/path_selection.go:119` — the P95 comparator's `<` sits under
+      a `!=` guard, so an exact P95 tie always falls through to the
+      PathId tie-break either way;
+    - `order/path_selection.go:121` — the PathId `<` boundary is only
+      observable with duplicate PathIds in the candidate list, which
+      violates the strict weak ordering `sort.Slice` requires;
+    - `order/promise.go:75` — the slowest-line accumulation `>` vs `>=`
+      only diverges when two lines share the same lead time, and either
+      choice yields the same promise date.
+  A fourth reported non-killer, `order/promise.go:11` (`DefaultLeadTime`'s
+  `48 * time.Hour`), is a const-declaration artifact: coverage profiles
+  never mark constant expressions as executed, so gremlins classifies the
+  mutant NOT COVERED without running it. The absolute value is pinned by
+  `TestDefaultLeadTimeGoldenValue` regardless.
 
 ### Docusaurus site
 
