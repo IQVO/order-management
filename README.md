@@ -506,12 +506,48 @@ exhaustive weekly **`mutation`** run on schedule, **`vuln`**
 (govulncheck), **`api-lint`** (Spectral on `apis/openapi.yaml` and
 `apis/asyncapi.yaml`), **`arch-test`** (arch-go fitness tests in
 `internal/architecture/`), and **`docs-api-drift`** (regenerates the
-Docusaurus API reference from the spec; its diff step currently checks the
-wrong path and cannot fail — see `.claude/rules/ci-quality-gates.md`),
+Docusaurus API reference from the spec and fails on any drift, including
+a new untracked generated page — pathspec fixed in #154),
 **`web`** (MFE lint/typecheck/test/build) — plus the packaging/security/
 publish jobs (`helm-lint` and `trivy-scan` on PRs into `main`;
 `docker-publish` and `release` on pushes to `main`) and the advisory
 scheduled **`drift`** job.
+
+### Integration suites (Testcontainers)
+
+Every `-tags=integration` suite is self-contained: it boots its own
+throwaway container in `TestMain` — never an external `DATABASE_URL`,
+never `t.Skip` — and the Postgres packages use a template-clone pattern
+for speed: one container per package, every migration applied **once**
+into a TEMPLATE database, then one private database per test
+(`CREATE DATABASE ... TEMPLATE`, a file-level copy in milliseconds), so
+isolation is total with no `TRUNCATE` bookkeeping. The suites added by
+#169 cover the two shapes unit tests cannot:
+
+- `internal/application/usecases` (`usecases_wiring_integration_test.go`)
+  — the main write use cases against the real `OrderRepo`, real
+  `UnitOfWork` and a buffering event publisher, wired exactly like
+  `cmd/order`'s composition root: the receive → allocate → release
+  lifecycle, the `Backordered` → `RetryAllocation` recovery, held intake
+  followed by `CancelOrder`'s reservation revocation, and the
+  Save-inside-UoW optimistic-version bracket (ADR 0024). The
+  inventory-storage client is a scripted fake — the cross-context
+  Supplier's own contract is exercised in its repo.
+- `internal/adapters/inbound/mcp`
+  (`streamable_http_integration_test.go`) — the wire contract
+  (initialize, tools/list, tools/call) end-to-end over the real
+  Streamable HTTP transport, the SDK's own client driving an
+  `httptest.Server`, with the real Postgres-backed use cases behind it —
+  including `cmd/mcp`'s two-database shape (OLTP + analytics as two
+  migrated templates on one container) for `get_promise_health`.
+
+Run them all with `make integration` — `go test -tags=integration ./...`,
+the same command as the CI job. Both use `./...`, never a hand-kept package
+list: the list they replaced silently omitted the two #169 suites above, so
+they never ran in CI. `TestEveryIntegrationPackageRunsInCI`
+(`internal/architecture/integration_coverage_fitness_test.go`) fails the
+build if any `//go:build integration` package is ever again left out of the
+CI job.
 
 ## Operator micro-frontend (`web/`)
 
@@ -589,10 +625,26 @@ above — have been removed from it.)
   (ADR 0020); it keeps its inventory reservations until someone does.
 - **Clawing back released work on cancellation.** Documented in detail in
   [ADR 0004](docs/docs/adr/0004-cancellation-boundary-at-release.md).
-- **Killing the surviving promise boundary mutants.** The mutation gate
-  is pinned just under the measured baseline (efficacy 89 / mutant-coverage
-  83 — see `.gremlins.yaml`); ratcheting those thresholds toward the fleet's
-  99/99 is tracked follow-up work.
+- **Killing the surviving promise boundary mutants.** Done for
+  2026-10-10's unit-test hardening: efficacy 93.85% -> 97.86%,
+  mutant-coverage 92.20% -> 99.29%, thresholds ratcheted to 97/99. The
+  three remaining survivors are accepted near-equivalents (killing them
+  would pin a tie-break order the domain deliberately leaves unspecified —
+  same treatment as the fleet's other documented tie-break mutants):
+    - `order/path_selection.go:119` — the P95 comparator's `<` sits under
+      a `!=` guard, so an exact P95 tie always falls through to the
+      PathId tie-break either way;
+    - `order/path_selection.go:121` — the PathId `<` boundary is only
+      observable with duplicate PathIds in the candidate list, which
+      violates the strict weak ordering `sort.Slice` requires;
+    - `order/promise.go:75` — the slowest-line accumulation `>` vs `>=`
+      only diverges when two lines share the same lead time, and either
+      choice yields the same promise date.
+  A fourth reported non-killer, `order/promise.go:11` (`DefaultLeadTime`'s
+  `48 * time.Hour`), is a const-declaration artifact: coverage profiles
+  never mark constant expressions as executed, so gremlins classifies the
+  mutant NOT COVERED without running it. The absolute value is pinned by
+  `TestDefaultLeadTimeGoldenValue` regardless.
 
 ### Docusaurus site
 

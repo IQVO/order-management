@@ -68,7 +68,7 @@ docs-site regeneration and local run: `.claude/rules/ci-quality-gates.md` and
   `domain-model.md` needs a dedicated failing-path test.
 - **Gates:** coverage 90% on `internal/domain` + `internal/application`; do not
   let a change regress below the mutation thresholds pinned in `.gremlins.yaml`
-  (efficacy 89 / mutant-coverage 83). Details: `.claude/rules/testing-standards.md`.
+  (efficacy 97 / mutant-coverage 99). Details: `.claude/rules/testing-standards.md`.
 - **Docs:** regenerate the Docusaurus API reference after ANY
   `apis/openapi.yaml` change (procedure in `ci-quality-gates.md`; the
   `docs-api-drift` CI check fails on any drift).

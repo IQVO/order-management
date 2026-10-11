@@ -194,8 +194,8 @@ the `httptest` suite cheap to run.
 | `bdd` | godog/Gherkin acceptance tests (`TestFeatures`) |
 | `contract` | Schemathesis over `apis/openapi.yaml` (`scripts/contract-test.sh`) |
 | `evals-tests` | MCP evals E1–E3 (`internal/adapters/inbound/mcp`) |
-| `integration` | Kafka and Postgres adapters against Testcontainers |
-| `mutation-fast` | gremlins on the domain layer, thresholds in `.gremlins.yaml` |
+| `integration` | `-tags=integration` suites against Testcontainers (Kafka and Postgres adapter packages plus `cmd/order` housekeeping) |
+| `mutation-fast` | gremlins on `./internal/domain/order` — thresholds efficacy 97 / mutant-coverage 99 pinned in `.gremlins.yaml` (measured 97.86% / 99.29%) |
 | `vuln` | `govulncheck` |
 | `api-lint` | Spectral on `apis/openapi.yaml` / `apis/asyncapi.yaml` |
 | `arch-test` | The hexagonal dependency rule (`internal/architecture`) |

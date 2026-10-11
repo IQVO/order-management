@@ -66,6 +66,52 @@ func TestLeadTimeForOnAZeroValuePolicy(t *testing.T) {
 	}
 }
 
+// TestDefaultLeadTimeGoldenValue pins the absolute value of the fallback
+// constant. Every other assertion compares against order.DefaultLeadTime
+// itself, so a mutated constant reads as self-consistent; only a literal
+// 48h pins the domain's documented default lead time.
+func TestDefaultLeadTimeGoldenValue(t *testing.T) {
+	if order.DefaultLeadTime != 48*time.Hour {
+		t.Fatalf("DefaultLeadTime = %v, want 48h", order.DefaultLeadTime)
+	}
+}
+
+// TestNewLeadTimePolicyNormalisationIsObservableOnThePolicy pins the
+// write-side normalisation contract on the exported fields directly:
+// a zero default becomes DefaultLeadTime and a zero per-path override is
+// dropped from the map entirely. LeadTimeFor alone cannot distinguish
+// these cases — its own read-side guards mask them — so the boundary
+// conditions in NewLeadTimePolicy are only killable here.
+func TestNewLeadTimePolicyNormalisationIsObservableOnThePolicy(t *testing.T) {
+	policy := order.NewLeadTimePolicy(0, map[shared.PathId]time.Duration{
+		"singles": 6 * time.Hour,
+		"broken":  0,
+	})
+	if policy.Default != order.DefaultLeadTime {
+		t.Fatalf("Default = %v, want DefaultLeadTime (%v)", policy.Default, order.DefaultLeadTime)
+	}
+	if _, ok := policy.PerPath["broken"]; ok {
+		t.Fatal("a zero per-path override must be discarded, not kept in PerPath")
+	}
+	if got := policy.PerPath["singles"]; got != 6*time.Hour {
+		t.Fatalf("PerPath[singles] = %v, want 6h", got)
+	}
+}
+
+// TestLeadTimeForDoesNotTrustAZeroOverrideOnALiteralPolicy pins the
+// read-side guard: a zero duration sitting in PerPath (only possible on
+// a hand-built literal — NewLeadTimePolicy strips them) is not trusted
+// to shorten a promise; the default governs instead.
+func TestLeadTimeForDoesNotTrustAZeroOverrideOnALiteralPolicy(t *testing.T) {
+	policy := order.LeadTimePolicy{
+		Default: 12 * time.Hour,
+		PerPath: map[shared.PathId]time.Duration{"singles": 0},
+	}
+	if got := policy.LeadTimeFor("singles"); got != 12*time.Hour {
+		t.Fatalf("LeadTimeFor = %v, want the 12h default (a zero override is not trusted)", got)
+	}
+}
+
 func TestPromiseDateUsesTheSlowestAllocatedLine(t *testing.T) {
 	now := testTime()
 	policy := order.NewLeadTimePolicy(12*time.Hour, map[shared.PathId]time.Duration{

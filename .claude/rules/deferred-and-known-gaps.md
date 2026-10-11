@@ -44,12 +44,6 @@ Still deferred, as of the last verified pass:
   ADR-0004 stance on transactional guarantees, not an oversight.
 - **Clawing back released work on cancellation.** BR6 (ADR-0004): once any
   line is `Released`, v1 does NOT claw it back on `CancelOrder`.
-- **Killing the surviving `promise.go`/`promise_policy.go` boundary
-  mutants.** The mutation gate is pinned just under the measured baseline
-  (thresholds efficacy 89 / mutant-coverage 83, measured 89.29% / 83.58% —
-  see `.gremlins.yaml`); hardening those tests to ratchet toward the
-  fleet's 99/99 target is tracked follow-up work, not a
-  currently-enforced requirement.
 - **Any change to `inventory-storage` or `wes-work-planning`.** This
   repo's entire build is 100% additive from their point of view — neither
   repository is ever touched from here.
