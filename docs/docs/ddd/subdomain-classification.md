@@ -58,7 +58,9 @@ proxy.
   Core subdomains that actually own that truth.
 - **Real quality bar.** 90% coverage on domain + application,
   failing-path tests per named invariant, a godog BDD suite, a gremlins
-  mutation gate on the domain (thresholds in `.gremlins.yaml`, below the
+  mutation gate on the domain (thresholds pinned in `.gremlins.yaml` at
+  efficacy 97 / mutant-coverage 99, ratcheted up from 89/83 by the
+  2026-10-10 boundary-mutant hardening — mutant-coverage now sits at the
   fleet's 99/99 target), and architecture fitness tests
   (`internal/architecture`) — see
   [Architecture](/docs/overview/architecture#quality-gates).

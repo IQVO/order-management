@@ -506,12 +506,43 @@ exhaustive weekly **`mutation`** run on schedule, **`vuln`**
 (govulncheck), **`api-lint`** (Spectral on `apis/openapi.yaml` and
 `apis/asyncapi.yaml`), **`arch-test`** (arch-go fitness tests in
 `internal/architecture/`), and **`docs-api-drift`** (regenerates the
-Docusaurus API reference from the spec; its diff step currently checks the
-wrong path and cannot fail — see `.claude/rules/ci-quality-gates.md`),
+Docusaurus API reference from the spec and fails on any drift, including
+a new untracked generated page — pathspec fixed in #154),
 **`web`** (MFE lint/typecheck/test/build) — plus the packaging/security/
 publish jobs (`helm-lint` and `trivy-scan` on PRs into `main`;
 `docker-publish` and `release` on pushes to `main`) and the advisory
 scheduled **`drift`** job.
+
+### Integration suites (Testcontainers)
+
+Every `-tags=integration` suite is self-contained: it boots its own
+throwaway container in `TestMain` — never an external `DATABASE_URL`,
+never `t.Skip` — and the Postgres packages use a template-clone pattern
+for speed: one container per package, every migration applied **once**
+into a TEMPLATE database, then one private database per test
+(`CREATE DATABASE ... TEMPLATE`, a file-level copy in milliseconds), so
+isolation is total with no `TRUNCATE` bookkeeping. The suites added by
+#169 cover the two shapes unit tests cannot:
+
+- `internal/application/usecases` (`usecases_wiring_integration_test.go`)
+  — the main write use cases against the real `OrderRepo`, real
+  `UnitOfWork` and a buffering event publisher, wired exactly like
+  `cmd/order`'s composition root: the receive → allocate → release
+  lifecycle, the `Backordered` → `RetryAllocation` recovery, held intake
+  followed by `CancelOrder`'s reservation revocation, and the
+  Save-inside-UoW optimistic-version bracket (ADR 0024). The
+  inventory-storage client is a scripted fake — the cross-context
+  Supplier's own contract is exercised in its repo.
+- `internal/adapters/inbound/mcp`
+  (`streamable_http_integration_test.go`) — the wire contract
+  (initialize, tools/list, tools/call) end-to-end over the real
+  Streamable HTTP transport, the SDK's own client driving an
+  `httptest.Server`, with the real Postgres-backed use cases behind it —
+  including `cmd/mcp`'s two-database shape (OLTP + analytics as two
+  migrated templates on one container) for `get_promise_health`.
+
+Run the locally wired set with `make integration` (same package list as
+the CI job).
 
 ## Operator micro-frontend (`web/`)
 
