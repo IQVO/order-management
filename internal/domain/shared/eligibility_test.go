@@ -153,3 +153,24 @@ func TestEligibilityNonSortable(t *testing.T) {
 		})
 	}
 }
+
+// TestEligibilityMaxUnitsPerLineNilContract pins the accessor's boundary:
+// an unbounded eligibility returns a nil pointer (never a pointer to a
+// value), and a bounded one returns an independent copy — mutating the
+// result must not reach back into the value object.
+func TestEligibilityMaxUnitsPerLineNilContract(t *testing.T) {
+	unbounded := shared.NewEligibility(nil, nil, nil, false)
+	if got := unbounded.MaxUnitsPerLine(); got != nil {
+		t.Fatalf("MaxUnitsPerLine() = %v, want nil for unbounded", *got)
+	}
+
+	bounded := shared.NewEligibility(intPtr(3), nil, nil, false)
+	got := bounded.MaxUnitsPerLine()
+	if got == nil || *got != 3 {
+		t.Fatalf("MaxUnitsPerLine() = %v, want 3", got)
+	}
+	*got = 99
+	if again := bounded.MaxUnitsPerLine(); again == nil || *again != 3 {
+		t.Fatalf("MaxUnitsPerLine() = %v, want the unmutated 3 (copy-out contract)", *again)
+	}
+}

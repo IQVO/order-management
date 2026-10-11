@@ -8,6 +8,7 @@ import (
 func TestCatalogueLookup(t *testing.T) {
 	c := New([]PathDefinition{
 		{Id: "PICK", MatchPrefix: "pick"},
+		{Id: "PICK_DUP", MatchPrefix: "pick"}, // same prefix, same length: first declared wins
 		{Id: "PICK_ZONE_A", MatchPrefix: "pick-zone-a"},
 		{Id: "PACK", MatchPrefix: "pack"},
 	})
@@ -22,6 +23,14 @@ func TestCatalogueLookup(t *testing.T) {
 		{name: "case-insensitive exact match", id: "PICK", want: "PICK"},
 		{name: "prefix family match", id: "pick-station-3", want: "PICK"},
 		{name: "longest prefix wins", id: "pick-zone-a-east", want: "PICK_ZONE_A"},
+		{
+			// Two definitions with the SAME prefix length: the FIRST
+			// declared one wins (strict `>` keeps the incumbent). Lookup
+			// is deterministic, which is all the contract promises — it
+			// deliberately does not promise "last wins".
+			name: "equal-length prefixes keep the first declared definition",
+			id:   "pick-station-3", want: "PICK",
+		},
 		{name: "bare substring without separator does not match", id: "picking", wantErr: ErrUnknownPath},
 		{name: "unknown id", id: "rebin-1", wantErr: ErrUnknownPath},
 	}

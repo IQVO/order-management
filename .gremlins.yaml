@@ -48,6 +48,18 @@ unleash:
 
   threshold:
     # efficacy = KILLED / (KILLED + LIVED)
-    efficacy: 93
+    #
+    # Measured 2026-10-10 after the unit-test hardening PR (status-switch
+    # if-chain rewrite, promise/policy boundary tests): 137 killed,
+    # 3 lived, 1 not covered (a const-decl artifact), efficacy 97.86%,
+    # mutator coverage 99.29%. The three survivors are accepted
+    # near-equivalents, documented in README.md's follow-up work section:
+    #   - order/path_selection.go:119  comparator "<" under a "!=" guard
+    #   - order/path_selection.go:121  duplicate-PathId tie-break
+    #   - order/promise.go:75          equal-max accumulation tie
+    # The threshold sits strictly below the measured baseline (gremlins
+    # fails when the measured value is <= the threshold), so 97 locks in
+    # the current quality while leaving the documented survivors room.
+    efficacy: 97
     # mutant-coverage = (KILLED + LIVED) / TOTAL mutants
-    mutant-coverage: 91
+    mutant-coverage: 99

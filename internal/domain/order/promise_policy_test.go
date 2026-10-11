@@ -339,6 +339,45 @@ func TestPromisePolicy_CapacityKnownAndInsufficient_FallsBackFromThatWindow(t *t
 	}
 }
 
+// TestPromisePolicy_CapacityExactlyCoversQuantity_StillUsesThatWindow pins
+// the sufficiency boundary: "remaining < quantity" rejects only a STRICT
+// shortfall, so a window with remaining == quantity still fits — the whole
+// remaining capacity is consumable, not just part of it.
+func TestPromisePolicy_CapacityExactlyCoversQuantity_StillUsesThatWindow(t *testing.T) {
+	now := testTime()
+	o := newAllocatedOrder(t, pq("pick", 50))
+
+	onlyWindow := order.CPTWindow{CptId: "exact", CutoffAt: now.Add(6 * time.Hour), EligiblePathIds: []string{"pick"}}
+
+	policy := order.PromisePolicy{
+		Schedule: &fakeSchedule{windowsBySite: map[string][]order.CPTWindow{
+			"site-1": {onlyWindow},
+		}},
+		Capability: &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 1 * time.Hour}},
+		Capacity: &fakeCapacity{
+			known: map[string]bool{
+				capacityKey("pick", "exact"): true,
+			},
+			remaining: map[string]int{
+				capacityKey("pick", "exact"): 50, // exactly the line quantity
+			},
+		},
+		Fallback: order.NewLeadTimePolicy(24*time.Hour, nil),
+		SiteId:   "site-1",
+	}
+
+	got, ok := policy.Promise(now, o)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if got.Basis != order.BasisCapability {
+		t.Fatalf("Basis = %q, want Capability (exactly-enough capacity fits)", got.Basis)
+	}
+	if got.CptId != "exact" {
+		t.Fatalf("CptId = %q, want the exact-fit window", got.CptId)
+	}
+}
+
 func TestPromisePolicy_ZeroValuePolicy_AlwaysFallsBack(t *testing.T) {
 	now := testTime()
 	o := newAllocatedOrder(t, pq("pick", 1))

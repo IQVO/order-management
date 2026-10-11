@@ -409,25 +409,32 @@ func (o *Order) Status() Status {
 	}
 	total := len(o.lines)
 
-	switch {
-	case cancelled == total:
+	// Written as an if-chain, not a switch: coverage profiles do not
+	// attribute mutants on `case` expressions, so a switch here reports
+	// every arm as NOT COVERED to the mutation gate even when the table
+	// in status_test.go exercises all of them.
+	if cancelled == total {
 		return StatusCancelled
-	case released == total:
+	}
+	if released == total {
 		return StatusReleased
-	case released > 0:
+	}
+	if released > 0 {
 		return StatusPartiallyReleased
-	case backordered > 0:
+	}
+	if backordered > 0 {
 		if o.allowPartialShipment && allocated > 0 {
 			return StatusPartiallyAllocated
 		}
 		return StatusBackordered
-	case allocated == total:
-		return StatusAllocated
-	case allocated > 0:
-		return StatusPartiallyAllocated
-	default:
-		return StatusReceived
 	}
+	if allocated == total {
+		return StatusAllocated
+	}
+	if allocated > 0 {
+		return StatusPartiallyAllocated
+	}
+	return StatusReceived
 }
 
 // Allocate records inventory-storage's reservation against a Pending line.
