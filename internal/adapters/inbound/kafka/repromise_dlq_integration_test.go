@@ -205,12 +205,12 @@ func TestRepromiseConsumer_PoisonMessage_GoesToDeadLetterTopicWithoutBlockingPar
 	// The healthy order's repromise must be the ONLY published event --
 	// the poison message never got to publish anything, no matter how
 	// many times it was retried.
-	if len(events.events) != 1 {
-		t.Fatalf("published events = %d, want exactly 1 (only the healthy order's repromise)", len(events.events))
+	if len(events.snapshot()) != 1 {
+		t.Fatalf("published events = %d, want exactly 1 (only the healthy order's repromise)", len(events.snapshot()))
 	}
-	repromised, ok := events.events[0].(shared.OrderRepromised)
+	repromised, ok := events.snapshot()[0].(shared.OrderRepromised)
 	if !ok {
-		t.Fatalf("published event = %T, want shared.OrderRepromised", events.events[0])
+		t.Fatalf("published event = %T, want shared.OrderRepromised", events.snapshot()[0])
 	}
 	if repromised.OrderID != healthyOrderID {
 		t.Errorf("OrderRepromised.OrderID = %q, want %q", repromised.OrderID, healthyOrderID)
@@ -340,7 +340,7 @@ func TestRepromiseConsumer_LegacyFlatMessage_DeadLetteredWithoutRetry(t *testing
 	// legacy message drove none (it was never parsed).
 	waitForRepromise(t, ctx, orders, orderID, originalCutoff)
 	time.Sleep(2 * time.Second)
-	if len(events.events) != 1 {
-		t.Fatalf("published events = %d, want exactly 1 (only the CloudEvents message)", len(events.events))
+	if len(events.snapshot()) != 1 {
+		t.Fatalf("published events = %d, want exactly 1 (only the CloudEvents message)", len(events.snapshot()))
 	}
 }

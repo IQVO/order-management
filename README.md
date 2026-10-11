@@ -541,8 +541,13 @@ isolation is total with no `TRUNCATE` bookkeeping. The suites added by
   including `cmd/mcp`'s two-database shape (OLTP + analytics as two
   migrated templates on one container) for `get_promise_health`.
 
-Run the locally wired set with `make integration` (same package list as
-the CI job).
+Run them all with `make integration` — `go test -tags=integration ./...`,
+the same command as the CI job. Both use `./...`, never a hand-kept package
+list: the list they replaced silently omitted the two #169 suites above, so
+they never ran in CI. `TestEveryIntegrationPackageRunsInCI`
+(`internal/architecture/integration_coverage_fitness_test.go`) fails the
+build if any `//go:build integration` package is ever again left out of the
+CI job.
 
 ## Operator micro-frontend (`web/`)
 

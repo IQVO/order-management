@@ -158,8 +158,8 @@ func TestRepromiseConsumer_PoisonMessage_DLQTopicMissing_AutoCreatedAndConsumpti
 	}
 	assertHeader(t, dlqMsg.Headers, "x-dlq-source-topic", topic)
 
-	if len(events.events) != 1 {
-		t.Fatalf("published events = %d, want exactly 1 (only the valid message)", len(events.events))
+	if len(events.snapshot()) != 1 {
+		t.Fatalf("published events = %d, want exactly 1 (only the valid message)", len(events.snapshot()))
 	}
 
 	consumeCancel()

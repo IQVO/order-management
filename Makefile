@@ -80,19 +80,11 @@ lint:
 test:
 	$(GO) test ./... -race
 
+# Every package with a //go:build integration test, via ./... (a hand-kept
+# list omitted two suites; see the integration job in ci.yml).
 integration:
-	$(GO) build -tags=integration ./...
 	$(GO) vet -tags=integration ./...
-	$(GO) test -tags=integration ./internal/adapters/outbound/kafka
-	$(GO) test -tags=integration ./internal/adapters/outbound/kafkacatalog
-	$(GO) test -tags=integration ./internal/adapters/outbound/kafkacptschedule
-	$(GO) test -tags=integration ./internal/adapters/outbound/kafkapathcapacity
-	$(GO) test -tags=integration ./internal/adapters/inbound/kafka
-	$(GO) test -tags=integration ./internal/adapters/inbound/http
-	$(GO) test -tags=integration ./internal/adapters/outbound/analyticsstore
-	$(GO) test -tags=integration ./cmd/order
-	$(GO) test -tags=integration ./internal/adapters/outbound/postgres
-	$(GO) test -tags=integration ./internal/adapters/outbound/productclassificationcopy
+	$(GO) test -tags=integration ./... -race -count=1
 
 coverage:
 	$(GO) test ./... -race -coverprofile=$(COVERAGE_OUT) -coverpkg=$(COVERAGE_PKGS)

@@ -20,8 +20,11 @@ paths:
   failing-path test.
 - Coverage gate: **90%** on `./internal/domain/...,./internal/application/...`.
 - Mutation gate (gremlins, `mutation-fast` on every push/PR, full `mutation`
-  weekly): thresholds efficacy 89 / mutant-coverage 83 on
-  `internal/domain/order` (measured 89.29% / 83.58%) — see `.gremlins.yaml`.
+  weekly): thresholds efficacy 97 / mutant-coverage 99 (measured on
+  `./internal/domain` 97.86% / 99.29%, #170) — see `.gremlins.yaml`. The
+  three surviving mutants are accepted tie-break near-equivalents, listed in
+  README.md's follow-up section; do not chase them with fixtures that pin an
+  unspecified tie order.
   Do not let a change silently regress below the pinned threshold.
 - godog/BDD acceptance suite: `features/*.feature`, run via
   `go test ./... -run TestFeatures` (CI job `bdd`).

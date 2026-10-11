@@ -213,21 +213,27 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
-      - name: Build, vet, and test Kafka + Postgres adapters against Testcontainers
+      # Every Postgres and Kafka integration test boots its own container via
+      # testcontainers (the runner's Docker daemon); there is no service
+      # container and no DATABASE_URL.
+      #
+      # `./...`, never a hand-kept package list: the list this replaced
+      # silently omitted internal/adapters/inbound/mcp and
+      # internal/application/usecases, so the two #169 suites never ran in CI.
+      # A new integration package is now covered the moment it lands (same
+      # command as the rest of the fleet).
+      - name: Integration tests
+        # `go test ./...` runs the packages in parallel and each boots its own
+        # testcontainers. The reaper (Ryuk) is created once per test process
+        # and concurrent processes contend for it ("wait for reaper ...:
+        # context deadline exceeded"); a GitHub-hosted runner is discarded
+        # after the job, so the reaper is redundant here. Local runs keep it.
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: "true"
         run: |
           set -euo pipefail
-          go build -tags=integration ./...
           go vet -tags=integration ./...
-          go test -tags=integration ./internal/adapters/outbound/kafka
-          go test -tags=integration ./internal/adapters/outbound/kafkacatalog
-          go test -tags=integration ./internal/adapters/outbound/kafkacptschedule
-          go test -tags=integration ./internal/adapters/outbound/kafkapathcapacity
-          go test -tags=integration ./internal/adapters/inbound/kafka
-          go test -tags=integration ./internal/adapters/inbound/http
-          go test -tags=integration ./internal/adapters/outbound/analyticsstore
-          go test -tags=integration ./cmd/order
-          go test -tags=integration -v ./internal/adapters/outbound/postgres
-          go test -tags=integration ./internal/adapters/outbound/productclassificationcopy
+          go test -tags=integration ./... -race -count=1
 
 
   # ============================================================
