@@ -172,3 +172,12 @@ go tool cover -func=coverage.out
 `make check` runs `fmt-check`, `vet`, `build`, `lint`, `test` in one pass —
 the same feedback CI gives you post-push, available locally pre-commit. See
 the [Quality gate section of the README](https://github.com/IQVO/order-management#quality-gate).
+
+Integration suites (`-tags=integration`, each booting its own Testcontainers
+broker/database — see the
+[Integration suites section of the README](https://github.com/IQVO/order-management#integration-suites-testcontainers))
+run separately:
+
+```bash
+make integration   # same package list as the CI `integration` job
+```

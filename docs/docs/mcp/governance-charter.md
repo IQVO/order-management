@@ -150,6 +150,12 @@ Jaeger and Grafana alongside HTTP.
 
 1. Tool handlers **MUST** be unit-tested (table-driven, in-memory adapters) to
    the platform's ≥90% coverage bar, plus at least one transport-level test.
+   This repo additionally pins the full wire contract over the real
+   Streamable HTTP transport — real Postgres-backed use cases behind
+   `mcp.Handler` on an `httptest.Server`, driven by the SDK's own client —
+   in `streamable_http_integration_test.go` (`-tags=integration`,
+   Testcontainers; added by #169), mirroring `cmd/mcp`'s two-database
+   deployment shape (OLTP + analytics).
 2. The MCP adapter **MUST** pass `make check` (fmt, vet, build, lint, test) and
    the arch-go fitness tests.
 3. **Phase-6 governance gate:** implemented in this repository as

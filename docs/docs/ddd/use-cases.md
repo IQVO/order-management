@@ -18,7 +18,11 @@ and release are not public use cases. They are folded into one shared
 function, `allocateAndRelease` (`allocation.go`), that `ReceiveOrder`,
 `RetryAllocation` and `ReleaseHeldOrder` all call — a caller expresses one
 intent ("place an order", "retry a stuck one", "release a held one") and
-this service attempts allocation and then release as one flow.
+this service attempts allocation and then release as one flow. The
+`usecases_wiring_integration_test.go` suite (`-tags=integration`,
+Testcontainers Postgres, real `OrderRepo`/`UnitOfWork` wired like the
+composition root) executes these lifecycles end-to-end against real
+infrastructure.
 
 | # | Use case | Trigger | Raises |
 | --- | --- | --- | --- |
@@ -179,8 +183,11 @@ concurrent writer (`409` `concurrent-modification`), a revoke fails
 ## 6. GetOrder(orderId)
 
 Read-only. Returns the current `Order`, with the order-level `status`
-derived from line statuses at read time. Also backs the MCP tool
-`get_order` (`cmd/mcp`, ADR 0010).
+derived from line statuses at read time (`Order.Status()`, an if-chain
+written deliberately so the mutation gate can attribute its mutants).
+Also backs the MCP tool `get_order` (`cmd/mcp`, ADR 0010), whose wire
+contract is pinned end-to-end over the real Streamable HTTP transport by
+`streamable_http_integration_test.go` (`-tags=integration`).
 
 **Fails when:** order unknown (`404`).
 
