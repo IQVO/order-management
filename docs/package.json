@@ -64,6 +64,9 @@
     "webpack-dev-server": "^5.2.6",
     "sockjs": "^0.3.24",
     "qs": "^6.16.0",
-    "http-cache-semantics": "^4.3.0"
+    "http-cache-semantics": "^4.3.0",
+    "tinypool": "^2.1.2",
+    "postcss-selector-parser": "^7.1.6",
+    "katex": "^0.18.2"
   }
 }
