@@ -172,11 +172,13 @@ three survivors are listed as accepted near-equivalents in the README.
 | `TestDomainHasNoSerializationTags` | no `json:` tags in `internal/domain`. |
 | `TestCloudEventsOnly`, `TestReplayConsumersSetCommitInterval` | every Kafka message goes through the CloudEvents helper; replay readers set `CommitInterval`. |
 | `TestEventCatalogueMatchesContract` | every CloudEvents type `apis/asyncapi.yaml` declares for this service also appears in an ADR (the event catalogue). |
+| `TestOptionalMCPInputsCarryOmitempty` | a struct field whose `jsonschema` description says "optional" carries `omitempty`, so the MCP SDK does not mark it required (fleet decision D16). |
 | `TestEveryIntegrationPackageRunsInCI` | see above. |
 
 Several sensors have a companion test (`TestPostgresIntegrationDetector`,
 `TestEventCatalogueDetector`, `TestDomainTagSensorFailsOnBadFixtures`,
-`TestIntegrationCoverageSensorFailsOnBadFixtures`) that proves the sensor
+`TestIntegrationCoverageSensorFailsOnBadFixtures`,
+`TestOptionalMCPInputSensorFailsOnBadFixtures`) that proves the sensor
 flags a known-bad fixture.
 
 ## MCP evals (`internal/adapters/inbound/mcp`)
