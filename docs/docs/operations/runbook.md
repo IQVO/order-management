@@ -53,8 +53,8 @@ the startup probe fails until then. In order:
 2. With `DATABASE_URL`: run the OLTP migrations against
    `MIGRATIONS_DATABASE_URL`, open the pool and ping it. Both steps are
    retried by `internal/bootretry` (5 attempts, 1+2+4+8 s backoff, about
-   15 s of waiting plus the attempts themselves; the code comment's "~31s"
-   counts a fifth sleep that never happens) because the cluster resets each pod's first outbound
+   15 s of waiting plus the attempts themselves; ADR 0033's "≈ 31s" counts a
+   fifth sleep that never happens) because the cluster resets each pod's first outbound
    dial roughly 10 s after start (Istio native sidecars).
 3. With `PATH_CATALOGUE_SOURCE=kafka`: start the process-path catalogue,
    CPT-schedule and path-capacity consumers (each constructor retried the

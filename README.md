@@ -236,7 +236,7 @@ Release no longer calls any Supplier synchronously — see
 | `MCP_ADDR` | `:8090` | `cmd/mcp` listen address. |
 | `PROMISE_DEFAULT_LEAD_TIME` | `48h` | Lead-time fallback promise for any unlisted path. |
 | `PROMISE_PATH_LEAD_TIMES` | *(unset)* | Per-path overrides, e.g. `pick=24h,singles=6h`. |
-| `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error`. |
+| `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` (or `warning`) \| `error`, case-insensitive. |
 | `SHUTDOWN_DRAIN_DELAY` | `5s` | Graceful shutdown: wait this long after `/readyz` flips to not-ready, before closing the listener (ADR 0025 §8). `0` disables. |
 
 ## Kafka integration

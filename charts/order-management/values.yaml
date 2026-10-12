@@ -247,13 +247,13 @@ extraEnv: []
 # consumer dials) before it starts listening, and in this cluster every
 # injected pod's first outbound dial is reset ~10s after start (Istio
 # native sidecars, so holdApplicationUntilProxyStarts is a no-op). The
-# retried boot work (cmd/order/main.go: retry, ~31s budget) can therefore
+# retried boot work (internal/bootretry: 5 attempts, 15s of backoff) can therefore
 # push first-listen past a plain liveness threshold. Observed live as
 # CrashLoopBackOff — order-management-8646d859c7-fkvcz sat at 129
 # restarts — which reads like an app crash and is not one; see
 # network-fulfillment PR #7, the pattern this chart change ports.
 #
-# 30 x 2s = 60s of grace, comfortably past the ~31s retry budget, after
+# 30 x 2s = 60s of grace, comfortably past the 15s of retry backoff, after
 # which liveness takes over unchanged. A genuinely broken database still
 # fails the pod; it just is not mistaken for a slow one.
 startupProbe:

@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -162,7 +163,8 @@ func newRouter(mcpHandler http.Handler, serviceName string) http.Handler {
 // sidecars run as an init container with restartPolicy=Always, so
 // holdApplicationUntilProxyStarts is a no-op). A single attempt turns
 // that known, transient condition into CrashLoopBackOff. The retry does
-// NOT weaken the fail-closed rule: after the ~31s budget is exhausted
+// NOT weaken the fail-closed rule: after the budget (5 attempts, 15s of
+// backoff) is exhausted
 // this still returns the real underlying error and the caller still
 // refuses to boot.
 func buildAdapters(ctx context.Context, databaseURL, migrationsDatabaseURL, migrationsPath string, logger *slog.Logger) (ports.OrderRepo, func(), error) {
@@ -271,13 +273,14 @@ func (a reportStoreAdapter) QueryPromiseHealth(ctx context.Context, from, to tim
 	return rows, nil
 }
 
-// logLevel mirrors cmd/order/main.go's newLogger level parsing, kept local
-// to this binary so both composition roots stay free-standing.
+// logLevel mirrors cmd/order's newLogger level parsing (case-insensitive;
+// "warning" is an alias of "warn"), kept local to this binary so both
+// composition roots stay free-standing.
 func logLevel(level string) slog.Level {
-	switch level {
+	switch strings.ToLower(level) {
 	case "debug":
 		return slog.LevelDebug
-	case "warn":
+	case "warn", "warning":
 		return slog.LevelWarn
 	case "error":
 		return slog.LevelError
