@@ -17,6 +17,24 @@ aggregates — closing a gap where "an order" was previously just an
 unowned, unvalidated string (`OrderRef` / `DemandRef` / `Reference`)
 threaded independently through three other services.
 
+## Documentation
+
+The full documentation site is published at
+**https://iqvo.github.io/order-management/** (built from `docs/` on every
+push to `main`). The pages, as Markdown in this repository:
+
+| Area | Pages |
+| --- | --- |
+| Overview | [Introduction](docs/docs/overview/introduction.md) · [Architecture](docs/docs/overview/architecture.md) · [Quickstart](docs/docs/overview/quickstart.md) |
+| Operations | [Configuration](docs/docs/operations/configuration.md) · [Runbook](docs/docs/operations/runbook.md) · [Observability](docs/docs/operations/observability.md) · [Troubleshooting](docs/docs/operations/troubleshooting.md) |
+| Development | [Testing](docs/docs/development/testing.md) |
+| Ecosystem | [Integration contracts](docs/docs/ecosystem/integration.md) · [Context map](docs/docs/ecosystem/context-map.md) |
+| Domain-Driven Design | [Subdomain classification](docs/docs/ddd/subdomain-classification.md) · [Use cases](docs/docs/ddd/use-cases.md) · [Domain events](docs/docs/ddd/domain-events.md) · [DDD artifacts](docs/docs/ddd/ddd-artifacts.md) |
+| AI ecosystem | [MCP tools](docs/docs/mcp/tools.md) · [MCP governance charter](docs/docs/mcp/governance-charter.md) |
+| Analytics | [Order Funnel & Allocation Health](docs/docs/analytics/order-funnel-report.md) |
+| API | [API reference overview](docs/docs/api-reference/overview.md) (generated from `apis/openapi.yaml`) |
+| Decisions | [ADR index](docs/docs/adr/about.md) |
+
 ## Bounded-context boundary (read this first)
 
 This service is a **pure HTTP consumer** of `inventory-storage`'s

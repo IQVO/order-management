@@ -7,8 +7,8 @@ import apiSidebar from './docs/api-reference/rest/sidebar';
 /**
  * Top-level categories, mirroring the pattern shared across the
  * warehouse-systems documentation sites: Overview, Business Context,
- * Domain-Driven Design, API Reference, Ecosystem, AI Ecosystem (MCP),
- * Analytics, Architecture Decision Records.
+ * Domain-Driven Design, API Reference, Ecosystem, Operations, Development,
+ * AI Ecosystem (MCP), Analytics, Architecture Decision Records.
  */
 const sidebars: SidebarsConfig = {
   docsSidebar: [
@@ -65,12 +65,27 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Ecosystem',
       link: {type: 'doc', id: 'ecosystem/context-map'},
-      items: [],
+      items: ['ecosystem/integration'],
+    },
+    {
+      type: 'category',
+      label: 'Operations',
+      items: [
+        'operations/configuration',
+        'operations/runbook',
+        'operations/observability',
+        'operations/troubleshooting',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Development',
+      items: ['development/testing'],
     },
     {
       type: 'category',
       label: 'AI Ecosystem (MCP)',
-      items: ['mcp/governance-charter'],
+      items: ['mcp/tools', 'mcp/governance-charter'],
     },
     {
       type: 'category',
