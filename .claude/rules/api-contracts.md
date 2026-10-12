@@ -34,9 +34,8 @@ paths:
   already `Released` (BR6); 204 on success.
 - `GET    /healthz`                      → `getHealthz` — liveness only,
   does not check Postgres/inventory-storage.
-- `GET    /readyz`                       → readiness; flips to 503
-  `{"status":"not_ready"}` first during graceful shutdown (ADR-0025). Not
-  in `apis/openapi.yaml`.
+- `GET    /readyz`                       → `getReadyz` — readiness; flips to 503
+  `{"status":"not_ready"}` first during graceful shutdown (ADR-0025).
 - `GET    /planned-capacity?site=&from=` → `getPlannedCapacity` (ADR-0031) —
   registered only when `PLANNED_CAPACITY_CONSUMER_GROUP` is set; 400
   `invalid-query-parameter` without `site`.
