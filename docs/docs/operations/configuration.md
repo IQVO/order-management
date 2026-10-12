@@ -35,7 +35,7 @@ Sources live in `cmd/order/` unless stated otherwise.
 | Variable | Default | Required? | Meaning | Source |
 | --- | --- | --- | --- | --- |
 | `HTTP_ADDR` | `:8080` | no | Listen address of the REST API. | `main.go`, `http.go` |
-| `LOG_LEVEL` | `info` | no | `debug`, `info`, `warn` or `error` (case-insensitive). Anything else means `info`. Logs are JSON on stdout. | `main.go`, `config.go` (`newLogger`) |
+| `LOG_LEVEL` | `info` | no | `debug`, `info`, `warn`/`warning` or `error` (case-insensitive). Anything else means `info`. Logs are JSON on stdout. | `main.go`, `config.go` (`newLogger`) |
 | `SHUTDOWN_DRAIN_DELAY` | `5s` | no | How long to wait after `/readyz` turns `503` before the listener closes (ADR 0025). `0` disables the wait. A negative or invalid value logs a warning and uses `5s`. | `shutdown.go` |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:5181` | no | Comma-separated browser origins allowed to call the API: the console shell's and this repo's MFE dev ports (ADR 0007). Allowed headers are `Content-Type`, `Authorization` and `Idempotency-Key` (the MFE sends the last one on `POST /orders`, ADR 0038). | `internal/adapters/inbound/http/server.go` |
 
@@ -89,7 +89,7 @@ Sources live in `cmd/order/` unless stated otherwise.
 | Variable | Default | Required? | Meaning | Source |
 | --- | --- | --- | --- | --- |
 | `MCP_ADDR` | `:8090` | no | Listen address of the Streamable HTTP endpoint (mounted on `/*`). | `cmd/mcp/main.go` |
-| `LOG_LEVEL` | `info` | no | `debug`, `warn` or `error`, **case-sensitive** here (unlike `cmd/order`). Anything else means `info`. | `cmd/mcp/main.go` (`logLevel`) |
+| `LOG_LEVEL` | `info` | no | `debug`, `info`, `warn`/`warning` or `error` (case-insensitive, like every other binary). Anything else means `info`. | `cmd/mcp/main.go` (`logLevel`) |
 | `DATABASE_URL` | unset | no | OLTP Postgres DSN for `get_order`. Unset means an empty in-memory repository, so every lookup is `order not found`. When set, this binary also runs the OLTP migrations at boot. | `cmd/mcp/main.go` |
 | `MIGRATIONS_DATABASE_URL` | value of `DATABASE_URL` | no | Direct DSN for the migration step only (ADR 0029). | `cmd/mcp/main.go` |
 | `MIGRATIONS_PATH` | `migrations` | no | OLTP migrations directory. | `cmd/mcp/main.go` |

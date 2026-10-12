@@ -98,6 +98,7 @@ Typos, broken links and formatting are of course fair game.
 | [0036](./0036-product-classification-local-copy.md) | Product classification from a local copy of product-master events | Accepted |
 | [0037](./0037-send-line-no-on-reservations.md) | Send the order line number (lineNo) on POST /reservations | Accepted |
 | [0038](./0038-mfe-sends-idempotency-key-per-submission.md) | The operator MFE sends an Idempotency-Key per order submission | Accepted |
+| [0039](./0039-reports-api-openapi-contract.md) | The reports binary's routes are a contract: apis/openapi-reports.yaml | Accepted |
 | [0040](./0040-outbox-relay-attempt-cap.md) | The outbox relay stops claiming a row after `OUTBOX_MAX_ATTEMPTS` failures | Accepted |
 | [0041](./0041-trace-context-crosses-the-outbox.md) | The W3C trace context crosses the outbox in `outbox_events.headers` (D27 reference) | Accepted |
 

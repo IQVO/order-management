@@ -13,14 +13,14 @@ import (
 )
 
 // newLogger builds the process-wide structured logger. LOG_LEVEL maps
-// debug|info|warn|error (case-insensitive) to the matching slog.Level,
-// defaulting to Info for unset or unrecognized values.
+// debug|info|warn|warning|error (case-insensitive) to the matching
+// slog.Level, defaulting to Info for unset or unrecognized values.
 func newLogger(level string) *slog.Logger {
 	var lvl slog.Level
 	switch strings.ToLower(level) {
 	case "debug":
 		lvl = slog.LevelDebug
-	case "warn":
+	case "warn", "warning":
 		lvl = slog.LevelWarn
 	case "error":
 		lvl = slog.LevelError

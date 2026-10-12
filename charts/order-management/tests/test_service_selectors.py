@@ -97,8 +97,8 @@ def check_startup_probe_gates_boot_work(failures: list[str]) -> None:
     grace = probe.get("periodSeconds", 10) * probe.get("failureThreshold", 3)
     if grace < 45:
         failures.append(
-            f"startupProbe allows only {grace}s; it must outlast the ~31s "
-            f"database/Kafka retry budget in cmd/order/main.go"
+            f"startupProbe allows only {grace}s; it must outlast the "
+            f"internal/bootretry budget (5 attempts, 15s of backoff, per dependency)"
         )
     if not c.get("livenessProbe"):
         failures.append("startupProbe replaced livenessProbe instead of deferring it")

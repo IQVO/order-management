@@ -141,6 +141,14 @@ for `/healthz`, then runs Schemathesis 4.28.0 with
 must be ship-complete" rule links two booleans in a way OpenAPI 3.0 cannot
 express; the BDD scenario and the domain unit test cover it instead.
 
+`cmd/order-reports` needs an analytical database to start, so its contract,
+`apis/openapi-reports.yaml` (ADR 0039), is checked by two Go tests in the
+`test` job instead of Schemathesis: `TestReportsContract_RoutesMatchSpec`
+(the chi router's routes equal the spec's paths) and
+`TestReportsContract_ResponsesMatchSpec` (every documented status of every
+operation, driven through a stub store, answers a declared status and media
+type with exactly the documented properties).
+
 ## Mutation testing (gremlins)
 
 Thresholds live in `.gremlins.yaml`: **efficacy 97**, **mutant-coverage
@@ -164,11 +172,13 @@ three survivors are listed as accepted near-equivalents in the README.
 | `TestDomainHasNoSerializationTags` | no `json:` tags in `internal/domain`. |
 | `TestCloudEventsOnly`, `TestReplayConsumersSetCommitInterval` | every Kafka message goes through the CloudEvents helper; replay readers set `CommitInterval`. |
 | `TestEventCatalogueMatchesContract` | every CloudEvents type `apis/asyncapi.yaml` declares for this service also appears in an ADR (the event catalogue). |
+| `TestOptionalMCPInputsCarryOmitempty` | a struct field whose `jsonschema` description says "optional" carries `omitempty`, so the MCP SDK does not mark it required (fleet decision D16). |
 | `TestEveryIntegrationPackageRunsInCI` | see above. |
 
 Several sensors have a companion test (`TestPostgresIntegrationDetector`,
 `TestEventCatalogueDetector`, `TestDomainTagSensorFailsOnBadFixtures`,
-`TestIntegrationCoverageSensorFailsOnBadFixtures`) that proves the sensor
+`TestIntegrationCoverageSensorFailsOnBadFixtures`,
+`TestOptionalMCPInputSensorFailsOnBadFixtures`) that proves the sensor
 flags a known-bad fixture.
 
 ## MCP evals (`internal/adapters/inbound/mcp`)
@@ -233,9 +243,9 @@ sends the row on a context without that span, and the consumed message's
 | `integration` | `go vet -tags=integration ./...`, `go test -tags=integration ./... -race -count=1` | every push and PR |
 | `mutation-fast` | `gremlins unleash ./internal/domain/order` | every push and PR |
 | `vuln` | govulncheck v1.8.0 | every push and PR |
-| `api-lint` | Spectral on `apis/openapi.yaml` and `apis/asyncapi.yaml` | every push and PR |
+| `api-lint` | Spectral on `apis/openapi.yaml`, `apis/openapi-reports.yaml` and `apis/asyncapi.yaml` | every push and PR |
 | `arch-test` | `go test ./internal/architecture/... -v` | every push and PR |
-| `docs-api-drift` | regenerates `docs/docs/api-reference/rest` and fails on any change | every push and PR |
+| `docs-api-drift` | `clean-api-docs:all` + `gen-api-docs:all`; fails on any change under `docs/docs/api-reference/rest` or `rest-reports` | every push and PR |
 | `web` | MFE lint, typecheck, test, build | every push and PR |
 | `chart-tests` | `charts/order-management/tests/render_test.sh` and `test_service_selectors.py` (Helm v3.16.4, PyYAML) | every push and PR |
 | `mutation` | full-domain gremlins; opens or closes a `harness:red` issue | schedule (Mondays 06:00 UTC) and manual dispatch |

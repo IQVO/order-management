@@ -99,9 +99,9 @@ go run ./cmd/order
   `order-management-repromise`, the same as the deployed pod. A local
   process with `KAFKA_BROKERS` set therefore shares that group's
   partitions with the cluster while it runs.
-- `docker-compose.kafka.yml` is still in the repository but the fleet no
-  longer uses a docker-compose broker. It also binds `localhost:9092`, so
-  do not run it while the kind cluster's broker is exposed.
+- The fleet has no docker-compose broker: `docker-compose.kafka.yml` was
+  removed from this repository (it bound `localhost:9092`, the same port
+  as the kind cluster's broker). Use the cluster's broker.
 - `INVENTORY_STORAGE_BASE_URL` above goes through Kong; any URL that
   reaches inventory-storage works.
 
