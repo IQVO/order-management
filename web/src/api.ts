@@ -32,6 +32,20 @@ async function parseProblemOrThrow(res: Response): Promise<void> {
   throw new ApiError(res.status, problem, `${res.status} ${res.statusText}`);
 }
 
+/** Per-request options for apiPost. */
+interface PostOptions {
+  /** Sent as the `Idempotency-Key` header. order-management requires one on
+   *  POST /orders whenever it runs with a database (ADR 0023): the caller
+   *  mints one per submission and reuses it when retrying that submission. */
+  idempotencyKey?: string;
+}
+
+/** A fresh Idempotency-Key: one random (v4) UUID per order submission
+ *  (ADR 0038). */
+export function newIdempotencyKey(): string {
+  return crypto.randomUUID();
+}
+
 /**
  * POST call for placing an order (POST /orders). Allocation and release
  * happen automatically, folded into this same call (ADR-0005) -- the
@@ -43,10 +57,13 @@ async function parseProblemOrThrow(res: Response): Promise<void> {
 export async function apiPost<TResponse>(
   path: string,
   body: unknown,
+  options: PostOptions = {},
 ): Promise<TResponse> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (options.idempotencyKey) headers["Idempotency-Key"] = options.idempotencyKey;
   const res = await fetch(`${ORDER_API_BASE}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(body),
   });
   if (!res.ok) await parseProblemOrThrow(res);

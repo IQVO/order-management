@@ -135,6 +135,7 @@ const sidebars: SidebarsConfig = {
         'adr/0035-site-sku-demand-projection-event',
         'adr/0036-product-classification-local-copy',
         'adr/0037-send-line-no-on-reservations',
+        'adr/0038-mfe-sends-idempotency-key-per-submission',
       ],
     },
   ],

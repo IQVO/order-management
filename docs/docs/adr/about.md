@@ -97,6 +97,7 @@ Typos, broken links and formatting are of course fair game.
 | [0035](./0035-site-sku-demand-projection-event.md) | SiteSkuDemandChanged — an additive, PII-free site/SKU demand projection event | Accepted |
 | [0036](./0036-product-classification-local-copy.md) | Product classification from a local copy of product-master events | Accepted |
 | [0037](./0037-send-line-no-on-reservations.md) | Send the order line number (lineNo) on POST /reservations | Accepted |
+| [0038](./0038-mfe-sends-idempotency-key-per-submission.md) | The operator MFE sends an Idempotency-Key per order submission | Accepted |
 
 Each of these reconstructs a decision that is actually visible in this
 repository's `CLAUDE.md` and code — none is a generic placeholder.

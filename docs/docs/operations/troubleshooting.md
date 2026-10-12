@@ -58,7 +58,7 @@ Optimistic concurrency surfaces as `409 concurrent-modification`.
 | 400 | `malformed-request-body` | Body is not valid JSON. | Fix the client. |
 | 400 | `order-without-lines`, `empty-sku`, `empty-order-id`, `empty-path-id`, `order-line-not-found` | Validation in the adapter or domain. | Fix the request. |
 | 400 | `unknown-process-path` | The path chosen for a line is not active in the process-path catalogue (`PATH_CATALOGUE_SOURCE=kafka`). | Check process-path-management's catalogue for a deactivated path. |
-| 400 | `idempotency-key-required` | `POST /orders` without `Idempotency-Key` while `DATABASE_URL` is set. | Send a fresh key per new order. The operator MFE (`web/src/api.ts`) does not send one, and `CORS_ALLOWED_ORIGINS` does not allow the header, so order entry from the MFE fails against a Postgres-backed service. |
+| 400 | `idempotency-key-required` | `POST /orders` without `Idempotency-Key` while `DATABASE_URL` is set. | Send a fresh key per new order. The operator MFE sends one per submission (ADR 0038) and CORS allows the header; if the MFE still gets this, it is running an old `web/` build. |
 | 400 | `invalid-query-parameter` | `GET /planned-capacity` without `site`, or with a `from` that is not RFC 3339. | Fix the query. |
 | 404 | `order-not-found` | Unknown id. In-memory mode loses every order on restart. | Check the id and `DATABASE_URL`. |
 | 404 (no problem body) | n/a | `GET /planned-capacity` while `PLANNED_CAPACITY_CONSUMER_GROUP` is unset: the route is not registered. | Set the group. |

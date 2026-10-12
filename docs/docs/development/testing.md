@@ -180,9 +180,13 @@ flags a known-bad fixture.
 
 ## Frontend (`web/`)
 
-Vitest tests (`src/config.test.ts`, `src/screens/OrderManagementScreen.test.tsx`
-with an MSW mock server) run in the `web` CI job together with lint,
-`tsc -b` and the production build. They are not part of `make check`.
+Vitest tests (`src/config.test.ts`, `src/api.test.ts`,
+`src/screens/OrderManagementScreen.test.tsx`, with an MSW mock server) run in
+the `web` CI job together with lint, `tsc -b` and the production build. They
+are not part of `make check`. `api.test.ts` and four screen cases pin the
+`Idempotency-Key` contract of ADR 0038 (a UUID per submission, reused when
+the request got no answer, new after an answer or an edit);
+`TestCORS_PreflightAllowsIdempotencyKey` pins the CORS side.
 
 The chart has a selector test, `python3
 charts/order-management/tests/test_service_selectors.py`, which proves

@@ -372,6 +372,10 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 // Authorization header — nothing reads it. CORS_ALLOWED_ORIGINS
 // overrides the local-dev default (comma-separated) for staging/prod
 // deployments.
+//
+// "Idempotency-Key" is allowed because the operator MFE sends one on every
+// POST /orders (ADR 0038; the service requires it with Postgres, ADR 0023):
+// without it the browser's preflight fails and the POST is never sent.
 func corsMiddleware() func(http.Handler) http.Handler {
 	origins := []string{"http://localhost:5173", "http://localhost:5181"}
 	if v := os.Getenv("CORS_ALLOWED_ORIGINS"); v != "" {
@@ -380,7 +384,7 @@ func corsMiddleware() func(http.Handler) http.Handler {
 	return cors.Handler(cors.Options{
 		AllowedOrigins:   origins,
 		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete},
-		AllowedHeaders:   []string{"Content-Type", "Authorization"},
+		AllowedHeaders:   []string{"Content-Type", "Authorization", "Idempotency-Key"},
 		AllowCredentials: false,
 		MaxAge:           300,
 	})

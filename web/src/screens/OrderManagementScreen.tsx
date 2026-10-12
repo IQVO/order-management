@@ -1,6 +1,6 @@
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
 import { Card, StatusPill } from "@warehouse/ui-kit";
-import { apiDelete, apiGet, apiPost, ApiError } from "../api";
+import { apiDelete, apiGet, apiPost, ApiError, newIdempotencyKey } from "../api";
 import type { Order, ReceiveOrderLineRequest } from "../types";
 import {
   CheckboxField,
@@ -51,17 +51,36 @@ export function OrderManagementScreen() {
   const [placing, setPlacing] = useState(false);
   const [placeError, setPlaceError] = useState<string | null>(null);
   const [placedOrder, setPlacedOrder] = useState<Order | null>(null);
+  // Idempotency-Key of the CURRENT submission (ADR 0038, server side ADR
+  // 0023). Minted on the first click and kept while the outcome is unknown
+  // (no response arrived), so a retry cannot create a second order. Dropped
+  // once the service answers, or when the form is edited -- an edited form
+  // is a different request, and reusing the key with a different body is
+  // answered 422 idempotency-key-reused.
+  const submissionKey = useRef<string | null>(null);
+
+  function startNewSubmission() {
+    submissionKey.current = null;
+  }
 
   function updateLine(index: number, patch: Partial<DraftLine>) {
+    startNewSubmission();
     setLines((prev) => prev.map((l, i) => (i === index ? { ...l, ...patch } : l)));
   }
 
   function addLine() {
+    startNewSubmission();
     setLines((prev) => [...prev, emptyLine()]);
   }
 
   function removeLine(index: number) {
+    startNewSubmission();
     setLines((prev) => (prev.length > 1 ? prev.filter((_, i) => i !== index) : prev));
+  }
+
+  function onAllowPartialShipmentChange(value: boolean) {
+    startNewSubmission();
+    setAllowPartialShipment(value);
   }
 
   async function onPlaceOrder(e: FormEvent) {
@@ -69,20 +88,29 @@ export function OrderManagementScreen() {
     setPlaceError(null);
     setPlacedOrder(null);
     setPlacing(true);
+    const idempotencyKey = (submissionKey.current ??= newIdempotencyKey());
     try {
       const requestLines: ReceiveOrderLineRequest[] = lines.map((l) => ({
         sku: l.sku.trim(),
         quantity: Number(l.quantity),
         giftWrap: l.giftWrap,
       }));
-      const order = await apiPost<Order>("/orders", {
-        lines: requestLines,
-        allowPartialShipment,
-      });
+      const order = await apiPost<Order>(
+        "/orders",
+        { lines: requestLines, allowPartialShipment },
+        { idempotencyKey },
+      );
+      startNewSubmission();
       setPlacedOrder(order);
       setLines([emptyLine()]);
       setAllowPartialShipment(false);
     } catch (err) {
+      // The service answered: that outcome is final AND cached under this
+      // key (ADR 0023 caches every normal response, 5xx included), so
+      // resending the key would only replay it. A retry becomes a new
+      // submission. When no answer arrived (fetch threw), the order may or
+      // may not exist, so the key is kept for the retry.
+      if (err instanceof ApiError) startNewSubmission();
       setPlaceError(err instanceof ApiError ? err.message : "Failed to place order.");
     } finally {
       setPlacing(false);
@@ -204,7 +232,7 @@ export function OrderManagementScreen() {
           <CheckboxField
             label="Allow partial shipment"
             checked={allowPartialShipment}
-            onChange={setAllowPartialShipment}
+            onChange={onAllowPartialShipmentChange}
           />
           <div>
             <SubmitButton disabled={!canSubmitPlace}>

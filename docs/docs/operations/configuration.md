@@ -37,7 +37,7 @@ Sources live in `cmd/order/` unless stated otherwise.
 | `HTTP_ADDR` | `:8080` | no | Listen address of the REST API. | `main.go`, `http.go` |
 | `LOG_LEVEL` | `info` | no | `debug`, `info`, `warn` or `error` (case-insensitive). Anything else means `info`. Logs are JSON on stdout. | `main.go`, `config.go` (`newLogger`) |
 | `SHUTDOWN_DRAIN_DELAY` | `5s` | no | How long to wait after `/readyz` turns `503` before the listener closes (ADR 0025). `0` disables the wait. A negative or invalid value logs a warning and uses `5s`. | `shutdown.go` |
-| `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:5181` | no | Comma-separated browser origins allowed to call the API: the console shell's and this repo's MFE dev ports (ADR 0007). Allowed headers are `Content-Type` and `Authorization` only. | `internal/adapters/inbound/http/server.go` |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:5181` | no | Comma-separated browser origins allowed to call the API: the console shell's and this repo's MFE dev ports (ADR 0007). Allowed headers are `Content-Type`, `Authorization` and `Idempotency-Key` (the MFE sends the last one on `POST /orders`, ADR 0038). | `internal/adapters/inbound/http/server.go` |
 
 ### Persistence
 
