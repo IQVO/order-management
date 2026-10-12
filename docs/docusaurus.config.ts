@@ -72,8 +72,20 @@ const config: Config = {
               categoryLinkSource: 'tag',
             },
             hideSendButton: true,
-          } satisfies OpenApiPlugin.Options,
-        },
+          },
+          orderReports: {
+            // The read-only analytical surface served by cmd/order-reports
+            // (ADR 0006, ADR 0039) — a SEPARATE spec from the OLTP API above,
+            // generated into its own output dir so the two never collide.
+            specPath: '../apis/openapi-reports.yaml',
+            outputDir: 'docs/api-reference/rest-reports',
+            sidebarOptions: {
+              groupPathsBy: 'tag',
+              categoryLinkSource: 'tag',
+            },
+            hideSendButton: true,
+          },
+        } satisfies Record<string, OpenApiPlugin.Options>,
       },
     ],
   ],
@@ -100,6 +112,11 @@ const config: Config = {
         {
           to: '/docs/api-reference/rest/order-management-api',
           label: 'API Reference',
+          position: 'left',
+        },
+        {
+          to: '/docs/api-reference/rest-reports/order-management-reports-api',
+          label: 'Reports API',
           position: 'left',
         },
         {
@@ -142,6 +159,7 @@ const config: Config = {
           items: [
             {label: 'GitHub repository', href: 'https://github.com/IQVO/order-management'},
             {label: 'OpenAPI spec', href: 'https://github.com/IQVO/order-management/blob/main/apis/openapi.yaml'},
+            {label: 'Reports OpenAPI spec', href: 'https://github.com/IQVO/order-management/blob/main/apis/openapi-reports.yaml'},
           ],
         },
       ],

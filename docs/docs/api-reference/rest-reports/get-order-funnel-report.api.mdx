@@ -1,0 +1,73 @@
+---
+id: get-order-funnel-report
+title: "Order funnel and allocation health per process path and UTC hour"
+description: "Returns one row per (pathId, hour bucket) in the half-open window [from, to), ordered by hour bucket then path. An empty window is a 200 with an empty `rows` array, not a 404."
+sidebar_label: "Order funnel and allocation health per process path and UTC hour"
+hide_title: true
+hide_table_of_contents: true
+api: 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
+sidebar_class_name: "get api-method"
+info_path: docs/api-reference/rest-reports/order-management-reports-api
+custom_edit_url: null
+hide_send_button: true
+---
+
+import MethodEndpoint from "@theme/ApiExplorer/MethodEndpoint";
+import ParamsDetails from "@theme/ParamsDetails";
+import RequestSchema from "@theme/RequestSchema";
+import StatusCodes from "@theme/StatusCodes";
+import OperationTabs from "@theme/OperationTabs";
+import TabItem from "@theme/TabItem";
+import Heading from "@theme/Heading";
+import Translate from "@docusaurus/Translate";
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"Order funnel and allocation health per process path and UTC hour"}
+>
+</Heading>
+
+<MethodEndpoint
+  method={"get"}
+  path={"/reports/funnel"}
+  context={"endpoint"}
+>
+  
+</MethodEndpoint>
+
+
+
+Returns one row per (pathId, hour bucket) in the half-open window [from, to), ordered by hour bucket then path. An empty window is a 200 with an empty `rows` array, not a 404.
+
+Order-level counters are attributed to the order's first line's path (an approximation since multi-path routing, ADR 0021). `ordersRepromised` is not path-dimensioned and is only ever non-zero on the row whose `pathId` is the empty string.
+
+
+<Heading
+  id={"request"}
+  as={"h2"}
+  className={"openapi-tabs__heading"}
+>
+  <Translate id="theme.openapi.request.title">Request</Translate>
+</Heading>
+
+<ParamsDetails
+  {...require("./get-order-funnel-report.ParamsDetails.json")}
+>
+  
+</ParamsDetails>
+
+<RequestSchema
+  {...require("./get-order-funnel-report.RequestSchema.json")}
+>
+  
+</RequestSchema>
+
+<StatusCodes
+  {...require("./get-order-funnel-report.StatusCodes.json")}
+>
+  
+</StatusCodes>
+
+
+      

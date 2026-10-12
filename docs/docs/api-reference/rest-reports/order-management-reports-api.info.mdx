@@ -1,0 +1,60 @@
+---
+id: order-management-reports-api
+title: "Order Management Reports API"
+description: "The READ-ONLY analytical surface of order-management's 'Order Funnel & Allocation Health' data product (ADR 0006), served by the separate `cmd/order-reports` binary over a read-only Postgres pool against the analytical database. It is NOT the OLTP `cmd/order` API documented in apis/openapi.yaml: a different binary, port and database (ADR 0039)."
+sidebar_label: Introduction
+sidebar_position: 0
+hide_title: true
+custom_edit_url: null
+---
+
+import ApiLogo from "@theme/ApiLogo";
+import Heading from "@theme/Heading";
+import SchemaTabs from "@theme/SchemaTabs";
+import TabItem from "@theme/TabItem";
+import Export from "@theme/ApiExplorer/Export";
+
+<span
+  className={"theme-doc-version-badge badge badge--secondary"}
+  children={"Version: 1.0.0"}
+>
+</span>
+
+<Heading
+  as={"h1"}
+  className={"openapi__heading"}
+  children={"Order Management Reports API"}
+>
+</Heading>
+
+
+
+The READ-ONLY analytical surface of order-management's "Order Funnel & Allocation Health" data product (ADR 0006), served by the separate `cmd/order-reports` binary over a read-only Postgres pool against the analytical database. It is NOT the OLTP `cmd/order` API documented in apis/openapi.yaml: a different binary, port and database (ADR 0039).
+
+The report is a projection over this service's own domain events, delivered as CloudEvents 1.0 on the `warehouse.order-management.analytics` topic and applied by `cmd/order-projector`, the single writer. It is EVENTUALLY CONSISTENT, to a freshness target of p95 event-to-report lag under 30 seconds: read GET /reports/funnel/freshness to see how far the read model trails the event stream.
+
+Rows are keyed by process path (`pathId`) and UTC hour bucket. Every counter is a count of events in that bucket. No route requires authentication (ADR 0012). Errors use RFC 7807 problem details (`application/problem+json`).
+
+
+<div
+  style={{"display":"flex","flexDirection":"column","marginBottom":"var(--ifm-paragraph-margin-bottom)"}}
+>
+  <h3
+    style={{"marginBottom":"0.25rem"}}
+  >
+    Contact
+  </h3><span>
+    Order Management (Generic/Supporting Bounded Context): 
+  </span><span>
+    URL: [https://github.com/IQVO/order-management](https://github.com/IQVO/order-management)
+  </span>
+</div><div
+  style={{"marginBottom":"var(--ifm-paragraph-margin-bottom)"}}
+>
+  <h3
+    style={{"marginBottom":"0.25rem"}}
+  >
+    License
+  </h3>
+</div>
+      
