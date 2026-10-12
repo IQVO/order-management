@@ -33,12 +33,19 @@ type Sink interface {
 // order within one relay pass and FOR UPDATE SKIP LOCKED keeps two
 // relays (a rolling deploy's overlapping old and new pod) from claiming
 // the same row.
+//
+// A row that keeps failing is capped by WithMaxAttempts (ADR 0040): once
+// it has failed that many times it is excluded from future claims, so one
+// poison row cannot stop the whole relay forever. Such a row stays in
+// outbox_events with its attempts and last_error for inspection; later
+// rows with the same key overtake it (the documented price of the cap).
 type OutboxRelay struct {
-	pool      *pgxpool.Pool
-	sink      Sink
-	logger    *slog.Logger
-	interval  time.Duration
-	batchSize int
+	pool        *pgxpool.Pool
+	sink        Sink
+	logger      *slog.Logger
+	interval    time.Duration
+	batchSize   int
+	maxAttempts int
 }
 
 // RelayOption customises an OutboxRelay.
@@ -53,6 +60,16 @@ func WithInterval(d time.Duration) RelayOption {
 // WithBatchSize caps how many rows one pass claims. Default 100.
 func WithBatchSize(n int) RelayOption {
 	return func(r *OutboxRelay) { r.batchSize = n }
+}
+
+// WithMaxAttempts caps how many failed sends a row may accumulate before
+// the relay stops claiming it. The default 0 means unlimited retries (the
+// pre-cap behaviour). A row that reaches the cap is left unpublished in
+// outbox_events with attempts and last_error, logged once at ERROR with
+// its id, topic, event type and key, and re-armed by an operator with
+// `UPDATE outbox_events SET attempts = 0 WHERE id = ...` (ADR 0040).
+func WithMaxAttempts(n int) RelayOption {
+	return func(r *OutboxRelay) { r.maxAttempts = n }
 }
 
 // NewOutboxRelay constructs a relay draining pool into sink.
@@ -109,7 +126,7 @@ func (r *OutboxRelay) RelayOnce(ctx context.Context) (int, error) {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	batch, err := claimOutboxRows(ctx, tx, r.batchSize)
+	batch, err := claimOutboxRows(ctx, tx, r.batchSize, r.maxAttempts)
 	if err != nil {
 		return 0, err
 	}
@@ -117,16 +134,18 @@ func (r *OutboxRelay) RelayOnce(ctx context.Context) (int, error) {
 }
 
 // claimOutboxRows selects up to batchSize unpublished rows under a row
-// lock, in id order, and decodes them for sending.
-func claimOutboxRows(ctx context.Context, tx pgx.Tx, batchSize int) ([]pendingRow, error) {
+// lock, in id order, and decodes them for sending. With maxAttempts > 0 a
+// row that already failed maxAttempts times is no longer claimed.
+func claimOutboxRows(ctx context.Context, tx pgx.Tx, batchSize, maxAttempts int) ([]pendingRow, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT id, topic, event_type, key, value, headers
 		FROM outbox_events
 		WHERE published_at IS NULL
+		  AND ($2::int <= 0 OR attempts < $2::int)
 		ORDER BY id
 		LIMIT $1
 		FOR UPDATE SKIP LOCKED
-	`, batchSize)
+	`, batchSize, maxAttempts)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: claim outbox rows: %w", err)
 	}
@@ -162,7 +181,7 @@ func (r *OutboxRelay) publishBatch(ctx context.Context, tx pgx.Tx, batch []pendi
 	published := 0
 	for _, p := range batch {
 		if err := r.sink.Send(ctx, p.enc); err != nil {
-			return published, recordSendFailure(ctx, tx, p, err)
+			return published, r.recordSendFailure(ctx, tx, p, err)
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE outbox_events SET published_at = now(), attempts = attempts + 1, last_error = NULL WHERE id = $1
@@ -182,15 +201,23 @@ func (r *OutboxRelay) publishBatch(ctx context.Context, tx pgx.Tx, batch []pendi
 
 // recordSendFailure logs the send error on the failed row and commits the
 // pass so earlier rows keep their published marks, wrapping every
-// bookkeeping failure around the original send error.
-func recordSendFailure(ctx context.Context, tx pgx.Tx, p pendingRow, err error) error {
-	if _, uerr := tx.Exec(ctx, `
-		UPDATE outbox_events SET attempts = attempts + 1, last_error = $2 WHERE id = $1
-	`, p.id, err.Error()); uerr != nil {
+// bookkeeping failure around the original send error. When this failure
+// brings the row to the attempt cap, the row is reported once at ERROR:
+// from the next pass on it is no longer claimed.
+func (r *OutboxRelay) recordSendFailure(ctx context.Context, tx pgx.Tx, p pendingRow, err error) error {
+	var attempts int
+	if uerr := tx.QueryRow(ctx, `
+		UPDATE outbox_events SET attempts = attempts + 1, last_error = $2 WHERE id = $1 RETURNING attempts
+	`, p.id, err.Error()).Scan(&attempts); uerr != nil {
 		err = errors.Join(err, fmt.Errorf("postgres: record outbox failure: %w", uerr))
 	}
 	if cerr := tx.Commit(ctx); cerr != nil {
 		err = errors.Join(err, fmt.Errorf("postgres: commit relay pass: %w", cerr))
+	} else if r.maxAttempts > 0 && attempts >= r.maxAttempts {
+		r.logger.ErrorContext(ctx, "outbox relay: row reached the attempt cap and is no longer claimed",
+			"outbox_id", p.id, "topic", p.enc.Topic, "event_type", p.enc.EventType, "key", string(p.enc.Key),
+			"attempts", attempts, "max_attempts", r.maxAttempts, "error", err,
+			"rearm", "UPDATE outbox_events SET attempts = 0 WHERE id = <outbox_id>")
 	}
 	return fmt.Errorf("outbox relay: send %s (row %d) to %s: %w", p.enc.EventType, p.id, p.enc.Topic, err)
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +44,30 @@ func durationEnv(key string, fallback time.Duration, logger *slog.Logger) time.D
 	}
 	return d
 }
+
+// nonNegativeIntEnv reads a non-negative integer from key, falling back to
+// fallback for an unset value and, with a warning, for an unparseable or
+// negative one. 0 is a valid value (OUTBOX_MAX_ATTEMPTS uses it for
+// "unlimited").
+func nonNegativeIntEnv(key string, fallback int, logger *slog.Logger) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n < 0 {
+		logger.Warn("ignoring invalid integer env var", "key", key, "value", raw, "fallback", fallback)
+		return fallback
+	}
+	return n
+}
+
+// outboxMaxAttemptsEnv caps how many failed sends an outbox row may
+// accumulate before the relay stops claiming it (ADR 0040). 0 = unlimited.
+const (
+	outboxMaxAttemptsEnv     = "OUTBOX_MAX_ATTEMPTS"
+	defaultOutboxMaxAttempts = 20
+)
 
 // perPathLeadTimes parses PROMISE_PATH_LEAD_TIMES, a comma-separated list
 // of pathId=duration pairs (e.g. "pick=24h,singles=6h"). Malformed entries

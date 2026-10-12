@@ -169,6 +169,12 @@ order. The relay runs inside `cmd/order`:
 - on the first send failure it records `attempts` and `last_error` on
   that row and **stops the pass**, so a later row never overtakes an
   earlier one. The same row is retried on the next pass;
+- a row that has failed `OUTBOX_MAX_ATTEMPTS` times (default 20, `0` =
+  unlimited, ADR 0040) is no longer claimed: the relay logs
+  `outbox relay: row reached the attempt cap and is no longer claimed` at
+  ERROR once, with `outbox_id`, `topic`, `event_type` and `key`, and later
+  rows (including later rows with the same key) publish past it. The row
+  stays in `outbox_events` for inspection and is never swept;
 - delivery is at least once: a crash between send and the `UPDATE`
   re-sends the row. Consumers dedupe on the CloudEvents `id`, which is
   stored in the row and identical on redelivery.
@@ -246,20 +252,33 @@ These routes are not in `apis/openapi.yaml`. The full field list is on
 
 ### Re-publish events stuck in the outbox
 
-The relay retries unpublished rows forever; there is nothing to
-re-trigger. To see what is stuck:
+The relay retries an unpublished row until it has failed
+`OUTBOX_MAX_ATTEMPTS` times (default 20, ADR 0040); after that the row is
+parked and no longer claimed. To see what is stuck or parked:
 
 ```sql
-SELECT id, topic, event_type, attempts, last_error, created_at
+SELECT id, topic, event_type, key, attempts, last_error, created_at
 FROM outbox_events
 WHERE published_at IS NULL
 ORDER BY id
 LIMIT 20;
 ```
 
-Fix the cause shown in `last_error` (usually broker reachability). Do not
-set `published_at` by hand unless you have decided to drop that event: it
-is the only copy.
+Rows with `attempts` at or above `OUTBOX_MAX_ATTEMPTS` are parked (the
+relay also logged `outbox relay: row reached the attempt cap and is no
+longer claimed` for each). Fix the cause shown in `last_error` (broker
+reachability, a message over the broker's size limit, a topic that cannot
+be created), then re-arm the row so the next relay pass claims it again:
+
+```sql
+UPDATE outbox_events SET attempts = 0 WHERE id = 12345;
+-- after a broker outage that parked many rows:
+UPDATE outbox_events SET attempts = 0 WHERE published_at IS NULL AND attempts >= 20;
+```
+
+A re-armed row publishes AFTER the later rows that overtook it, so a
+consumer sees that event out of order. Do not set `published_at` by hand
+unless you have decided to drop that event: it is the only copy.
 
 ### Replay a dead-lettered message
 
