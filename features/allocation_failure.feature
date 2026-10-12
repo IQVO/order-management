@@ -19,4 +19,5 @@ Feature: Fail-closed allocation
     And an order is placed for SKUs "SKU-BOOK-0001"
     And inventory-storage is unreachable
     When the order is retried for allocation
-    Then the request is rejected with status 500
+    Then the request is rejected with status 503
+    And the problem detail type is "downstream-unavailable"

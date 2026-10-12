@@ -41,11 +41,6 @@ const (
 	inventoryOK inventoryMode = iota
 	inventoryInsufficient
 	inventoryUnreachable
-	// inventoryServerError is the same hard failure as inventoryUnreachable
-	// but wrapped the way the real HTTP client wraps a transport/5xx
-	// failure (ports.ErrDownstreamUnavailable), so the inbound adapter can
-	// map it to the documented 503.
-	inventoryServerError
 )
 
 // fakeInventory is a scripted ports.InventoryReservationClient: per-SKU
@@ -90,9 +85,10 @@ func (f *fakeInventory) Reserve(_ context.Context, req ports.ReservationRequest)
 		return ports.ReservationResult{}, ports.ErrInsufficientStock
 	case inventoryUnreachable:
 		// A transport/5xx failure: NOT a business fact, never a backorder.
-		return ports.ReservationResult{}, fmt.Errorf("inventory-storage: connection refused")
-	case inventoryServerError:
-		return ports.ReservationResult{}, fmt.Errorf("%w: inventory-storage: unexpected response status: 500", ports.ErrDownstreamUnavailable)
+		// Wrapped in ports.ErrDownstreamUnavailable exactly as the real
+		// inventorystorage client wraps it, so the inbound adapter maps it
+		// to the documented 503 rather than a generic 500.
+		return ports.ReservationResult{}, fmt.Errorf("%w: inventory-storage: connection refused", ports.ErrDownstreamUnavailable)
 	default:
 		f.nextID++
 		return ports.ReservationResult{ReservationID: fmt.Sprintf("res-bdd-%d", f.nextID)}, nil
