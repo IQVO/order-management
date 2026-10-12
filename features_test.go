@@ -41,6 +41,11 @@ const (
 	inventoryOK inventoryMode = iota
 	inventoryInsufficient
 	inventoryUnreachable
+	// inventoryServerError is the same hard failure as inventoryUnreachable
+	// but wrapped the way the real HTTP client wraps a transport/5xx
+	// failure (ports.ErrDownstreamUnavailable), so the inbound adapter can
+	// map it to the documented 503.
+	inventoryServerError
 )
 
 // fakeInventory is a scripted ports.InventoryReservationClient: per-SKU
@@ -51,6 +56,8 @@ type fakeInventory struct {
 	modes   map[string]inventoryMode
 	nextID  int
 	revoked map[string]string // reservation id -> sku
+	// revokeErr, when set, makes every RevokeReservation fail with it.
+	revokeErr error
 }
 
 func newFakeInventory() *fakeInventory {
@@ -84,6 +91,8 @@ func (f *fakeInventory) Reserve(_ context.Context, req ports.ReservationRequest)
 	case inventoryUnreachable:
 		// A transport/5xx failure: NOT a business fact, never a backorder.
 		return ports.ReservationResult{}, fmt.Errorf("inventory-storage: connection refused")
+	case inventoryServerError:
+		return ports.ReservationResult{}, fmt.Errorf("%w: inventory-storage: unexpected response status: 500", ports.ErrDownstreamUnavailable)
 	default:
 		f.nextID++
 		return ports.ReservationResult{ReservationID: fmt.Sprintf("res-bdd-%d", f.nextID)}, nil
@@ -93,6 +102,9 @@ func (f *fakeInventory) Reserve(_ context.Context, req ports.ReservationRequest)
 func (f *fakeInventory) RevokeReservation(_ context.Context, reservationID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.revokeErr != nil {
+		return f.revokeErr
+	}
 	// Record it so a scenario can assert WHICH reservations a
 	// cancellation actually revoked.
 	f.revoked[reservationID] = ""
@@ -141,6 +153,12 @@ type world struct {
 	planned      *memory.PlannedCapacityRepo
 	plannedApply *usecases.ApplyPlannedCapacity
 	planSeq      int
+
+	// receive, retry and release are the wired use cases, kept so a Given
+	// step can swap in a different promise policy (features_wave2_test.go).
+	receive *usecases.ReceiveOrder
+	retry   *usecases.RetryAllocation
+	release *usecases.ReleaseHeldOrder
 }
 
 func (w *world) reset() {
@@ -157,10 +175,14 @@ func (w *world) reset() {
 	w.plannedApply = &usecases.ApplyPlannedCapacity{Windows: w.planned, Processed: memory.NewPlannedCapacityProcessedEventsRepo()}
 	w.planSeq = 0
 
+	w.receive = &usecases.ReceiveOrder{Orders: orders, Events: w.publisher, Clock: clock, Inventory: w.inventory, Promise: promise}
+	w.retry = &usecases.RetryAllocation{Orders: orders, Inventory: w.inventory, Events: w.publisher, Clock: clock, Promise: promise}
+	w.release = &usecases.ReleaseHeldOrder{Orders: orders, Inventory: w.inventory, Events: w.publisher, Clock: clock, Promise: promise}
+
 	server := &inboundhttp.Server{
-		ReceiveOrder:    &usecases.ReceiveOrder{Orders: orders, Events: w.publisher, Clock: clock, Inventory: w.inventory, Promise: promise},
-		RetryAllocation: &usecases.RetryAllocation{Orders: orders, Inventory: w.inventory, Events: w.publisher, Clock: clock, Promise: promise},
-		ReleaseHeld:     &usecases.ReleaseHeldOrder{Orders: orders, Inventory: w.inventory, Events: w.publisher, Clock: clock, Promise: promise},
+		ReceiveOrder:    w.receive,
+		RetryAllocation: w.retry,
+		ReleaseHeld:     w.release,
 		CancelOrder:     &usecases.CancelOrder{Orders: orders, Inventory: w.inventory, Events: w.publisher, Clock: clock},
 		GetOrder:        &usecases.GetOrder{Orders: orders},
 		// Planned capacity (ADR 0031) is wired for every scenario: with no
@@ -649,6 +671,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Step(`^no new "([^"]*)" event was published$`, w.noNewEventWasPublished)
 
 	registerPlannedCapacitySteps(sc, w)
+	registerWave2Steps(sc, w)
 }
 
 // TestFeatures runs the Gherkin acceptance suite under features/.
