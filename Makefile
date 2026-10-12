@@ -45,7 +45,7 @@ help:
 	@echo "  mutation      Exhaustive mutation run over the whole domain layer (slow)"
 	@echo "  vuln          Known CVEs in the dependency graph and the Go stdlib"
 	@echo "  contract      scripts/contract-test.sh — Schemathesis vs apis/openapi.yaml"
-	@echo "  chart-test    Helm chart selector/probe tests (helm + PyYAML)"
+	@echo "  chart-test    Helm chart render/selector/probe tests (helm + PyYAML)"
 	@echo ""
 	@echo "  check       FAST bundle: fmt-check vet build lint test"
 	@echo "  check-all   check + coverage + arch-test + bdd — run this before pushing"
@@ -135,9 +135,10 @@ vuln:
 contract:
 	./scripts/contract-test.sh
 
-# Helm chart selector/probe tests — mirrors the `chart-tests` CI job. Needs
-# helm and Python 3 with PyYAML on PATH.
+# Helm chart render, selector and probe tests — mirrors the `chart-tests` CI
+# job. Needs helm and Python 3 with PyYAML on PATH.
 chart-test:
+	bash charts/order-management/tests/render_test.sh
 	python3 charts/order-management/tests/test_service_selectors.py
 
 # The fast self-correction loop: run this after every change, before committing.

@@ -141,6 +141,9 @@ autoscaling:
     maxReplicas: 3
     targetCPUUtilizationPercentage: 70
 
+# Every key below is rendered into templates/configmap.yaml and reaches
+# cmd/order through the api Deployment's `envFrom: configMapRef` (gap fix
+# D14); explicit env/extraEnv entries win for the same key.
 config:
   httpAddr: ":8080"
   eventPublisher: "log"   # "log" or "kafka" — gates the outbound domain-event publisher only
@@ -158,6 +161,15 @@ config:
   housekeepingInterval: "1h"
   idempotencyKeyTtl: "24h"
   outboxRetention: "168h"
+  # OUTBOX_RELAY_INTERVAL: how long the outbox relay sleeps after a pass
+  # that found nothing to publish (the binary's default).
+  outboxRelayInterval: "1s"
+  # OUTBOX_MAX_ATTEMPTS (ADR 0040): after this many failed sends an outbox
+  # row is no longer claimed, so one poison row cannot stop the relay
+  # forever. It stays in outbox_events (attempts, last_error) and is logged
+  # at ERROR; re-arm it with
+  # `UPDATE outbox_events SET attempts = 0 WHERE id = ...`. "0" = unlimited.
+  outboxMaxAttempts: "20"
 
 database:
   url: ""

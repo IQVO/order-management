@@ -39,7 +39,7 @@ Source: `features/*.feature`, `**/*_test.go`, `.github/workflows/ci.yml`, `Makef
 | `make mutation-fast` | `gremlins unleash ./internal/domain/order` | `gremlins` v0.6.0 |
 | `make mutation` | `gremlins unleash ./internal/domain --workers 1 --timeout-coefficient 30` | `gremlins` v0.6.0; slow |
 | `make vuln` | `govulncheck ./...` | `govulncheck` |
-| `make chart-test` | `python3 charts/order-management/tests/test_service_selectors.py` | `helm`, Python 3 with PyYAML |
+| `make chart-test` | `bash charts/order-management/tests/render_test.sh` then `python3 charts/order-management/tests/test_service_selectors.py` | `helm`, Python 3 with PyYAML |
 | `make check` | `fmt-check vet build lint test` | `golangci-lint` v2.13.1 |
 | `make check-all` | `check coverage arch-test bdd` | as above |
 | `make check-fast` | `fmt-check vet arch-test` plus the tests of packages changed against `HEAD` | used by the agent Stop hook |
@@ -194,7 +194,21 @@ charts/order-management/tests/test_service_selectors.py` (`make chart-test`),
 which proves each Service selects exactly one Deployment and that the
 startupProbe outlasts the boot retry budget. The `chart-tests` CI job runs it
 on every push and PR with Helm v3.16.4 and PyYAML; without PyYAML the script
-fails instead of skipping.
+fails instead of skipping. Before it, the same job runs
+`charts/order-management/tests/render_test.sh` (helm only), which asserts
+the api Deployment mounts the chart ConfigMap with `envFrom` (gap fix D14),
+that `config.outboxRelayInterval` and `config.outboxMaxAttempts` reach it
+(default `OUTBOX_MAX_ATTEMPTS` `20`, ADR 0040), that the housekeeping keys
+render only with a database, and that the projector, reports and MCP
+Deployments do not mount it.
+
+The outbox relay attempt cap (ADR 0040) is pinned by
+`TestOutboxRelay_MaxAttempts_PoisonRowIsExcludedAndTheNextRowPublishes` and
+`TestOutboxRelay_WithoutMaxAttempts_RetriesWithoutBound` (testcontainers
+Postgres, `internal/adapters/outbound/postgres/outbox_integration_test.go`),
+`TestOutboxMaxAttemptsFromEnv` (`cmd/order`), and the architecture fitness
+test `TestOutboxRelayCallsSetMaxAttempts`, which fails when a file under
+`cmd/` builds a relay without `WithMaxAttempts`.
 
 ## CI jobs (`.github/workflows/ci.yml`)
 
@@ -214,7 +228,7 @@ fails instead of skipping.
 | `arch-test` | `go test ./internal/architecture/... -v` | every push and PR |
 | `docs-api-drift` | regenerates `docs/docs/api-reference/rest` and fails on any change | every push and PR |
 | `web` | MFE lint, typecheck, test, build | every push and PR |
-| `chart-tests` | `charts/order-management/tests/test_service_selectors.py` (Helm v3.16.4, PyYAML) | every push and PR |
+| `chart-tests` | `charts/order-management/tests/render_test.sh` and `test_service_selectors.py` (Helm v3.16.4, PyYAML) | every push and PR |
 | `mutation` | full-domain gremlins; opens or closes a `harness:red` issue | schedule (Mondays 06:00 UTC) and manual dispatch |
 | `drift` | deadcode, `go mod tidy -diff`, knip, coverage quality | schedule and manual dispatch |
 | `helm-lint`, `trivy-scan` | chart-testing lint; image scan | PRs into `main` only |

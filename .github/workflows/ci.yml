@@ -454,6 +454,9 @@ jobs:
   # default, and the startupProbe outlasts the boot retry budget. It
   # existed but no job ran it (fleet gap-fix D25). PyYAML is installed
   # explicitly: without it the script fails rather than skips.
+  # charts/order-management/tests/render_test.sh asserts the api
+  # Deployment mounts the chart ConfigMap via envFrom (gap fix D14) and
+  # renders the outbox relay attempt cap (D12, ADR 0040).
   # ============================================================
   chart-tests:
     runs-on: ubuntu-latest
@@ -468,6 +471,8 @@ jobs:
           python-version: "3.13"
       - name: Install PyYAML (pinned)
         run: python3 -m pip install "pyyaml==6.0.3"
+      - name: Chart render assertions (envFrom ConfigMap mount, outbox cap)
+        run: bash charts/order-management/tests/render_test.sh
       - name: Chart selector and probe tests
         run: python3 charts/order-management/tests/test_service_selectors.py
 

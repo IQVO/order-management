@@ -4,9 +4,23 @@ metadata:
   name: {{ include "order-management.fullname" . }}
   labels:
     {{- include "order-management.labels" . | nindent 4 }}
+# Mounted by the api Deployment (cmd/order) with `envFrom: configMapRef`
+# (gap fix D14): every key below is read by cmd/order. Explicit `env`
+# entries in deployment.yaml win over the same key here. The analytics,
+# reports and MCP Deployments do NOT mount it: they read their own env.
 data:
   HTTP_ADDR: {{ .Values.config.httpAddr | quote }}
   EVENT_PUBLISHER: {{ .Values.config.eventPublisher | quote }}
+  SHUTDOWN_DRAIN_DELAY: {{ .Values.config.shutdownDrainDelay | quote }}
+  OUTBOX_RELAY_INTERVAL: {{ .Values.config.outboxRelayInterval | quote }}
+  # ADR 0040: failed sends after which the relay stops claiming an outbox
+  # row. "0" = unlimited.
+  OUTBOX_MAX_ATTEMPTS: {{ .Values.config.outboxMaxAttempts | quote }}
+  {{- if or .Values.database.url .Values.database.existingSecret }}
+  HOUSEKEEPING_INTERVAL: {{ .Values.config.housekeepingInterval | quote }}
+  IDEMPOTENCY_KEY_TTL: {{ .Values.config.idempotencyKeyTtl | quote }}
+  OUTBOX_RETENTION: {{ .Values.config.outboxRetention | quote }}
+  {{- end }}
   {{- if or (eq .Values.config.eventPublisher "kafka") .Values.plannedCapacity.consumerGroup .Values.productClassification.consumerGroup }}
   KAFKA_BROKERS: {{ .Values.kafka.brokers | quote }}
   {{- end }}

@@ -129,14 +129,26 @@ Sources live in `cmd/order/` unless stated otherwise.
 
 `charts/order-management` renders a subset of the variables from dedicated
 values. Everything else (`PATH_CATALOGUE_SOURCE`, `DEFAULT_SITE_ID`,
-`PROMISE_*`, `OUTBOX_RELAY_INTERVAL`, `CORS_ALLOWED_ORIGINS`, `LOG_LEVEL`)
-goes through `extraEnv` (or `mcp.extraEnv`).
+`PROMISE_*`, `CORS_ALLOWED_ORIGINS`, `LOG_LEVEL`) goes through `extraEnv`
+(or `mcp.extraEnv`).
+
+The `config.*`, `kafka.*`, `productClassification.*`, `plannedCapacity.*`,
+`demandProjection.*` and `inventoryStorage.*` values are rendered into the
+chart ConfigMap (`templates/configmap.yaml`), and the api Deployment mounts
+that ConfigMap with `envFrom: configMapRef` (gap fix D14). Explicit `env`
+entries and `extraEnv` win over the ConfigMap for the same key. The
+projector, reports and MCP Deployments do not mount it. A ConfigMap change
+rolls the api pods through the `checksum/config` annotation.
+`charts/order-management/tests/render_test.sh` (`make chart-test`, CI job
+`chart-tests`) asserts the mount.
 
 | Chart value | Variable (container) | Rendered when |
 | --- | --- | --- |
 | `config.httpAddr` | `HTTP_ADDR` (order) | always |
 | `config.eventPublisher` | `EVENT_PUBLISHER` (order) | always |
 | `config.shutdownDrainDelay` | `SHUTDOWN_DRAIN_DELAY` (order) | always |
+| `config.outboxRelayInterval` | `OUTBOX_RELAY_INTERVAL` (order, via the ConfigMap) | always |
+| `config.outboxMaxAttempts` | `OUTBOX_MAX_ATTEMPTS` (order; default `"20"`, `"0"` = unlimited, ADR 0040) | always |
 | `config.housekeepingInterval`, `config.idempotencyKeyTtl`, `config.outboxRetention` | `HOUSEKEEPING_INTERVAL`, `IDEMPOTENCY_KEY_TTL`, `OUTBOX_RETENTION` (order) | a database is configured |
 | `kafka.brokers` | `KAFKA_BROKERS` (order) | `config.eventPublisher=kafka`, or `plannedCapacity.consumerGroup` or `productClassification.consumerGroup` is set |
 | `productClassification.mode`, `.consumerGroup` | `PRODUCT_CLASSIFICATION_MODE`, `PRODUCT_CLASSIFICATION_CONSUMER_GROUP` (order) | the value is non-empty |
