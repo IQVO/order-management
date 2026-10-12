@@ -39,6 +39,7 @@ Source: `features/*.feature`, `**/*_test.go`, `.github/workflows/ci.yml`, `Makef
 | `make mutation-fast` | `gremlins unleash ./internal/domain/order` | `gremlins` v0.6.0 |
 | `make mutation` | `gremlins unleash ./internal/domain --workers 1 --timeout-coefficient 30` | `gremlins` v0.6.0; slow |
 | `make vuln` | `govulncheck ./...` | `govulncheck` |
+| `make chart-test` | `python3 charts/order-management/tests/test_service_selectors.py` | `helm`, Python 3 with PyYAML |
 | `make check` | `fmt-check vet build lint test` | `golangci-lint` v2.13.1 |
 | `make check-all` | `check coverage arch-test bdd` | as above |
 | `make check-fast` | `fmt-check vet arch-test` plus the tests of packages changed against `HEAD` | used by the agent Stop hook |
@@ -189,8 +190,11 @@ the request got no answer, new after an answer or an edit);
 `TestCORS_PreflightAllowsIdempotencyKey` pins the CORS side.
 
 The chart has a selector test, `python3
-charts/order-management/tests/test_service_selectors.py`, which proves
-each Service selects exactly one Deployment. No CI job runs it.
+charts/order-management/tests/test_service_selectors.py` (`make chart-test`),
+which proves each Service selects exactly one Deployment and that the
+startupProbe outlasts the boot retry budget. The `chart-tests` CI job runs it
+on every push and PR with Helm v3.16.4 and PyYAML; without PyYAML the script
+fails instead of skipping.
 
 ## CI jobs (`.github/workflows/ci.yml`)
 
@@ -210,11 +214,13 @@ each Service selects exactly one Deployment. No CI job runs it.
 | `arch-test` | `go test ./internal/architecture/... -v` | every push and PR |
 | `docs-api-drift` | regenerates `docs/docs/api-reference/rest` and fails on any change | every push and PR |
 | `web` | MFE lint, typecheck, test, build | every push and PR |
+| `chart-tests` | `charts/order-management/tests/test_service_selectors.py` (Helm v3.16.4, PyYAML) | every push and PR |
 | `mutation` | full-domain gremlins; opens or closes a `harness:red` issue | schedule (Mondays 06:00 UTC) and manual dispatch |
 | `drift` | deadcode, `go mod tidy -diff`, knip, coverage quality | schedule and manual dispatch |
 | `helm-lint`, `trivy-scan` | chart-testing lint; image scan | PRs into `main` only |
 | `docker-publish`, `release` | push the image, tag, chart and GitHub release | pushes to `main` only |
 
-The documentation site is built by `.github/workflows/docs.yml` only on
-pushes to `main`. A docs change in a PR is not built by CI: run
-`npm ci` and `npm run build` in `docs/` yourself.
+The documentation site is built by `.github/workflows/docs.yml` on every
+pull request that touches `docs/**`, `apis/**` or the workflow (build only,
+no Pages artifact, no deploy) and built and published on pushes to `main`.
+Run `npm ci` and `npm run build` in `docs/` to reproduce it locally.

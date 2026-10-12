@@ -38,15 +38,15 @@ def render(extra_args: list[str]) -> list[dict]:
         ["helm", "template", "order-management", str(CHART), *extra_args],
         capture_output=True, text=True, check=True,
     ).stdout
-    # helm emits a multi-document stream; yaml isn't guaranteed installed, so
-    # round-trip through a tiny parser via python's json after a yaml->json
-    # conversion is avoided by just asking helm for each doc and using PyYAML
-    # when present. PyYAML ships with most toolchains here; fall back loudly.
+    # helm emits a multi-document stream, parsed with PyYAML. A missing
+    # PyYAML is a FAILURE, not a skip: a skipped sensor passes while proving
+    # nothing (the CI chart-tests job installs it explicitly).
     try:
         import yaml  # type: ignore
     except ModuleNotFoundError:  # pragma: no cover - environment guard
-        print("SKIP: PyYAML not available; cannot assert selectors", file=sys.stderr)
-        raise SystemExit(0)
+        print("FAIL: PyYAML is not installed; run: python3 -m pip install pyyaml",
+              file=sys.stderr)
+        raise SystemExit(1)
     return [d for d in yaml.safe_load_all(out) if d]
 
 
