@@ -210,6 +210,15 @@ Postgres, `internal/adapters/outbound/postgres/outbox_integration_test.go`),
 test `TestOutboxRelayCallsSetMaxAttempts`, which fails when a file under
 `cmd/` builds a relay without `WithMaxAttempts`.
 
+Trace continuity across the outbox (ADR 0041, the fleet D27 reference) is
+pinned by `TestOutboxTrace_TraceparentCrossesTheOutboxToKafka` and
+`TestOutboxTrace_RowWithoutTraceHeadersRelaysUnchanged`
+(`internal/adapters/outbound/postgres/outbox_trace_integration_test.go`,
+`integration` tag). They boot the package's shared Postgres container plus
+their own Kafka container: a use case runs inside a request span, the relay
+sends the row on a context without that span, and the consumed message's
+`traceparent` must extract to the request's trace and span.
+
 ## CI jobs (`.github/workflows/ci.yml`)
 
 | Job | Runs | When |

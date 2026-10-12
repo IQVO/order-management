@@ -137,6 +137,7 @@ const sidebars: SidebarsConfig = {
         'adr/0037-send-line-no-on-reservations',
         'adr/0038-mfe-sends-idempotency-key-per-submission',
         'adr/0040-outbox-relay-attempt-cap',
+        'adr/0041-trace-context-crosses-the-outbox',
       ],
     },
   ],

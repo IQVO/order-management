@@ -79,7 +79,12 @@ With the transactional outbox there is **no publish span**. The encoder
 injects the trace context of the request that wrote the outbox row into
 the stored headers, and the relay sends those headers unchanged. A
 consumer's span is therefore parented on the original HTTP request, not
-on the relay pass.
+on the relay pass. The trace context lives in `outbox_events.headers`
+(`traceparent`, `tracestate` when present, next to `content-type`); a row
+written without an active span relays without a `traceparent`. This is the
+fleet's D27 reference (ADR 0041), pinned end to end against real Postgres
+and Kafka by `TestOutboxTrace_TraceparentCrossesTheOutboxToKafka` and
+`TestOutboxTrace_RowWithoutTraceHeadersRelaysUnchanged`.
 
 Postgres, the inventory-storage HTTP client and the Kafka replay caches
 (`kafkacatalog`, `kafkacptschedule`, `kafkapathcapacity`) are not
