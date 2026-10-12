@@ -1,4 +1,5 @@
 ---
+id: introduction
 slug: /overview
 title: Introduction
 sidebar_label: Introduction
@@ -97,10 +98,10 @@ flowchart LR
     PMX["product-master<br/>(Supporting)<br/>SKU master data"]
   end
   subgraph WES["WES tier — when & in what order"]
-    PPM["process-path-management<br/>capability & CPT schedule"]
+    PPM["process-path-management<br/>(Generic)<br/>capability & CPT schedule"]
     WP["wes-work-planning<br/>(Core) — the conductor"]
     FE["fulfillment-execution<br/>(Core) — Pick/Pack/SLAM"]
-    WPL["warehouse-planning<br/>capacity plans"]
+    WPL["warehouse-planning<br/>(Core)<br/>capacity plans"]
   end
 
   NF -- "HTTP: POST /orders (held)<br/>POST /orders/{id}/release" --> OM
@@ -115,10 +116,16 @@ flowchart LR
   classDef this fill:#1d4ed8,stroke:#1e3a8a,color:#fff,stroke-width:3px;
   classDef core fill:#0f766e,stroke:#134e4a,color:#fff;
   classDef supp fill:#7c3aed,stroke:#4c1d95,color:#fff;
+  classDef gen fill:#64748b,stroke:#334155,color:#fff;
   class OM this;
-  class INV,WP,FE core;
-  class PPM,NF,WPL,PMX supp;
+  class INV,WP,FE,WPL core;
+  class NF,PMX supp;
+  class PPM gen;
 ```
+
+Source: `cmd/order/*.go` (the adapters it wires); neighbour classes from the
+fleet table in warehouse-docs `docs/strategic-design/subdomain-classification.md`
+(teal Core, purple Supporting, grey Generic).
 
 Allocation is synchronous HTTP; release, capability, re-promise,
 planned-capacity and product-classification facts are Kafka events (when
@@ -128,14 +135,32 @@ set — see [Domain Events](/docs/ddd/domain-events)).
 See [the context map](/docs/ecosystem/context-map) for the full relationship
 analysis, including exactly which fields cross each wire.
 
+## Classification and tier
+
+- **Subdomain class:** Generic/Supporting — order intake is commodity;
+  the allocation, hold/release and cancellation rules on top of it are
+  real business logic (see [Subdomain classification](/docs/ddd/subdomain-classification)).
+- **Tier:** WES. Every CloudEvents `type` this service publishes uses the
+  `wes` segment: `com.warehouse.wes.order-management.<entity>.<Event>`.
+- **Deployables:** four binaries from one image — `cmd/order` (REST,
+  `:8080`), `cmd/mcp` (MCP, `:8090`), `cmd/order-projector` (analytics
+  writer, admin `:8091`) and `cmd/order-reports` (analytics reader,
+  `:8092`). See [Architecture](./architecture.md).
+
 ## Where to go next
 
-- **[Architecture](./architecture.md)** — the hexagonal layering and the
-  strict dependency rule.
-- **[Quickstart](./quickstart.md)** — run the service and exercise every
-  endpoint with `curl`.
-- **[Domain vision](/docs/business-context/domain-vision)** — why this
-  service exists in this shape, and the gap it closes.
-- **[API Reference](/docs/api-reference)** — generated from the real,
-  Spectral-linted `apis/openapi.yaml`.
-- **[ADRs](/docs/adr)** — the consequential decisions, in Nygard format.
+| To… | Read |
+| --- | --- |
+| understand the layering and the four binaries | [Architecture](./architecture.md) |
+| run it on your machine and call every endpoint | [Quickstart](./quickstart.md) |
+| set an environment variable | [Configuration](/docs/operations/configuration) |
+| deploy, migrate, replay, scale | [Runbook](/docs/operations/runbook) |
+| find a metric, span or log line | [Observability](/docs/operations/observability) |
+| fix a symptom | [Troubleshooting](/docs/operations/troubleshooting) |
+| run or add tests | [Testing](/docs/development/testing) |
+| see who calls it and whom it calls | [Integration contracts](/docs/ecosystem/integration), [Context map](/docs/ecosystem/context-map) |
+| see what each use case does | [Use cases](/docs/ddd/use-cases), [Domain events](/docs/ddd/domain-events) |
+| use it from an AI agent | [MCP tools](/docs/mcp/tools) |
+| read the funnel report | [Order Funnel & Allocation Health](/docs/analytics/order-funnel-report) |
+| call the REST API | [API Reference](/docs/api-reference) (generated from `apis/openapi.yaml`) |
+| know why it is built this way | [Domain vision](/docs/business-context/domain-vision), [ADRs](/docs/adr) |

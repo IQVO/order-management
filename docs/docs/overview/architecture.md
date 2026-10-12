@@ -1,4 +1,5 @@
 ---
+id: architecture
 title: Architecture
 sidebar_label: Architecture
 description: Hexagonal / ports-and-adapters layering, the strict dependency rule, and how it maps to Order Management's actual code.
@@ -112,6 +113,63 @@ the application only ever names an interface in `application/ports`, and
 gets plugged in. See [ADR 0001](/docs/adr/0001-hexagonal-ports-and-adapters).
 The rule is enforced by `internal/architecture` (the `arch-test` CI job).
 
+Source: `internal/architecture/architecture_test.go` (`TestHexagonalDependencyRule`) and the package imports under `internal/`.
+
+## Deployables
+
+One image (`Dockerfile`) builds four binaries. Each is its own composition
+root and its own Deployment in `charts/order-management`.
+
+| Binary | Role | Listens on | Inbound adapters | Stores it touches |
+| --- | --- | --- | --- | --- |
+| `cmd/order` | The OLTP service: order intake, allocation, release, cancellation, re-promise, planned-capacity and classification consumers, outbox relay, housekeeping sweeper | `HTTP_ADDR` `:8080` (REST, `/healthz`, `/readyz`) | `inbound/http`, `inbound/kafka` (re-promise, planned-capacity, product-classification) | OLTP Postgres (read-write, migrates), Kafka (produces both topics, consumes five) |
+| `cmd/mcp` | Read-only MCP server (ADR 0010): `get_order`, `get_promise_health` | `MCP_ADDR` `:8090` (Streamable HTTP on `/*`) | `inbound/mcp` | OLTP Postgres (reads, also migrates), analytical Postgres (read-only) |
+| `cmd/order-projector` | The only writer of the analytical database (ADR 0006) | `ADMIN_ADDR` `:8091` (`/healthz` only) | `inbound/kafka` (analytics consumer) | Kafka `warehouse.order-management.analytics`, analytical Postgres (read-write, migrates) |
+| `cmd/order-reports` | Read-only funnel report API | `HTTP_ADDR` `:8092` (`/reports/funnel`, `/reports/funnel/freshness`, `/healthz`) | `inbound/http` (reports router) | analytical Postgres (read-only pool) |
+
+```mermaid
+flowchart LR
+  subgraph callers["Callers"]
+    REST["REST clients<br/>network-fulfillment · console MFE · ops-agent"]
+    AGENT["MCP clients<br/>warehouse-ops-agent"]
+  end
+  subgraph om["order-management"]
+    ORDER["cmd/order<br/>:8080"]
+    MCP["cmd/mcp<br/>:8090"]
+    PROJ["cmd/order-projector<br/>:8091 admin"]
+    REP["cmd/order-reports<br/>:8092"]
+  end
+  OLTP[("OLTP Postgres<br/>orders · order_lines · outbox_events · ...")]
+  ANA[("Analytical Postgres<br/>funnel_rollup · repromise_rollup · ...")]
+  K{{"Kafka<br/>warehouse.order-management.events<br/>warehouse.order-management.analytics"}}
+  INV["inventory-storage<br/>POST/DELETE /reservations"]
+  UP{{"Kafka in<br/>fulfillment · planning · product-master<br/>process-path · work-planning"}}
+
+  REST --> ORDER
+  REST --> REP
+  AGENT --> MCP
+  ORDER --> OLTP
+  ORDER --> INV
+  ORDER -- "outbox relay" --> K
+  UP --> ORDER
+  MCP --> OLTP
+  MCP --> ANA
+  K -- "analytics topic" --> PROJ
+  PROJ --> ANA
+  REP --> ANA
+```
+
+Source: `cmd/order/main.go`, `cmd/mcp/main.go`, `cmd/order-projector/main.go`, `cmd/order-reports/main.go`.
+
+### Data stores
+
+| Store | Tables (migration that creates them) | Owner |
+| --- | --- | --- |
+| OLTP Postgres (`DATABASE_URL`) | `orders`, `order_lines` (0001), `order_promise_groups` (0003), `repromise_processed_events` (0004), `outbox_events` (0007, which also drops 0001's `events`), `idempotency_keys` (0008), `orders.version` column (0009), `planned_capacity_windows`, `planned_capacity_processed_events` (0010), `product_classification_copy`, `product_classification_processed_events` (0011) | `cmd/order` and `cmd/mcp` both apply `migrations/` at boot |
+| Analytical Postgres (`ANALYTICS_DATABASE_URL`) | `analytics_processed_events`, `analytics_consumed_events`, `funnel_rollup` (`analytics/0001`), `repromise_rollup` (`analytics/0002`) | `cmd/order-projector` applies `migrations/analytics/` and is the only writer |
+| In-memory | the same repositories in `outbound/memory` and `outbound/productclassificationcopy` | used when `DATABASE_URL` is unset; lost on restart |
+| Per-process caches | process-path catalogue, CPT schedule, path capacity | rebuilt from Kafka on every boot when `PATH_CATALOGUE_SOURCE=kafka` |
+
 ## Ports
 
 | Port | Responsibility | Implementations |
@@ -145,37 +203,21 @@ deployment.
 
 ## Composition root
 
-`cmd/order/main.go` (with its siblings `wiring.go` and
-`planned_capacity.go`) is the composition root: the only place that knows
-both a port and its implementation. Apart from `CORS_ALLOWED_ORIGINS` (read
-by the HTTP adapter) and `ENVIRONMENT` (read by `telemetry`), every
-environment variable is read there:
+`cmd/order/` is the composition root of the OLTP service, split by concern:
+`main.go` (the startup sequence), `config.go` (env readers), `adapters.go`
+(memory vs Postgres repositories and the event publisher), `kafka.go`
+(publishing, outbox relay, re-promise consumer), `outbound.go`
+(inventory-storage client, catalogue, promise policy),
+`product_classification.go`, `planned_capacity.go`, `wiring.go` (the Kafka
+caches), `http.go`, `housekeeping.go` and `shutdown.go`. It is the only
+place that knows both a port and its implementation. `cmd/mcp`,
+`cmd/order-projector` and `cmd/order-reports` are smaller composition
+roots of their own. Outside `cmd/`, only the HTTP adapter
+(`CORS_ALLOWED_ORIGINS`) and the telemetry adapter (`ENVIRONMENT`) read
+environment variables.
 
-| Env var | Default | Effect |
-| --- | --- | --- |
-| `HTTP_ADDR` | `:8080` | Listen address |
-| `LOG_LEVEL` | `info` | slog level |
-| `SHUTDOWN_DRAIN_DELAY` | `5s` | Wait after `/readyz` flips to not-ready before the listener closes (ADR 0025 §8); `0` disables |
-| `DATABASE_URL` | *(unset)* | If unset, the in-memory adapters are used and no database is required (no `Idempotency-Key` middleware, no outbox, no sweeper). |
-| `MIGRATIONS_DATABASE_URL` | `DATABASE_URL` | Direct (non-PgBouncer) DSN for the migration step only (ADR 0029) |
-| `MIGRATIONS_PATH` | `migrations` | Where golang-migrate looks for SQL files |
-| `INVENTORY_STORAGE_MODE` | `permissive` | `http` or `permissive` |
-| `INVENTORY_STORAGE_BASE_URL` | *(unset)* | Required when mode is `http` (reservations only) |
-| `PRODUCT_CLASSIFICATION_MODE` | `permissive` | `kafka` or `permissive` (ADR 0036); `http` fails boot |
-| `PRODUCT_CLASSIFICATION_CONSUMER_GROUP` | *(unset)* | Stable consumer group of the classification copy's consumer; required with mode `kafka` (ADR 0036) |
-| `EVENT_PUBLISHER` | `log` | `kafka` adds the integration + analytics topics (through the outbox when `DATABASE_URL` is set) |
-| `KAFKA_BROKERS` | `localhost:9092` when publishing; unset disables the re-promise and planned-capacity consumers | Comma-separated brokers |
-| `OUTBOX_RELAY_INTERVAL` | `1s` | Outbox relay poll interval (ADR 0022) |
-| `HOUSEKEEPING_INTERVAL`, `IDEMPOTENCY_KEY_TTL`, `OUTBOX_RETENTION` | `1h`, `24h`, `168h` | Housekeeping sweeper (ADR 0032); `HOUSEKEEPING_INTERVAL=0` disables it |
-| `PATH_CATALOGUE_SOURCE` | `none` | `kafka` enables the catalogue, CPT-schedule and path-capacity caches (capability promise); `none` = lead-time promise only |
-| `DEFAULT_SITE_ID` | `site-1` | Site whose CPT schedule the promise reads |
-| `PROMISE_DEFAULT_LEAD_TIME` | `48h` | Lead-time fallback for any unlisted path |
-| `PROMISE_PATH_LEAD_TIMES` | *(unset)* | Per-path overrides, e.g. `pick=24h,singles=6h` |
-| `PLANNED_CAPACITY_CONSUMER_GROUP` | *(unset)* | Turns on the warehouse-planning consumer and `GET /planned-capacity` (ADR 0031) |
-| `PLANNED_CAPACITY_SITE_ID` | `DEFAULT_SITE_ID` | Site matched against planned-capacity windows |
-| `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:5181` | Console / MFE origins (ADR 0007) |
-| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME` | `localhost:4317`, `order-management` | OpenTelemetry OTLP/gRPC export (no `/metrics` scrape route) |
-| `SERVICE_VERSION`, `ENVIRONMENT` | `dev`, `local` | OpenTelemetry resource attributes |
+Every variable each binary reads, with its default and the file that
+reads it, is listed in [Configuration](/docs/operations/configuration).
 
 The in-memory fallback is deliberate: `go run ./cmd/order` with no
 environment at all starts a fully functional service, which is what makes
@@ -194,7 +236,7 @@ the `httptest` suite cheap to run.
 | `bdd` | godog/Gherkin acceptance tests (`TestFeatures`) |
 | `contract` | Schemathesis over `apis/openapi.yaml` (`scripts/contract-test.sh`) |
 | `evals-tests` | MCP evals E1–E3 (`internal/adapters/inbound/mcp`) |
-| `integration` | `-tags=integration` suites against Testcontainers (Kafka and Postgres adapter packages plus `cmd/order` housekeeping) |
+| `integration` | `go test -tags=integration ./... -race -count=1`: every integration package, each test on its own Testcontainers Postgres or Kafka (see [Testing](/docs/development/testing)) |
 | `mutation-fast` | gremlins on `./internal/domain/order` — thresholds efficacy 97 / mutant-coverage 99 pinned in `.gremlins.yaml` (measured 97.86% / 99.29%) |
 | `vuln` | `govulncheck` |
 | `api-lint` | Spectral on `apis/openapi.yaml` / `apis/asyncapi.yaml` |
