@@ -77,5 +77,7 @@ type ever appears in the domain layer.
 ```bash
 go run ./cmd/order                    # in-memory adapters if DATABASE_URL unset
 docker compose up -d postgres         # Postgres 16 on :5434
-docker compose -f docker-compose.kafka.yml up -d   # local Kafka (KRaft, :9092)
+# Kafka: the fleet's single broker runs in the kind cluster (warehouse-infra),
+# reachable at localhost:9092. docker-compose.kafka.yml is retired fleet-wide
+# and binds the same port: do not start it.
 ```
