@@ -110,7 +110,7 @@ func (w *world) postAndCapture(body map[string]any) error {
 // ---- Given ----
 
 func (w *world) serverErrorEverywhere() error {
-	w.inventory.setMode("*", inventoryServerError)
+	w.inventory.setMode("*", inventoryUnreachable)
 	return nil
 }
 
