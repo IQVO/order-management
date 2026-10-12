@@ -127,7 +127,7 @@ internal/
   analytics/report/               analytical read model (depends on nothing internal)
 migrations/                       golang-migrate SQL files (+ analytics/)
 apis/openapi.yaml, asyncapi.yaml  REST and Kafka contracts
-docker-compose.kafka.yml          Local Kafka broker (KRaft, single node)
+apis/openapi-reports.yaml         REST contract of cmd/order-reports (ADR 0039)
 docs/docs/adr/                    Architecture Decision Records
 ```
 
@@ -272,11 +272,10 @@ subscriber) consumes independently:
   `localhost:9092`, `KAFKA_BROKERS`) to publish for real; the default
   `log` publisher requires no broker at all, so `go test ./...` and local
   runs are unaffected either way.
-- **Local broker:** `docker compose -f docker-compose.kafka.yml up -d`
-  starts a single-node KRaft Kafka on `localhost:9092`, the same
-  `apache/kafka:3.8.0` image/config shape the fleet's shared
-  `docker-compose.kafka.yml` uses (this repo has its own copy rather than
-  a cross-repo reference).
+- **Local broker:** the fleet runs one Kafka broker inside the kind
+  cluster, reachable from the host at `localhost:9092` (bring it up with
+  warehouse-infra). The repo-local `docker-compose.kafka.yml` was retired:
+  it bound the same port.
 - **Fire-and-forget, deliberately.** There is no release-confirmation
   reply event from `wes-work-planning` in v1 — see "Deferred" below.
 - **Consumed topics:** `warehouse.process-path-management.events`
@@ -328,8 +327,8 @@ Run the writer and reader locally against the local Kafka and an analytical
 database:
 
 ```bash
-# Start the local broker (same as the Kafka integration section).
-docker compose -f docker-compose.kafka.yml up -d
+# The fleet's Kafka broker runs in the kind cluster (localhost:9092);
+# see the Kafka integration section.
 
 export ANALYTICS_DATABASE_URL='postgres://order:***@localhost:5434/order_analytics?sslmode=disable'
 export KAFKA_BROKERS=localhost:9092
