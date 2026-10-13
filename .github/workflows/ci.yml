@@ -476,7 +476,7 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install PyYAML (pinned)
-        run: python3 -m pip install "pyyaml==6.0.3"
+        run: python3 -m pip install --require-hashes -r .github/requirements/chart-tests.txt
       - name: Chart render assertions (envFrom ConfigMap mount, outbox cap)
         run: bash charts/order-management/tests/render_test.sh
       - name: Chart selector and probe tests

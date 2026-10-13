@@ -15,6 +15,101 @@ Every message row maps to a real REST route
 (the publishers in `internal/adapters/outbound/kafka`, the consumers listed
 under Inbound Communication).
 
+## Canvas at a glance
+
+One picture of the sections below, laid out like the ddd-crew canvas:
+inbound collaborators on the left, this context in the middle (purpose,
+domain roles and the business decisions it enforces), outbound
+collaborators on the right. Arrows follow the message type: **solid blue**
+commands (`cmd`), **dotted green** queries (`qry`), **thick orange** events
+(`evt`); each arrow names its channel and the messages it carries. Box shapes
+mark the collaborator kind: rounded = people, UI or any client; blue =
+sibling bounded context; double border = external system or platform;
+grey = this context's own projector, reports or dead-letter path; dashed =
+published today with no consumer. Channel names on the arrows are
+abbreviated (REST, MCP, Kafka, HTTP, port); the Inbound and Outbound
+Communication tables carry the exact route, tool, topic and CloudEvents
+type for every message.
+
+```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 18, "rankSpacing": 36, "padding": 8}}}%%
+flowchart LR
+    classDef bc fill:#fff3bf,stroke:#e67700,stroke-width:1.5px,color:#000
+    classDef card fill:#fff9db,stroke:#f08c00,color:#000,text-align:left
+    classDef ctx fill:#e7f5ff,stroke:#1c7ed6,color:#000
+    classDef actor fill:#fff4e6,stroke:#e8590c,color:#000
+    classDef ext fill:#ffe3e3,stroke:#c92a2a,color:#000
+    classDef self fill:#f1f3f5,stroke:#868e96,color:#000
+    classDef none fill:#f8f9fa,stroke:#adb5bd,stroke-dasharray:5 5,color:#495057
+    subgraph IN["Inbound - who commands, queries or feeds it"]
+        direction TB
+        in0(["Customer channel, order-mgmt-mfe, operator, planners"]):::actor
+        in1["network-fulfillment"]:::ctx
+        in2["warehouse-ops-agent console-bff and AI agents (MCP hosts)"]:::ctx
+        in3["fulfillment-execution"]:::ctx
+        in4["process-path-management"]:::ctx
+        in5["wes-work-planning"]:::ctx
+        in6["warehouse-planning (opt-in)"]:::ctx
+        in7["product-master (opt-in)"]:::ctx
+    end
+    subgraph BC["order-management - Generic/Supporting subdomain - WES tier"]
+        direction TB
+        purpose["<b>Purpose</b><br/>Accept customer and network demand<br/>as orders, reserve stock for every<br/>line in inventory-storage, promise<br/>each shipment group a carrier cutoff<br/>the building can meet, and release<br/>allocated lines to<br/>wes-work-planning; cancellable until<br/>release, network orders held until<br/>their caller commits."]:::card
+        roles["<b>Domain roles</b><br/>- Gateway (the front door for demand)<br/>- Execution (allocation, release, cancellation)<br/>- Analysis, light (the promise from upstream read models)"]:::card
+        rules["<b>Business decisions it enforces</b><br/>- BR2 fail closed on ambiguity: only a<br/>409 from inventory-storage<br/>backorders a line<br/>- BR3 ship-complete by default<br/>- BR6 cancellation boundary at release<br/>- Release is a published fact, not a<br/>call<br/>- Promise from capability; lead time<br/>only as fallback<br/>- Path is chosen, never supplied"]:::card
+        purpose ~~~ roles ~~~ rules
+    end
+    subgraph OUT["Outbound - whom it calls or notifies"]
+        direction TB
+        out0["inventory-storage"]:::ctx
+        out1["wes-work-planning"]:::ctx
+        out2["slotting-optimization and network-inventory-planning"]:::ctx
+        out3["any subscriber (none known)"]:::none
+        out4["own order-projector"]:::self
+        out5["dead-letter topics"]:::self
+    end
+    in0 -->|"cmd - REST<br/>ReceiveOrder, CancelOrder,<br/>RetryAllocation"| BC
+    in0 -.->|"qry - REST<br/>GetOrder, GetPlannedCapacity"| BC
+    in1 -->|"cmd - REST<br/>ReceiveOrder (held,<br/>requiredShipBy),<br/>ReleaseHeldOrder, CancelOrder"| BC
+    in2 -.->|"qry - REST<br/>GetOrder"| BC
+    in2 -.->|"qry - MCP<br/>get_order, get_promise_health"| BC
+    in3 ==>|"evt - Kafka<br/>warehouse.fulfillment.events<br/>TaskCPTMissed, PackageManifested"| BC
+    in4 ==>|"evt - Kafka<br/>warehouse.process-path-management.events<br/>ProcessPathCreated,<br/>ProcessPathUpdated,<br/>ProcessPathDeactivated,<br/>CPTScheduleChanged"| BC
+    in5 ==>|"evt - Kafka<br/>warehouse.work-planning.events<br/>PathCapacityChanged"| BC
+    in6 ==>|"evt - Kafka<br/>warehouse.warehouse-planning.events<br/>CapacityPlanCreated,<br/>CapacityPlanPublished,<br/>CapacityShortageDetected"| BC
+    in7 ==>|"evt - Kafka<br/>warehouse.product-master.events<br/>ProductClassified into a local<br/>copy"| BC
+    BC -->|"cmd - REST<br/>Reserve stock for a line, Revoke<br/>a reservation"| out0
+    BC ==>|"evt - Kafka<br/>warehouse.order-management.events<br/>OrderAllocated,<br/>OrderPartiallyAllocated"| out1
+    BC ==>|"evt - Kafka<br/>warehouse.order-management.events<br/>SiteSkuDemandChanged (per-line<br/>demand projection)"| out2
+    BC ==>|"evt - Kafka<br/>warehouse.order-management.events<br/>OrderRepromised"| out3
+    BC ==>|"evt - Kafka<br/>warehouse.order-management.analytics<br/>every raised domain event"| out4
+    BC ==>|"evt - Kafka fulfillment and<br/>warehouse-planning .dlq<br/>unprocessable inbound message"| out5
+    linkStyle 0 stroke:#1971c2,stroke-width:1.5px
+    linkStyle 1 stroke:#2f9e44,stroke-width:1.5px
+    linkStyle 2 stroke:#1971c2,stroke-width:1.5px
+    linkStyle 3 stroke:#2f9e44,stroke-width:1.5px
+    linkStyle 4 stroke:#2f9e44,stroke-width:1.5px
+    linkStyle 5 stroke:#e8590c,stroke-width:2.5px
+    linkStyle 6 stroke:#e8590c,stroke-width:2.5px
+    linkStyle 7 stroke:#e8590c,stroke-width:2.5px
+    linkStyle 8 stroke:#e8590c,stroke-width:2.5px
+    linkStyle 9 stroke:#e8590c,stroke-width:2.5px
+    linkStyle 10 stroke:#1971c2,stroke-width:1.5px
+    linkStyle 11 stroke:#e8590c,stroke-width:2.5px
+    linkStyle 12 stroke:#e8590c,stroke-width:2.5px
+    linkStyle 13 stroke:#e8590c,stroke-width:2.5px
+    linkStyle 14 stroke:#e8590c,stroke-width:2.5px
+    linkStyle 15 stroke:#e8590c,stroke-width:2.5px
+    class BC bc
+```
+
+Source: the Inbound Communication and Outbound Communication tables of this
+page, which map to `internal/adapters/inbound/{http,kafka,mcp}` and `internal/adapters/outbound/`. The diagram omits assumptions, verification metrics, open
+questions and the ubiquitous language (sections below), the relationship
+pattern per message (OHS, ACL, Conformist, Customer/Supplier - see the
+tables) and anything the tables mark as deprecated or platform-only
+(health probes).
+
 ## Name
 
 **Order Management** (`order-management`). CloudEvents source
@@ -76,6 +171,7 @@ holding network-originated orders until their caller commits.
 | inventory-storage | Revoke a reservation | Command | REST `DELETE /reservations/{id}` | Customer/Supplier, ACL |
 | wes-work-planning | OrderAllocated | Event | Kafka `warehouse.order-management.events`, `com.warehouse.wes.order-management.order.OrderAllocated` | Published Language |
 | wes-work-planning | OrderPartiallyAllocated | Event | Kafka `warehouse.order-management.events`, `com.warehouse.wes.order-management.order.OrderPartiallyAllocated` | Published Language |
+| slotting-optimization, network-inventory-planning | SiteSkuDemandChanged | Event | Kafka `warehouse.order-management.events`, `com.warehouse.wes.order-management.siteskudemand.SiteSkuDemandChanged` (per-line demand projection, [ADR 0035](/docs/adr/0035-site-sku-demand-projection-event)) | Published Language |
 | any subscriber (none known) | OrderRepromised | Event | Kafka `warehouse.order-management.events`, `com.warehouse.wes.order-management.order.OrderRepromised` | Published Language |
 | order-projector (this repo) | every raised domain event | Event | Kafka `warehouse.order-management.analytics`, `com.warehouse.wes.order-management.order.*` | internal |
 | Dead-letter topics | unprocessable inbound message | Event | Kafka `warehouse.fulfillment.events.dlq`, `warehouse.warehouse-planning.events.dlq` | internal |
