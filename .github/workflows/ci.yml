@@ -481,6 +481,8 @@ jobs:
         run: bash charts/order-management/tests/render_test.sh
       - name: Chart selector and probe tests
         run: python3 charts/order-management/tests/test_service_selectors.py
+      - name: Kong config test (routes + plugins live in the chart, no auth plugin)
+        run: python3 charts/order-management/tests/test_kong_config.py
 
   # ============================================================
   # CLASSIFICATION: PACKAGING VALIDATION (Helm chart)
