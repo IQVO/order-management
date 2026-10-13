@@ -356,6 +356,13 @@ func (c *RepromiseConsumer) handleMessage(ctx context.Context, msg kafkago.Messa
 	if err == nil {
 		return c.commit(ctx, msg)
 	}
+	if ctx.Err() != nil {
+		// Shutting down: never dead-letter a message only cancellation
+		// interrupted. The offset stays uncommitted, so it is redelivered on
+		// the next start and RepromiseOrder's processed-events claim absorbs
+		// the replay; handleUntilDone sees ctx done and Run returns nil.
+		return ctx.Err()
+	}
 
 	recordSpanError(span, err)
 
