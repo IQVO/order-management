@@ -212,6 +212,12 @@ func (c *PlannedCapacityConsumer) handleMessage(ctx context.Context, msg kafkago
 	}
 
 	if err := c.applyWithRetry(msgCtx, req); err != nil {
+		if ctx.Err() != nil {
+			// Shutting down: never dead-letter a message only cancellation
+			// interrupted. The offset stays uncommitted, so it is redelivered
+			// on the next start and the use case's claim absorbs the replay.
+			return ctx.Err()
+		}
 		recordSpanError(span, err)
 		return c.deadLetter(msgCtx, ctx, msg, "exhausted retries", err, &e)
 	}
