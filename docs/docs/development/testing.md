@@ -171,6 +171,7 @@ three survivors are listed as accepted near-equivalents in the README.
 | `TestKafkaIntegrationTestsUseTestcontainers`, `TestPostgresIntegrationTestsUseTestcontainers` | no env-gated or `localhost:9092` integration tests. |
 | `TestDomainHasNoSerializationTags` | no `json:` tags in `internal/domain`. |
 | `TestCloudEventsOnly`, `TestReplayConsumersSetCommitInterval` | every Kafka message goes through the CloudEvents helper; replay readers set `CommitInterval`. |
+| `TestKafkaWritersSetRequiredAcks`, `TestKafkaWriterAcksSensorBites` | every kafka-go `Writer{...}` literal in a non-test file under `internal/` or `cmd/` sets `RequiredAcks` (kafka-go defaults to `RequireNone`, acks=0, which silently drops messages on a broker blip); the sensor is proven to fail. |
 | `TestEventCatalogueMatchesContract` | every CloudEvents type `apis/asyncapi.yaml` declares for this service also appears in an ADR (the event catalogue). |
 | `TestOptionalMCPInputsCarryOmitempty` | a struct field whose `jsonschema` description says "optional" carries `omitempty`, so the MCP SDK does not mark it required (fleet decision D16). |
 | `TestEveryIntegrationPackageRunsInCI` | see above. |

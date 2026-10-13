@@ -84,6 +84,10 @@ func newDLQWriter(brokers []string, topic string) *kafkago.Writer {
 		// (observed live: a backlog of legacy messages took hours to drain while
 		// the consumer processed nothing else).
 		BatchTimeout: dlqBatchTimeout,
+		// RequiredAcks: kafka-go defaults to RequireNone (acks=0), so the
+		// broker never confirms the write and a broker blip silently drops the
+		// poison message while the consumer commits past it (ADR 0033).
+		RequiredAcks: dlqRequiredAcks,
 	}
 }
 
@@ -557,3 +561,6 @@ func isTopicNotReady(err error) bool {
 
 // dlqBatchTimeout flushes a dead-letter write almost immediately.
 const dlqBatchTimeout = 10 * time.Millisecond
+
+// dlqRequiredAcks makes a dead-letter write wait for every in-sync replica.
+const dlqRequiredAcks = kafkago.RequireAll
