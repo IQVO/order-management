@@ -39,7 +39,7 @@ func TestNewConsumer_TwoInstancesInARow_BothReplayFully(t *testing.T) {
 		t.Fatalf("create Kafka topic: %v", err)
 	}
 
-	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false}
+	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false, RequiredAcks: kafkago.RequireAll}
 	if err := writer.WriteMessages(ctx, kafkago.Message{
 		Value: envelopeMsg(t, 0, 0, "com.warehouse.wes.process-path-management.processpath.ProcessPathCreated", json.RawMessage(`{"path_id":"ITEST2","match_prefix":"itest2"}`)).Value,
 	}); err != nil {
@@ -101,7 +101,7 @@ func TestNewConsumer_AlreadyCaughtUpGroup_ReadyImmediately(t *testing.T) {
 		t.Fatalf("create Kafka topic: %v", err)
 	}
 
-	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false}
+	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false, RequiredAcks: kafkago.RequireAll}
 	if err := writer.WriteMessages(ctx, kafkago.Message{
 		Value: envelopeMsg(t, 0, 0, "com.warehouse.wes.process-path-management.processpath.ProcessPathCreated", json.RawMessage(`{"path_id":"ITEST3","match_prefix":"itest3"}`)).Value,
 	}); err != nil {

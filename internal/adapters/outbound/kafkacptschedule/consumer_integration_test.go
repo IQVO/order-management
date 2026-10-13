@@ -36,7 +36,7 @@ func TestNewConsumer_TwoInstancesInARow_BothReplayFully(t *testing.T) {
 		t.Fatalf("create Kafka topic: %v", err)
 	}
 
-	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false}
+	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false, RequiredAcks: kafkago.RequireAll}
 	if err := writer.WriteMessages(ctx, kafkago.Message{
 		Value: envelopeMsg(t, 0, 0, "com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged", json.RawMessage(`{"site_id":"site-1","timezone":"UTC","cutoffs":[{"cpt_id":"sp1-1800","local_time":"18:00","eligible_path_ids":["pick"]}]}`)).Value,
 	}); err != nil {
@@ -93,7 +93,7 @@ func TestNewConsumer_AlreadyCaughtUpGroup_ReadyImmediately(t *testing.T) {
 		t.Fatalf("create Kafka topic: %v", err)
 	}
 
-	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false}
+	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false, RequiredAcks: kafkago.RequireAll}
 	if err := writer.WriteMessages(ctx, kafkago.Message{
 		Value: envelopeMsg(t, 0, 0, "com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged", json.RawMessage(`{"site_id":"site-2","timezone":"UTC","cutoffs":[{"cpt_id":"sp1-0800","local_time":"08:00","eligible_path_ids":["pick"]}]}`)).Value,
 	}); err != nil {
