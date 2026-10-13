@@ -25,6 +25,21 @@ func TestNewDLQWriter_AutoCreatesTheDeadLetterTopic(t *testing.T) {
 	}
 }
 
+// TestNewDLQWriter_WaitsForAllInSyncReplicas pins acks=all on the DLQ
+// writer: kafka-go defaults RequiredAcks to RequireNone (acks=0), so a
+// broker blip would silently drop the poison message while the consumer
+// commits its offset as if it had been dead-lettered.
+func TestNewDLQWriter_WaitsForAllInSyncReplicas(t *testing.T) {
+	w := newDLQWriter([]string{"localhost:9092"}, "warehouse.fulfillment.events")
+	t.Cleanup(func() { _ = w.Close() })
+	if w.RequiredAcks != kafkago.RequireAll {
+		t.Fatalf("DLQ RequiredAcks = %v, want RequireAll (kafka-go's default is RequireNone, acks=0)", w.RequiredAcks)
+	}
+	if w.Async {
+		t.Fatal("DLQ writer must be synchronous so a failed dead-letter write reaches the consumer")
+	}
+}
+
 type scriptedDLQWriter struct {
 	errs  []error
 	calls int

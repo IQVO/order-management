@@ -42,7 +42,7 @@ func TestNewConsumer_TwoInstancesInARow_BothReplayFully(t *testing.T) {
 	}
 
 	cutoff := time.Date(2026, 9, 13, 18, 0, 0, 0, time.UTC)
-	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false}
+	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false, RequiredAcks: kafkago.RequireAll}
 	if err := writer.WriteMessages(ctx, kafkago.Message{
 		Value: envelopeMsg(t, 0, 0, "com.warehouse.wes.work-planning.workpool.PathCapacityChanged", json.RawMessage(fmt.Sprintf(`{"path_id":"pick","cutoff_at":%q,"remaining_units":25,"known":true}`, cutoff.Format(time.RFC3339)))).Value,
 	}); err != nil {
@@ -101,7 +101,7 @@ func TestNewConsumer_AlreadyCaughtUpGroup_ReadyImmediately(t *testing.T) {
 	}
 
 	cutoff := time.Date(2026, 9, 13, 8, 0, 0, 0, time.UTC)
-	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false}
+	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false, RequiredAcks: kafkago.RequireAll}
 	if err := writer.WriteMessages(ctx, kafkago.Message{
 		Value: envelopeMsg(t, 0, 0, "com.warehouse.wes.work-planning.workpool.PathCapacityChanged", json.RawMessage(fmt.Sprintf(`{"path_id":"singles","cutoff_at":%q,"remaining_units":0,"known":false}`, cutoff.Format(time.RFC3339)))).Value,
 	}); err != nil {
@@ -159,7 +159,7 @@ func TestPromisePolicy_EndToEnd_RealCapacityConsumer(t *testing.T) {
 	earlyCutoff := now.Add(4 * time.Hour)
 	lateCutoff := now.Add(8 * time.Hour)
 
-	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false}
+	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false, RequiredAcks: kafkago.RequireAll}
 	if err := writer.WriteMessages(ctx,
 		kafkago.Message{Value: envelopeMsg(t, 0, 0, "com.warehouse.wes.work-planning.workpool.PathCapacityChanged", json.RawMessage(fmt.Sprintf(
 			`{"path_id":"pick","cutoff_at":%q,"remaining_units":10,"known":true}`,
@@ -326,7 +326,7 @@ func TestNewConsumer_LegacyFlatMessage_SkippedCloudEventApplied(t *testing.T) {
 
 	cutoff := time.Date(2026, 9, 26, 2, 0, 0, 0, time.UTC)
 	legacyCutoff := cutoff.Add(time.Hour)
-	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false}
+	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false, RequiredAcks: kafkago.RequireAll}
 	if err := writer.WriteMessages(ctx,
 		legacyFlatMsg(t, 0, 0, "PathCapacityChanged", capacityData{PathId: "pick-to-tote", CutoffAt: legacyCutoff, RemainingUnits: 99, Known: true}),
 		envelopeMsg(t, 0, 1, ceTypeChanged, capacityData{PathId: "pick-to-tote", CutoffAt: cutoff, RemainingUnits: 17, Known: true}),

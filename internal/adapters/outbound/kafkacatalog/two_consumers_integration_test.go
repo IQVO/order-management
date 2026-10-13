@@ -45,7 +45,7 @@ func TestTwoIndependentConsumers_SameTopic_BothReplayCorrectly(t *testing.T) {
 		t.Fatalf("create Kafka topic: %v", err)
 	}
 
-	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false}
+	writer := &kafkago.Writer{Addr: kafkago.TCP(brokers...), Topic: topic, AllowAutoTopicCreation: false, RequiredAcks: kafkago.RequireAll}
 	if err := writer.WriteMessages(ctx,
 		kafkago.Message{
 			Value: envelopeMsg(t, 0, 0, "com.warehouse.wes.process-path-management.processpath.ProcessPathCreated", json.RawMessage(`{"path_id":"TWOTEST","match_prefix":"twotest","cycle_time_p95":"45m0s","eligibility":{"max_units_per_line":1}}`)).Value,
