@@ -7,17 +7,34 @@ description: REST conventions, the endpoint matrix, and the RFC 7807 error catal
 
 # API Reference
 
-This service exposes two contracts, kept as source-of-truth artefacts in
+This service exposes three contracts, kept as source-of-truth artefacts in
 the repository and linted by Spectral (the `api-lint` CI job):
 
 | Contract | File | Rendered here |
 | --- | --- | --- |
-| REST (synchronous) | `apis/openapi.yaml` — OpenAPI 3.0.3 | **[REST API](./rest/order-management-api.info.mdx)** — generated directly from the spec |
+| REST (synchronous, `cmd/order`) | `apis/openapi.yaml` — OpenAPI 3.0.3 | **[REST API](./rest/order-management-api.info.mdx)** — generated directly from the spec |
+| Reports REST (read-only, `cmd/order-reports`) | `apis/openapi-reports.yaml` — OpenAPI 3.0.3 ([ADR 0039](/docs/adr/0039-reports-api-openapi-contract)) | **[Reports API](./rest-reports/order-management-reports-api.info.mdx)** — generated directly from the spec |
 | Kafka (asynchronous) | `apis/asyncapi.yaml` — AsyncAPI 2.6.0 | Not rendered on this site; see [Domain Events](/docs/ddd/domain-events) |
 
-The REST pages under **REST API** are *generated* from `apis/openapi.yaml`
-by `docusaurus-plugin-openapi-docs` at build time. They are not
-hand-transcribed, so they cannot drift from the spec the service ships.
+The REST pages under **REST API** and **Reports API Reference** are
+*generated* from the two OpenAPI files by `docusaurus-plugin-openapi-docs`
+(`npm run clean-api-docs:all && npm run gen-api-docs:all`, checked by the
+`docs-api-drift` CI job). They are not hand-transcribed, so they cannot
+drift from the specs the service ships.
+
+### Reports endpoint matrix (`cmd/order-reports`, default `:8092`)
+
+| Method | Path | Operation | Success | Errors |
+| --- | --- | --- | --- | --- |
+| `GET` | `/healthz` | `getReportsHealthz` | `200` `{"status":"ok"}` | — |
+| `GET` | `/reports/funnel` | `getOrderFunnelReport` | `200` `{"rows":[...]}` | `400` `invalid-report-query`, `500` `report-store-error` |
+| `GET` | `/reports/funnel/freshness` | `getOrderFunnelReportFreshness` | `200` `{"lagSeconds":N}` | `500` `report-store-error` |
+
+`TestReportsContract_RoutesMatchSpec` and
+`TestReportsContract_ResponsesMatchSpec`
+(`internal/adapters/inbound/http/reports_contract_test.go`) fail when the
+reports router and `apis/openapi-reports.yaml` disagree on a route, a status,
+a media type, a required property or an undocumented property.
 
 ## Endpoint matrix
 

@@ -38,7 +38,7 @@ func TestBuildRepoAdapters_RetriesTheDatabaseNotJustOnce(t *testing.T) {
 		t.Fatal("an unreachable database must fail boot, never fall back to the in-memory repo")
 	}
 
-	// The full budget is ~31s; one attempt is near-instant. Anything under
+	// The full budget is 15s of backoff; one attempt is near-instant. Anything under
 	// the first two backoffs (1s + 2s) means the retry was skipped.
 	if elapsed < 3*time.Second {
 		t.Fatalf("buildRepoAdapters gave up in %v — it is not retrying, so a single "+

@@ -84,6 +84,10 @@ attributed to the first line's path — an approximation, not an exact split.
 ## REST API
 
 Served by `cmd/order-reports` (default `:8092`), over a read-only Postgres pool.
+The contract is `apis/openapi-reports.yaml`
+([ADR 0039](/docs/adr/0039-reports-api-openapi-contract)), rendered as the
+generated [Reports API reference](/docs/api-reference/rest-reports/order-management-reports-api)
+and pinned to the router by `TestReportsContract_*`.
 
 ### `GET /reports/funnel`
 

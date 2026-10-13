@@ -79,7 +79,12 @@ With the transactional outbox there is **no publish span**. The encoder
 injects the trace context of the request that wrote the outbox row into
 the stored headers, and the relay sends those headers unchanged. A
 consumer's span is therefore parented on the original HTTP request, not
-on the relay pass.
+on the relay pass. The trace context lives in `outbox_events.headers`
+(`traceparent`, `tracestate` when present, next to `content-type`); a row
+written without an active span relays without a `traceparent`. This is the
+fleet's D27 reference (ADR 0041), pinned end to end against real Postgres
+and Kafka by `TestOutboxTrace_TraceparentCrossesTheOutboxToKafka` and
+`TestOutboxTrace_RowWithoutTraceHeadersRelaysUnchanged`.
 
 Postgres, the inventory-storage HTTP client and the Kafka replay caches
 (`kafkacatalog`, `kafkacptschedule`, `kafkapathcapacity`) are not
@@ -96,6 +101,7 @@ Every binary writes JSON lines to stdout through `log/slog`, at
 | `http request` | `method`, `route` (chi pattern; the sanitised raw path for a 404), `status`, `bytes`, `duration_ms`, `request_id` (chi `RequestID`) | `internal/adapters/inbound/http/logging.go`, on the `cmd/order` and `cmd/order-reports` routers |
 | `domain event published` | `event_name`, `payload` | log publisher (`EVENT_PUBLISHER=log`) |
 | `outbox relay pass failed` | `error` | outbox relay, ERROR |
+| `outbox relay: row reached the attempt cap and is no longer claimed` | `outbox_id`, `topic`, `event_type`, `key`, `attempts`, `max_attempts`, `error`, `rearm` | outbox relay, ERROR, once per row that reaches `OUTBOX_MAX_ATTEMPTS` (ADR 0040) |
 | `housekeeping sweep` / `housekeeping sweep failed` | `idempotency_keys_deleted`, `outbox_events_deleted`, `error` | sweeper |
 | `repromise: kafka unavailable, retrying` | `stage`, `retry_in`, `error`, `partition`, `offset` | re-promise consumer |
 | `repromise: non-CloudEvents message, sending to dead-letter topic` | `topic`, `partition`, `offset`, `dlq_topic`, `error` | re-promise consumer |
@@ -137,7 +143,7 @@ provisioned today.
 
 | Alert | Expression (Prometheus names) | Why |
 | --- | --- | --- |
-| Outbox stuck | `max(order_outbox_lag_seconds) > 60` for 5 m | The relay retries forever on the same row; a growing lag means Kafka is unreachable or one row cannot be sent, and every later event waits behind it. |
+| Outbox stuck | `max(order_outbox_lag_seconds) > 60` for 5 m | A growing lag means Kafka is unreachable or one row cannot be sent. The relay retries the head row up to `OUTBOX_MAX_ATTEMPTS` (20) times, then parks it (ERROR `outbox relay: row reached the attempt cap and is no longer claimed`) so later events publish; the parked row keeps the lag growing until an operator re-arms it (ADR 0040). |
 | Inventory breaker open | `max(circuit_breaker_state{dependency="inventory-storage"}) == 2` for 2 m | Every allocation fails with `downstream-unavailable` (503) while open. |
 | Intake rejections climbing | `sum(rate(order_orders_received_total{outcome="rejected"}[15m])) / sum(rate(order_orders_received_total[15m])) > 0.2` | A caller or upstream integration is sending orders the domain refuses. |
 | API 5xx | `sum(rate(kong_http_requests_total{service=~"httproute\\.warehouse-systems\\.order-management\\..*", code=~"5.."}[5m])) > 0` for 10 m | 503 is how downstream outages and permissive mode surface. |

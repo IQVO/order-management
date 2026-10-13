@@ -100,10 +100,13 @@ func buildKafkaPublishing(orders ports.OrderRepo, pool *pgxpool.Pool, closeRepos
 	uow := postgres.NewUnitOfWork(pool)
 	outboxPublisher := postgres.NewOutboxPublisher(pool, integration, analytics)
 	sink := kafkaadapter.NewRelaySink(brokers...)
+	maxAttempts := nonNegativeIntEnv(outboxMaxAttemptsEnv, defaultOutboxMaxAttempts, logger)
 	relay := postgres.NewOutboxRelay(pool, sink, logger,
-		postgres.WithInterval(durationEnv("OUTBOX_RELAY_INTERVAL", time.Second, logger)))
+		postgres.WithInterval(durationEnv("OUTBOX_RELAY_INTERVAL", time.Second, logger)),
+		postgres.WithMaxAttempts(maxAttempts))
 	logger.Info("event publisher configured (transactional outbox)",
-		"integration_topic", kafkaadapter.Topic, "analytics_topic", kafkaadapter.AnalyticsTopic)
+		"integration_topic", kafkaadapter.Topic, "analytics_topic", kafkaadapter.AnalyticsTopic,
+		"outbox_max_attempts", maxAttempts)
 
 	closeAll := func() {
 		if err := sink.Close(); err != nil {

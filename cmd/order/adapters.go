@@ -52,7 +52,8 @@ import (
 // no-op), and this service dials Postgres for migrations before it ever
 // starts serving. A single attempt turns that known, transient condition
 // into CrashLoopBackOff — confirmed live (129 restarts). The retry does
-// NOT weaken the fail-closed rule: after the ~31s budget is exhausted
+// NOT weaken the fail-closed rule: after the budget (5 attempts, 15s of
+// backoff) is exhausted
 // this still returns the real underlying error and the caller still
 // refuses to boot.
 func buildRepoAdapters(ctx context.Context, databaseURL, migrationsDatabaseURL, migrationsPath, eventPublisher string, logger *slog.Logger) (

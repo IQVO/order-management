@@ -14,7 +14,11 @@
     "write-heading-ids": "docusaurus write-heading-ids",
     "typecheck": "tsc",
     "gen-api-docs": "docusaurus gen-api-docs order",
-    "clean-api-docs": "docusaurus clean-api-docs order"
+    "gen-api-docs:reports": "docusaurus gen-api-docs orderReports",
+    "gen-api-docs:all": "docusaurus gen-api-docs all",
+    "clean-api-docs": "docusaurus clean-api-docs order",
+    "clean-api-docs:reports": "docusaurus clean-api-docs orderReports",
+    "clean-api-docs:all": "docusaurus clean-api-docs all"
   },
   "dependencies": {
     "@docusaurus/core": "3.10.2",
@@ -64,6 +68,9 @@
     "webpack-dev-server": "^5.2.6",
     "sockjs": "^0.3.24",
     "qs": "^6.16.0",
-    "http-cache-semantics": "^4.3.0"
+    "http-cache-semantics": "^4.3.0",
+    "tinypool": "^2.1.2",
+    "postcss-selector-parser": "^7.1.6",
+    "katex": "^0.18.2"
   }
 }
