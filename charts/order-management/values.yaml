@@ -57,6 +57,26 @@ gatewayApi:
       pathType: PathPrefix
   stripPath: true
 
+# Kong plugins rendered by THIS chart (kong-plugins.yaml) and attached to
+# every HTTPRoute above via the konghq.com/plugins annotation. Fleet
+# decision 2026-10-13: Kong configuration belongs to the application
+# charts, not warehouse-infra Terraform. Defaults off; warehouse-infra's
+# values switch them on. NO auth plugin here, ever — the fleet's endpoints
+# are unauthenticated and the gateway adds no authentication or
+# authorization.
+kongPlugins:
+  cors:
+    enabled: false
+    # Exact browser origin, never "*" (endpoints are unauthenticated).
+    origin: "http://localhost"
+  prometheus:
+    enabled: false
+  opentelemetry:
+    enabled: false
+    # OTLP/HTTP traces endpoint of the fleet collector; needs Kong started
+    # with KONG_TRACING_INSTRUMENTATIONS or the plugin exports zero spans.
+    tracesEndpoint: "http://otel-collector.observability.svc.cluster.local:4318/v1/traces"
+
 resources:
   limits:
     cpu: 500m
@@ -381,6 +401,16 @@ analytics:
       type: ClusterIP
       port: 80
       targetPort: 8092
+    # Kong exposure of the reports API (reports-route.yaml): host path
+    # /api/<context>/reports rewritten to /reports. Off by default;
+    # warehouse-infra turns it on with the real parentRefs and path.
+    route:
+      enabled: false
+      path: "/api/order-management/reports"
+      parentRefs:
+        - name: ""
+          namespace: ""
+          sectionName: "http"
     # Stateless read-only REST reader over the analytical database (its
     # own read-only pgxpool, analyticsstore.NewReadOnlyPool) -- no
     # in-memory state, safe to run N independent copies of. max 3 /
@@ -457,6 +487,16 @@ mcp:
     type: ClusterIP
     port: 8090
     targetPort: 8090
+  # Kong exposure of the MCP server (mcp-route.yaml): host path
+  # /api/mcp/<context> rewritten to /mcp. Off by default; warehouse-infra
+  # turns it on with the real parentRefs and path.
+  route:
+    enabled: false
+    path: "/api/mcp/order-management"
+    parentRefs:
+      - name: ""
+        namespace: ""
+        sectionName: "http"
   extraEnv: []
   resources:
     limits:

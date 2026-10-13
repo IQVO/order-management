@@ -92,3 +92,19 @@ select it.
 {{- define "order-management.frontendFullname" -}}
 {{- include "order-management.fullname" . }}-frontend
 {{- end }}
+
+{{/*
+Comma-joined names of this chart's enabled KongPlugins, for the
+konghq.com/plugins annotation on every HTTPRoute this chart renders.
+Empty string (annotation omitted) when none are enabled — standalone
+installs without Kong are unaffected.
+*/}}
+{{- define "order-management.kongPluginNames" -}}
+{{- $names := list -}}
+{{- range $name, $cfg := .Values.kongPlugins -}}
+{{- if $cfg.enabled -}}
+{{- $names = append $names (printf "%s-%s" (include "order-management.fullname" $) $name) -}}
+{{- end -}}
+{{- end -}}
+{{- join "," $names -}}
+{{- end -}}
