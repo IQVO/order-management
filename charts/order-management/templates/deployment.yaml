@@ -47,6 +47,16 @@ spec:
             - name: http
               containerPort: {{ .Values.service.targetPort }}
               protocol: TCP
+          # D14 (2026-10-12): every config.* value (OUTBOX_MAX_ATTEMPTS,
+          # OUTBOX_RELAY_INTERVAL, HOUSEKEEPING_INTERVAL, ...) reaches
+          # cmd/order through the chart ConfigMap. The explicit `env`
+          # entries below win over envFrom for the same key and carry the
+          # same values, so nothing changes for the variables already set
+          # here; the checksum/config annotation rolls the pods when the
+          # ConfigMap changes.
+          envFrom:
+            - configMapRef:
+                name: {{ include "order-management.fullname" . }}
           env:
             - name: HTTP_ADDR
               value: {{ .Values.config.httpAddr | quote }}
@@ -66,6 +76,9 @@ spec:
             - name: OUTBOX_RETENTION
               value: {{ .Values.config.outboxRetention | quote }}
             {{- end }}
+            # ADR 0040: outbox relay attempt cap ("0" = unlimited).
+            - name: OUTBOX_MAX_ATTEMPTS
+              value: {{ .Values.config.outboxMaxAttempts | quote }}
             {{- if or (eq .Values.config.eventPublisher "kafka") .Values.plannedCapacity.consumerGroup .Values.productClassification.consumerGroup }}
             - name: KAFKA_BROKERS
               value: {{ .Values.kafka.brokers | quote }}

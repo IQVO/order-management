@@ -93,7 +93,8 @@ func run() error {
 	// starts (Istio native sidecars; holdApplicationUntilProxyStarts is a
 	// no-op for them), and a single attempt turns that transient
 	// condition into CrashLoopBackOff. This does not weaken fail-closed:
-	// after the ~31s budget is exhausted this still returns the real
+	// after the budget (5 attempts, 15s of backoff) is exhausted this
+	// still returns the real
 	// underlying error and the caller still refuses to boot.
 	if err := bootretry.Retry(rootCtx, logger, "run analytics migrations", func() error {
 		return postgres.RunMigrations(analyticsURL, migrationsPath)

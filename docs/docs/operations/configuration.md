@@ -35,9 +35,9 @@ Sources live in `cmd/order/` unless stated otherwise.
 | Variable | Default | Required? | Meaning | Source |
 | --- | --- | --- | --- | --- |
 | `HTTP_ADDR` | `:8080` | no | Listen address of the REST API. | `main.go`, `http.go` |
-| `LOG_LEVEL` | `info` | no | `debug`, `info`, `warn` or `error` (case-insensitive). Anything else means `info`. Logs are JSON on stdout. | `main.go`, `config.go` (`newLogger`) |
+| `LOG_LEVEL` | `info` | no | `debug`, `info`, `warn`/`warning` or `error` (case-insensitive). Anything else means `info`. Logs are JSON on stdout. | `main.go`, `config.go` (`newLogger`) |
 | `SHUTDOWN_DRAIN_DELAY` | `5s` | no | How long to wait after `/readyz` turns `503` before the listener closes (ADR 0025). `0` disables the wait. A negative or invalid value logs a warning and uses `5s`. | `shutdown.go` |
-| `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:5181` | no | Comma-separated browser origins allowed to call the API: the console shell's and this repo's MFE dev ports (ADR 0007). Allowed headers are `Content-Type` and `Authorization` only. | `internal/adapters/inbound/http/server.go` |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:5181` | no | Comma-separated browser origins allowed to call the API: the console shell's and this repo's MFE dev ports (ADR 0007). Allowed headers are `Content-Type`, `Authorization` and `Idempotency-Key` (the MFE sends the last one on `POST /orders`, ADR 0038). | `internal/adapters/inbound/http/server.go` |
 
 ### Persistence
 
@@ -54,6 +54,7 @@ Sources live in `cmd/order/` unless stated otherwise.
 | `EVENT_PUBLISHER` | `log` | no | `log` writes each domain event as an INFO line (`domain event published`). `kafka` publishes to `warehouse.order-management.events` (integration) and `warehouse.order-management.analytics`. With `DATABASE_URL` set, `kafka` goes through the `outbox_events` table and the in-process relay (ADR 0022). Without it, events go straight to the broker. | `main.go`, `adapters.go` |
 | `KAFKA_BROKERS` | `localhost:9092` for the publishers; unset for everything else | depends | Comma-separated broker list. The publishers fall back to `localhost:9092`. Each consumer has its own rule: the re-promise consumer starts only when this is set; the planned-capacity consumer needs it too; `PATH_CATALOGUE_SOURCE=kafka` and `PRODUCT_CLASSIFICATION_MODE=kafka` are **boot errors** without it. | `kafka.go`, `wiring.go`, `planned_capacity.go`, `product_classification.go` |
 | `OUTBOX_RELAY_INTERVAL` | `1s` | no | How long the outbox relay sleeps after a pass that found less than a full batch (100 rows). `0` or invalid means `1s`. | `kafka.go` |
+| `OUTBOX_MAX_ATTEMPTS` | `20` | no | Failed sends after which the outbox relay stops claiming a row (ADR 0040). The row stays in `outbox_events` with `attempts` and `last_error`, is logged once at ERROR, and later rows overtake it. `0` means unlimited (one poison row then blocks every later event). A negative or non-numeric value logs `ignoring invalid integer env var` and uses `20`. Re-arm a row with `UPDATE outbox_events SET attempts = 0 WHERE id = ...`. | `kafka.go`, `config.go` (`nonNegativeIntEnv`) |
 | `HOUSEKEEPING_INTERVAL` | `1h` | no | Period of the housekeeping sweeper (ADR 0032). `0` disables the sweeper. Only used when `DATABASE_URL` is set. | `housekeeping.go` |
 | `IDEMPOTENCY_KEY_TTL` | `24h` | no | Age after which `idempotency_keys` rows are deleted. `0` keeps them forever. | `housekeeping.go` |
 | `OUTBOX_RETENTION` | `168h` | no | Age after which **published** `outbox_events` rows are deleted. Unpublished rows are never swept. `0` keeps them forever. | `housekeeping.go` |
@@ -88,7 +89,7 @@ Sources live in `cmd/order/` unless stated otherwise.
 | Variable | Default | Required? | Meaning | Source |
 | --- | --- | --- | --- | --- |
 | `MCP_ADDR` | `:8090` | no | Listen address of the Streamable HTTP endpoint (mounted on `/*`). | `cmd/mcp/main.go` |
-| `LOG_LEVEL` | `info` | no | `debug`, `warn` or `error`, **case-sensitive** here (unlike `cmd/order`). Anything else means `info`. | `cmd/mcp/main.go` (`logLevel`) |
+| `LOG_LEVEL` | `info` | no | `debug`, `info`, `warn`/`warning` or `error` (case-insensitive, like every other binary). Anything else means `info`. | `cmd/mcp/main.go` (`logLevel`) |
 | `DATABASE_URL` | unset | no | OLTP Postgres DSN for `get_order`. Unset means an empty in-memory repository, so every lookup is `order not found`. When set, this binary also runs the OLTP migrations at boot. | `cmd/mcp/main.go` |
 | `MIGRATIONS_DATABASE_URL` | value of `DATABASE_URL` | no | Direct DSN for the migration step only (ADR 0029). | `cmd/mcp/main.go` |
 | `MIGRATIONS_PATH` | `migrations` | no | OLTP migrations directory. | `cmd/mcp/main.go` |
@@ -128,14 +129,26 @@ Sources live in `cmd/order/` unless stated otherwise.
 
 `charts/order-management` renders a subset of the variables from dedicated
 values. Everything else (`PATH_CATALOGUE_SOURCE`, `DEFAULT_SITE_ID`,
-`PROMISE_*`, `OUTBOX_RELAY_INTERVAL`, `CORS_ALLOWED_ORIGINS`, `LOG_LEVEL`)
-goes through `extraEnv` (or `mcp.extraEnv`).
+`PROMISE_*`, `CORS_ALLOWED_ORIGINS`, `LOG_LEVEL`) goes through `extraEnv`
+(or `mcp.extraEnv`).
+
+The `config.*`, `kafka.*`, `productClassification.*`, `plannedCapacity.*`,
+`demandProjection.*` and `inventoryStorage.*` values are rendered into the
+chart ConfigMap (`templates/configmap.yaml`), and the api Deployment mounts
+that ConfigMap with `envFrom: configMapRef` (gap fix D14). Explicit `env`
+entries and `extraEnv` win over the ConfigMap for the same key. The
+projector, reports and MCP Deployments do not mount it. A ConfigMap change
+rolls the api pods through the `checksum/config` annotation.
+`charts/order-management/tests/render_test.sh` (`make chart-test`, CI job
+`chart-tests`) asserts the mount.
 
 | Chart value | Variable (container) | Rendered when |
 | --- | --- | --- |
 | `config.httpAddr` | `HTTP_ADDR` (order) | always |
 | `config.eventPublisher` | `EVENT_PUBLISHER` (order) | always |
 | `config.shutdownDrainDelay` | `SHUTDOWN_DRAIN_DELAY` (order) | always |
+| `config.outboxRelayInterval` | `OUTBOX_RELAY_INTERVAL` (order, via the ConfigMap) | always |
+| `config.outboxMaxAttempts` | `OUTBOX_MAX_ATTEMPTS` (order; default `"20"`, `"0"` = unlimited, ADR 0040) | always |
 | `config.housekeepingInterval`, `config.idempotencyKeyTtl`, `config.outboxRetention` | `HOUSEKEEPING_INTERVAL`, `IDEMPOTENCY_KEY_TTL`, `OUTBOX_RETENTION` (order) | a database is configured |
 | `kafka.brokers` | `KAFKA_BROKERS` (order) | `config.eventPublisher=kafka`, or `plannedCapacity.consumerGroup` or `productClassification.consumerGroup` is set |
 | `productClassification.mode`, `.consumerGroup` | `PRODUCT_CLASSIFICATION_MODE`, `PRODUCT_CLASSIFICATION_CONSUMER_GROUP` (order) | the value is non-empty |

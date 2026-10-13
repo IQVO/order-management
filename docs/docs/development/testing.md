@@ -39,6 +39,7 @@ Source: `features/*.feature`, `**/*_test.go`, `.github/workflows/ci.yml`, `Makef
 | `make mutation-fast` | `gremlins unleash ./internal/domain/order` | `gremlins` v0.6.0 |
 | `make mutation` | `gremlins unleash ./internal/domain --workers 1 --timeout-coefficient 30` | `gremlins` v0.6.0; slow |
 | `make vuln` | `govulncheck ./...` | `govulncheck` |
+| `make chart-test` | `bash charts/order-management/tests/render_test.sh` then `python3 charts/order-management/tests/test_service_selectors.py` | `helm`, Python 3 with PyYAML |
 | `make check` | `fmt-check vet build lint test` | `golangci-lint` v2.13.1 |
 | `make check-all` | `check coverage arch-test bdd` | as above |
 | `make check-fast` | `fmt-check vet arch-test` plus the tests of packages changed against `HEAD` | used by the agent Stop hook |
@@ -140,6 +141,14 @@ for `/healthz`, then runs Schemathesis 4.28.0 with
 must be ship-complete" rule links two booleans in a way OpenAPI 3.0 cannot
 express; the BDD scenario and the domain unit test cover it instead.
 
+`cmd/order-reports` needs an analytical database to start, so its contract,
+`apis/openapi-reports.yaml` (ADR 0039), is checked by two Go tests in the
+`test` job instead of Schemathesis: `TestReportsContract_RoutesMatchSpec`
+(the chi router's routes equal the spec's paths) and
+`TestReportsContract_ResponsesMatchSpec` (every documented status of every
+operation, driven through a stub store, answers a declared status and media
+type with exactly the documented properties).
+
 ## Mutation testing (gremlins)
 
 Thresholds live in `.gremlins.yaml`: **efficacy 97**, **mutant-coverage
@@ -163,11 +172,13 @@ three survivors are listed as accepted near-equivalents in the README.
 | `TestDomainHasNoSerializationTags` | no `json:` tags in `internal/domain`. |
 | `TestCloudEventsOnly`, `TestReplayConsumersSetCommitInterval` | every Kafka message goes through the CloudEvents helper; replay readers set `CommitInterval`. |
 | `TestEventCatalogueMatchesContract` | every CloudEvents type `apis/asyncapi.yaml` declares for this service also appears in an ADR (the event catalogue). |
+| `TestOptionalMCPInputsCarryOmitempty` | a struct field whose `jsonschema` description says "optional" carries `omitempty`, so the MCP SDK does not mark it required (fleet decision D16). |
 | `TestEveryIntegrationPackageRunsInCI` | see above. |
 
 Several sensors have a companion test (`TestPostgresIntegrationDetector`,
 `TestEventCatalogueDetector`, `TestDomainTagSensorFailsOnBadFixtures`,
-`TestIntegrationCoverageSensorFailsOnBadFixtures`) that proves the sensor
+`TestIntegrationCoverageSensorFailsOnBadFixtures`,
+`TestOptionalMCPInputSensorFailsOnBadFixtures`) that proves the sensor
 flags a known-bad fixture.
 
 ## MCP evals (`internal/adapters/inbound/mcp`)
@@ -180,13 +191,43 @@ flags a known-bad fixture.
 
 ## Frontend (`web/`)
 
-Vitest tests (`src/config.test.ts`, `src/screens/OrderManagementScreen.test.tsx`
-with an MSW mock server) run in the `web` CI job together with lint,
-`tsc -b` and the production build. They are not part of `make check`.
+Vitest tests (`src/config.test.ts`, `src/api.test.ts`,
+`src/screens/OrderManagementScreen.test.tsx`, with an MSW mock server) run in
+the `web` CI job together with lint, `tsc -b` and the production build. They
+are not part of `make check`. `api.test.ts` and four screen cases pin the
+`Idempotency-Key` contract of ADR 0038 (a UUID per submission, reused when
+the request got no answer, new after an answer or an edit);
+`TestCORS_PreflightAllowsIdempotencyKey` pins the CORS side.
 
 The chart has a selector test, `python3
-charts/order-management/tests/test_service_selectors.py`, which proves
-each Service selects exactly one Deployment. No CI job runs it.
+charts/order-management/tests/test_service_selectors.py` (`make chart-test`),
+which proves each Service selects exactly one Deployment and that the
+startupProbe outlasts the boot retry budget. The `chart-tests` CI job runs it
+on every push and PR with Helm v3.16.4 and PyYAML; without PyYAML the script
+fails instead of skipping. Before it, the same job runs
+`charts/order-management/tests/render_test.sh` (helm only), which asserts
+the api Deployment mounts the chart ConfigMap with `envFrom` (gap fix D14),
+that `config.outboxRelayInterval` and `config.outboxMaxAttempts` reach it
+(default `OUTBOX_MAX_ATTEMPTS` `20`, ADR 0040), that the housekeeping keys
+render only with a database, and that the projector, reports and MCP
+Deployments do not mount it.
+
+The outbox relay attempt cap (ADR 0040) is pinned by
+`TestOutboxRelay_MaxAttempts_PoisonRowIsExcludedAndTheNextRowPublishes` and
+`TestOutboxRelay_WithoutMaxAttempts_RetriesWithoutBound` (testcontainers
+Postgres, `internal/adapters/outbound/postgres/outbox_integration_test.go`),
+`TestOutboxMaxAttemptsFromEnv` (`cmd/order`), and the architecture fitness
+test `TestOutboxRelayCallsSetMaxAttempts`, which fails when a file under
+`cmd/` builds a relay without `WithMaxAttempts`.
+
+Trace continuity across the outbox (ADR 0041, the fleet D27 reference) is
+pinned by `TestOutboxTrace_TraceparentCrossesTheOutboxToKafka` and
+`TestOutboxTrace_RowWithoutTraceHeadersRelaysUnchanged`
+(`internal/adapters/outbound/postgres/outbox_trace_integration_test.go`,
+`integration` tag). They boot the package's shared Postgres container plus
+their own Kafka container: a use case runs inside a request span, the relay
+sends the row on a context without that span, and the consumed message's
+`traceparent` must extract to the request's trace and span.
 
 ## CI jobs (`.github/workflows/ci.yml`)
 
@@ -202,15 +243,17 @@ each Service selects exactly one Deployment. No CI job runs it.
 | `integration` | `go vet -tags=integration ./...`, `go test -tags=integration ./... -race -count=1` | every push and PR |
 | `mutation-fast` | `gremlins unleash ./internal/domain/order` | every push and PR |
 | `vuln` | govulncheck v1.8.0 | every push and PR |
-| `api-lint` | Spectral on `apis/openapi.yaml` and `apis/asyncapi.yaml` | every push and PR |
+| `api-lint` | Spectral on `apis/openapi.yaml`, `apis/openapi-reports.yaml` and `apis/asyncapi.yaml` | every push and PR |
 | `arch-test` | `go test ./internal/architecture/... -v` | every push and PR |
-| `docs-api-drift` | regenerates `docs/docs/api-reference/rest` and fails on any change | every push and PR |
+| `docs-api-drift` | `clean-api-docs:all` + `gen-api-docs:all`; fails on any change under `docs/docs/api-reference/rest` or `rest-reports` | every push and PR |
 | `web` | MFE lint, typecheck, test, build | every push and PR |
+| `chart-tests` | `charts/order-management/tests/render_test.sh` and `test_service_selectors.py` (Helm v3.16.4, PyYAML) | every push and PR |
 | `mutation` | full-domain gremlins; opens or closes a `harness:red` issue | schedule (Mondays 06:00 UTC) and manual dispatch |
 | `drift` | deadcode, `go mod tidy -diff`, knip, coverage quality | schedule and manual dispatch |
 | `helm-lint`, `trivy-scan` | chart-testing lint; image scan | PRs into `main` only |
 | `docker-publish`, `release` | push the image, tag, chart and GitHub release | pushes to `main` only |
 
-The documentation site is built by `.github/workflows/docs.yml` only on
-pushes to `main`. A docs change in a PR is not built by CI: run
-`npm ci` and `npm run build` in `docs/` yourself.
+The documentation site is built by `.github/workflows/docs.yml` on every
+pull request that touches `docs/**`, `apis/**` or the workflow (build only,
+no Pages artifact, no deploy) and built and published on pushes to `main`.
+Run `npm ci` and `npm run build` in `docs/` to reproduce it locally.

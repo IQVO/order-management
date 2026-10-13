@@ -70,6 +70,12 @@ Annotations: `readOnlyHint: true`, `idempotentHint: false`.
 | `to` | string | yes | exclusive end of the time window, RFC3339 |
 | `pathId` | string | no | optional exact-match process path filter |
 
+`pathId` is `json:"pathId,omitempty"`, so the generated input schema does not
+list it as required and a call without it succeeds.
+`TestOptionalMCPInputsCarryOmitempty` (`internal/architecture`) fails the
+build if a field whose `jsonschema` description says "optional" lacks
+`omitempty`.
+
 Output (structured content), summed over the hourly rows of
 `/reports/funnel` for the window:
 

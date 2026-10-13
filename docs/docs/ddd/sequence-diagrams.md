@@ -438,12 +438,12 @@ sequenceDiagram
   participant PJ as order-projector
 
   loop every OUTBOX_RELAY_INTERVAL, default 1s
-    RL->>DB: BEGIN, SELECT unpublished outbox_events FOR UPDATE SKIP LOCKED
+    RL->>DB: BEGIN, SELECT unpublished outbox_events with attempts below OUTBOX_MAX_ATTEMPTS FOR UPDATE SKIP LOCKED
     loop each claimed row
       RL->>RS: Send(topic, key=OrderId, CloudEvents value, headers)
       RS->>K: WriteMessages, hash balancer, RequireAll
       alt send failed
-        RL->>DB: UPDATE attempts and last_error, COMMIT, retry next tick
+        RL->>DB: UPDATE attempts and last_error, COMMIT, retry next tick (parked and logged at ERROR once attempts reach the cap, ADR 0040)
       else sent
         RL->>DB: UPDATE published_at
       end

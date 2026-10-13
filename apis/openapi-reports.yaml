@@ -1,0 +1,318 @@
+openapi: 3.0.3
+info:
+  title: Order Management Reports API
+  version: "1.0.0"
+  description: >
+    The READ-ONLY analytical surface of order-management's "Order Funnel &
+    Allocation Health" data product (ADR 0006), served by the separate
+    `cmd/order-reports` binary over a read-only Postgres pool against the
+    analytical database. It is NOT the OLTP `cmd/order` API documented in
+    apis/openapi.yaml: a different binary, port and database (ADR 0039).
+
+
+    The report is a projection over this service's own domain events,
+    delivered as CloudEvents 1.0 on the `warehouse.order-management.analytics`
+    topic and applied by `cmd/order-projector`, the single writer. It is
+    EVENTUALLY CONSISTENT, to a freshness target of p95 event-to-report lag
+    under 30 seconds: read GET /reports/funnel/freshness to see how far the
+    read model trails the event stream.
+
+
+    Rows are keyed by process path (`pathId`) and UTC hour bucket. Every
+    counter is a count of events in that bucket. No route requires
+    authentication (ADR 0012). Errors use RFC 7807 problem details
+    (`application/problem+json`).
+  contact:
+    name: Order Management (Generic/Supporting Bounded Context)
+    url: https://github.com/IQVO/order-management
+  license:
+    name: MIT
+servers:
+  - url: http://localhost:8092
+    description: Local development (cmd/order-reports, HTTP_ADDR default :8092)
+tags:
+  - name: Reports
+    description: The Order Funnel & Allocation Health analytical read model.
+  - name: Health
+    description: Liveness of the reports process.
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      operationId: getReportsHealthz
+      summary: Liveness probe
+      description: >
+        Reports that the reports process is up. It does not touch the
+        analytical database: the database is pinged once at boot, with the
+        bootretry budget, and the process exits when that fails.
+      responses:
+        "200":
+          description: The process is up.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+
+  /reports/funnel:
+    get:
+      tags: [Reports]
+      operationId: getOrderFunnelReport
+      summary: Order funnel and allocation health per process path and UTC hour
+      description: >
+        Returns one row per (pathId, hour bucket) in the half-open window
+        [from, to), ordered by hour bucket then path. An empty window is a
+        200 with an empty `rows` array, not a 404.
+
+
+        Order-level counters are attributed to the order's first line's path
+        (an approximation since multi-path routing, ADR 0021).
+        `ordersRepromised` is not path-dimensioned and is only ever non-zero
+        on the row whose `pathId` is the empty string.
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: Inclusive window start, RFC 3339.
+          schema:
+            type: string
+            format: date-time
+          example: "2026-06-01T00:00:00Z"
+        - name: to
+          in: query
+          required: true
+          description: Exclusive window end, RFC 3339.
+          schema:
+            type: string
+            format: date-time
+          example: "2026-06-02T00:00:00Z"
+        - name: pathId
+          in: query
+          required: false
+          description: Optional exact-match process-path filter. Omit for every path.
+          schema:
+            type: string
+          example: pick
+        - name: granularity
+          in: query
+          required: false
+          description: Bucket resolution. Only hourly buckets exist.
+          schema:
+            type: string
+            enum: [hour]
+            default: hour
+      responses:
+        "200":
+          description: The report rows for the window.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FunnelReport"
+        "400":
+          description: >
+            `from` or `to` is missing or not RFC 3339, or `granularity` is
+            not `hour` (`invalid-report-query`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "500":
+          description: The analytical database could not be read (`report-store-error`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+
+  /reports/funnel/freshness:
+    get:
+      tags: [Reports]
+      operationId: getOrderFunnelReportFreshness
+      summary: How far the read model trails the event stream
+      description: >
+        Returns the age of the most recently projected event, the data
+        product's freshness signal. A growing lag means the projector is
+        behind or stopped. A lag of 0 on an empty read model looks the same
+        as a perfectly fresh one, so read it together with the report rows.
+      responses:
+        "200":
+          description: The current projection lag.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Freshness"
+        "500":
+          description: The freshness signal could not be read (`report-store-error`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+
+components:
+  schemas:
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          description: Always `ok` when the process answers.
+          example: ok
+
+    FunnelReport:
+      type: object
+      required: [rows]
+      properties:
+        rows:
+          type: array
+          description: One row per (pathId, hour bucket). Always present; empty for a window with no data.
+          items:
+            $ref: "#/components/schemas/FunnelRow"
+
+    FunnelRow:
+      type: object
+      required:
+        - pathId
+        - hourBucket
+        - ordersReceived
+        - ordersAllocated
+        - ordersPartiallyAllocated
+        - ordersAllocationFailed
+        - ordersReleased
+        - ordersCancelled
+        - linesAllocated
+        - linesBackordered
+        - linesReleased
+        - promiseBasisCapability
+        - promiseBasisLeadTime
+        - promiseBasisNetwork
+        - ordersRepromised
+        - ordersSplitShipment
+        - promiseToCutoffGapSeconds
+      properties:
+        pathId:
+          type: string
+          description: >
+            Process path of the row. The empty string holds counters that
+            have no path (ordersRepromised).
+          example: pick
+        hourBucket:
+          type: string
+          format: date-time
+          description: Start of the UTC hour this row aggregates.
+          example: "2026-06-01T14:00:00Z"
+        ordersReceived:
+          type: integer
+          format: int32
+          description: OrderReceived events. Funnel entry.
+          example: 5
+        ordersAllocated:
+          type: integer
+          format: int32
+          description: OrderAllocated events (every line allocated).
+          example: 4
+        ordersPartiallyAllocated:
+          type: integer
+          format: int32
+          description: OrderPartiallyAllocated events (some lines backordered).
+          example: 0
+        ordersAllocationFailed:
+          type: integer
+          format: int32
+          description: OrderAllocationPartiallyFailed events (hard, non-business allocation failure). Leakage.
+          example: 0
+        ordersReleased:
+          type: integer
+          format: int32
+          description: OrderReleased events (every line released; ADR 0034). Funnel exit.
+          example: 3
+        ordersCancelled:
+          type: integer
+          format: int32
+          description: OrderCancelled events. Leakage.
+          example: 1
+        linesAllocated:
+          type: integer
+          format: int32
+          description: OrderLineAllocated events.
+          example: 8
+        linesBackordered:
+          type: integer
+          format: int32
+          description: OrderLineBackordered events (inventory-storage answered 409). Leakage.
+          example: 2
+        linesReleased:
+          type: integer
+          format: int32
+          description: OrderLineReleased events (ADR 0034).
+          example: 6
+        promiseBasisCapability:
+          type: integer
+          format: int32
+          description: Allocations whose promise basis was Capability (ADR 0019).
+          example: 3
+        promiseBasisLeadTime:
+          type: integer
+          format: int32
+          description: Allocations whose promise basis was the LeadTime fallback (ADR 0019).
+          example: 1
+        promiseBasisNetwork:
+          type: integer
+          format: int32
+          description: Allocations whose promise date was dictated by an external deadline (Network basis, ADR 0020).
+          example: 0
+        ordersRepromised:
+          type: integer
+          format: int32
+          description: OrderRepromised events (ADR 0018). Only non-zero on the row whose pathId is "".
+          example: 0
+        ordersSplitShipment:
+          type: integer
+          format: int32
+          description: Allocations whose order had more than one promise group (ADR 0017).
+          example: 0
+        promiseToCutoffGapSeconds:
+          type: number
+          format: double
+          description: >
+            Mean of (cutoff - allocation time) in seconds over
+            Capability-basis promises in the bucket; 0 when there are none.
+          example: 5400
+
+    Freshness:
+      type: object
+      required: [lagSeconds]
+      properties:
+        lagSeconds:
+          type: number
+          format: double
+          description: >
+            Seconds between now and the time of the most recently projected
+            event. 0 when the read model is empty.
+          example: 12.4
+
+    Problem:
+      type: object
+      description: RFC 7807 problem details, the same shape as the OLTP API's.
+      required: [type, title, status, detail]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: Identifier of the error category.
+          example: https://errors.order-management.warehouse-systems.dev/invalid-report-query
+        title:
+          type: string
+          description: Fixed summary of the error category.
+          example: The report query is malformed or missing a required parameter
+        status:
+          type: integer
+          format: int32
+          description: The HTTP status code, repeated in the body.
+          example: 400
+        detail:
+          type: string
+          description: What went wrong in this request.
+          example: "query parameter 'from' is required (RFC3339)"
+        instance:
+          type: string
+          description: The request path.
+          example: /reports/funnel

@@ -135,7 +135,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: coverage
@@ -327,7 +327,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: order-management/go.mod
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "20"
       - name: Dead code (go tool deadcode, -test so test-only helpers don't false-positive)
@@ -374,7 +374,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "20"
       - name: Install Spectral
@@ -386,6 +386,10 @@ jobs:
           echo "$PWD/apis/tooling/node_modules/.bin" >> "$GITHUB_PATH"
       - name: Lint OpenAPI spec
         run: spectral lint apis/openapi.yaml --ruleset .spectral.yaml --fail-severity=warn
+      - name: Lint OpenAPI spec (reports API)
+        # cmd/order-reports is a separate binary on a separate port against
+        # a separate database, so its routes have their own spec (ADR 0039).
+        run: spectral lint apis/openapi-reports.yaml --ruleset .spectral.yaml --fail-severity=warn
       - name: Lint AsyncAPI spec
         run: spectral lint apis/asyncapi.yaml --ruleset .spectral.asyncapi.yaml --fail-severity=warn
 
@@ -404,12 +408,14 @@ jobs:
         run: go test ./internal/architecture/... -v
 
   # Guards against the generated "API Reference" docs
-  # (docs/docs/api-reference/rest/, produced by docusaurus-plugin-openapi-docs
-  # from apis/openapi.yaml) drifting out of sync with the spec they're
-  # supposed to mirror. Regenerates them exactly as `gen-api-docs` would and
-  # fails the PR if that produces any diff — i.e. someone changed
-  # apis/openapi.yaml (or hand-edited the generated files) without running
-  # `npm run gen-api-docs order` and committing the result.
+  # (docs/docs/api-reference/rest/ and rest-reports/, produced by
+  # docusaurus-plugin-openapi-docs from apis/openapi.yaml and
+  # apis/openapi-reports.yaml) drifting out of sync with the specs they
+  # mirror. Regenerates both exactly as `gen-api-docs:all` would and fails
+  # the PR if that produces any diff — i.e. someone changed a spec (or
+  # hand-edited the generated files) without running
+  # `npm run clean-api-docs:all && npm run gen-api-docs:all` and committing
+  # the result.
   # ============================================================
   # CLASSIFICATION: DOCS/API DRIFT
   # ============================================================
@@ -421,14 +427,14 @@ jobs:
         working-directory: docs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "20"
           cache: npm
           cache-dependency-path: docs/package-lock.json
       - run: npm ci
-      - name: Regenerate REST API docs from apis/openapi.yaml
-        run: npm run clean-api-docs order && npm run gen-api-docs order
+      - name: Regenerate REST API docs from apis/openapi.yaml and apis/openapi-reports.yaml
+        run: npm run clean-api-docs:all && npm run gen-api-docs:all
       - name: Fail if generated docs differ from what's committed
         # This step runs with working-directory: docs, so the pathspec is
         # relative to docs/ (docs/api-reference/rest), NOT docs/docs/api-reference/rest —
@@ -437,14 +443,44 @@ jobs:
         # page for a newly documented operation (untracked file) also fails the job.
         run: |
           set -euo pipefail
-          drift="$(git status --porcelain -- docs/api-reference/rest)"
+          drift="$(git status --porcelain -- docs/api-reference/rest docs/api-reference/rest-reports)"
           if [ -n "$drift" ]; then
             echo "$drift"
-            git --no-pager diff -- docs/api-reference/rest | head -n 200
-            echo "::error::docs/docs/api-reference/rest is out of sync with apis/openapi.yaml." \
-                 "Run 'npm run clean-api-docs order && npm run gen-api-docs order' inside docs/ and commit the result."
+            git --no-pager diff -- docs/api-reference/rest docs/api-reference/rest-reports | head -n 200
+            echo "::error::docs/docs/api-reference/rest or rest-reports is out of sync with apis/openapi.yaml / apis/openapi-reports.yaml." \
+                 "Run 'npm run clean-api-docs:all && npm run gen-api-docs:all' inside docs/ and commit the result."
             exit 1
           fi
+
+  # ============================================================
+  # CLASSIFICATION: PACKAGING VALIDATION (Helm chart, every push and PR)
+  # charts/order-management/tests/test_service_selectors.py renders the
+  # chart with every component enabled and proves each Service selects
+  # exactly one Deployment, the frontend is ClusterIP/unrouted/off by
+  # default, and the startupProbe outlasts the boot retry budget. It
+  # existed but no job ran it (fleet gap-fix D25). PyYAML is installed
+  # explicitly: without it the script fails rather than skips.
+  # charts/order-management/tests/render_test.sh asserts the api
+  # Deployment mounts the chart ConfigMap via envFrom (gap fix D14) and
+  # renders the outbox relay attempt cap (D12, ADR 0040).
+  # ============================================================
+  chart-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
+        with:
+          version: v3.16.4
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.13"
+      - name: Install PyYAML (pinned)
+        run: python3 -m pip install "pyyaml==6.0.3"
+      - name: Chart render assertions (envFrom ConfigMap mount, outbox cap)
+        run: bash charts/order-management/tests/render_test.sh
+      - name: Chart selector and probe tests
+        run: python3 charts/order-management/tests/test_service_selectors.py
 
   # ============================================================
   # CLASSIFICATION: PACKAGING VALIDATION (Helm chart)
@@ -466,7 +502,7 @@ jobs:
         with:
           python-version: "3.x"
           check-latest: true
-      - uses: helm/chart-testing-action@6ec842c01de15ebb84c8627d2744a0c2f2755c9f # v2.8.0
+      - uses: helm/chart-testing-action@720270857a28afd41e2426521a7801db09e9b510 # v2.9.0
       - name: Run chart-testing (lint)
         run: ct lint --charts charts/order-management --validate-maintainers=false --check-version-increment=false
 
@@ -495,7 +531,7 @@ jobs:
           repository: IQVO/warehouse-ui-kit
           ref: develop
           path: warehouse-ui-kit
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "22"
       - run: npm ci && npm run build
@@ -536,7 +572,7 @@ jobs:
           severity: 'CRITICAL,HIGH,MEDIUM'
           ignore-unfixed: true
       - name: Upload Trivy SARIF to Security tab
-        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
         if: always()
         with:
           sarif_file: 'trivy-results.sarif'
@@ -604,7 +640,7 @@ jobs:
             --type spdxjson \
             ghcr.io/iqvo/order-management@${{ steps.build.outputs.digest }}
       - name: Upload SBOM as a workflow artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: sbom
           path: sbom.spdx.json

@@ -85,8 +85,9 @@ servers:
     protocol: kafka
     description: >-
       Production Kafka cluster shared by every warehouse-systems bounded
-      context. Locally, a broker is available at localhost:9092 via this
-      repo's docker-compose.kafka.yml.
+      context. Locally, the fleet's single broker runs inside the kind
+      cluster and is reachable from the host at localhost:9092 (the
+      repo-local docker-compose broker was retired).
 
 defaultContentType: application/cloudevents+json
 

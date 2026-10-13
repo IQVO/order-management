@@ -25,7 +25,7 @@ COVERAGE_THRESHOLD := 90
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build vet fmt fmt-check lint test integration coverage bdd arch-test mutation-fast mutation vuln contract check check-all
+.PHONY: help build vet fmt fmt-check lint test integration coverage bdd arch-test mutation-fast mutation vuln contract chart-test check check-all
 
 help:
 	@echo "order-management — local quality gate (targets mirror .github/workflows/ci.yml)"
@@ -45,6 +45,7 @@ help:
 	@echo "  mutation      Exhaustive mutation run over the whole domain layer (slow)"
 	@echo "  vuln          Known CVEs in the dependency graph and the Go stdlib"
 	@echo "  contract      scripts/contract-test.sh — Schemathesis vs apis/openapi.yaml"
+	@echo "  chart-test    Helm chart render/selector/probe tests (helm + PyYAML)"
 	@echo ""
 	@echo "  check       FAST bundle: fmt-check vet build lint test"
 	@echo "  check-all   check + coverage + arch-test + bdd — run this before pushing"
@@ -133,6 +134,12 @@ vuln:
 # on PATH, and a free loopback port).
 contract:
 	./scripts/contract-test.sh
+
+# Helm chart render, selector and probe tests — mirrors the `chart-tests` CI
+# job. Needs helm and Python 3 with PyYAML on PATH.
+chart-test:
+	bash charts/order-management/tests/render_test.sh
+	python3 charts/order-management/tests/test_service_selectors.py
 
 # The fast self-correction loop: run this after every change, before committing.
 check: fmt-check vet build lint test

@@ -7,7 +7,6 @@
 Dockerfile
 .dockerignore
 docker-compose.yml
-docker-compose.kafka.yml
 
 # Docs, task notes, and other non-runtime artifacts that shouldn't
 # invalidate the Docker build cache when edited
