@@ -10,7 +10,7 @@ description: "ADR 0021 — ProcessPathCatalogue gains ListActive, and order.Path
 
 ## Status
 
-Accepted.
+Accepted; candidate set amended by [ADR 0042](./0042-path-selection-honours-process-path-intake.md) (only paths whose intake contains `CUSTOMER_ORDER`).
 
 ## Context
 

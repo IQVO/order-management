@@ -32,6 +32,12 @@
 // RequiredCapabilities remain undecoded here — nothing in this service
 // has needed them yet; extend further only when a real feature does.
 //
+// Intake (process-path-management ADR 0034, ADR-0042 here) is decoded and
+// carried on ListActive: order.PathSelectionPolicy routes a customer order
+// line only onto paths whose intake contains CUSTOMER_ORDER. An event
+// without `intake` (a producer older than ADR 0034) decodes as the empty
+// intake; unknown demand-source values are kept as-is (tolerant reader).
+//
 // DestinationLocationRole (ADR 0006 in process-path-management) is also
 // decoded, mirroring how WES/FE's own kafkacatalog copies decode Direct:
 // available on the read model for a future consumer, but not yet read by
@@ -96,6 +102,7 @@ type pathData struct {
 	CycleTimeP95            string           `json:"cycle_time_p95"`
 	Eligibility             *eligibilityData `json:"eligibility"`
 	DestinationLocationRole string           `json:"destination_location_role"`
+	Intake                  []string         `json:"intake"`
 }
 
 // eligibilityData is the wire shape of process-path-management's
@@ -364,6 +371,7 @@ func (c *Consumer) ListActive() []shared.ActivePathCandidate {
 			CycleTimeP95:   d.CycleTimeP95,
 			CycleTimeKnown: d.CycleTimeKnown,
 			Eligibility:    d.Eligibility,
+			Intake:         append([]shared.DemandSource(nil), d.Intake...),
 		})
 	}
 	return out
@@ -477,7 +485,18 @@ func (c *Consumer) applyUpsert(data pathData) {
 		CycleTimeKnown:          cycleTimeKnown,
 		Eligibility:             data.Eligibility.toShared(),
 		DestinationLocationRole: data.DestinationLocationRole,
+		Intake:                  toDemandSources(data.Intake),
 	}
+}
+
+// toDemandSources maps the wire's intake strings onto the domain type. A
+// missing field (nil) is the empty intake.
+func toDemandSources(raw []string) []shared.DemandSource {
+	out := make([]shared.DemandSource, 0, len(raw))
+	for _, s := range raw {
+		out = append(out, shared.DemandSource(s))
+	}
+	return out
 }
 
 // parseCycleTime parses the wire's time.Duration.String() form. An empty

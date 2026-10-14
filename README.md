@@ -648,10 +648,10 @@ above — have been removed from it.)
   three remaining survivors are accepted near-equivalents (killing them
   would pin a tie-break order the domain deliberately leaves unspecified —
   same treatment as the fleet's other documented tie-break mutants):
-    - `order/path_selection.go:119` — the P95 comparator's `<` sits under
+    - `order/path_selection.go:130` — the P95 comparator's `<` sits under
       a `!=` guard, so an exact P95 tie always falls through to the
       PathId tie-break either way;
-    - `order/path_selection.go:121` — the PathId `<` boundary is only
+    - `order/path_selection.go:132` — the PathId `<` boundary is only
       observable with duplicate PathIds in the candidate list, which
       violates the strict weak ordering `sort.Slice` requires;
     - `order/promise.go:75` — the slowest-line accumulation `>` vs `>=`

@@ -53,7 +53,10 @@ func (c clsItCatalogue) Eligibility(id shared.PathId) (shared.Eligibility, bool)
 	return c.eligibility, id == shared.DefaultPathId
 }
 func (c clsItCatalogue) ListActive() []shared.ActivePathCandidate {
-	return []shared.ActivePathCandidate{{PathId: shared.DefaultPathId, Eligibility: c.eligibility}}
+	// The path is the customer-order entry point (ADR-0042), so its
+	// eligibility is what decides the line.
+	return []shared.ActivePathCandidate{{PathId: shared.DefaultPathId, Eligibility: c.eligibility,
+		Intake: []shared.DemandSource{shared.DemandSourceCustomerOrder}}}
 }
 
 // TestProductClassificationConsumer_RealBrokerAndPostgres_ReachesIntake

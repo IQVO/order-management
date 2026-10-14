@@ -80,7 +80,7 @@ Typos, broken links and formatting are of course fair game.
 | [0018](./0018-repromise-order-consumer-and-order-repromised.md) | RepromiseOrder consumer and OrderRepromised — closing ADR 0014's feedback loop | Accepted; flat inbound envelope superseded by ADR 0030 |
 | [0019](./0019-promise-kpis-on-order-funnel.md) | Promise KPIs on the Order Funnel data product (ADR 0014 §6, order-management half) | Accepted; amended 2026-10 (Network basis bucket) |
 | [0020](./0020-network-originated-demand-hold-and-deadline-feasibility.md) | Network-originated demand — release-on-allocation, deadline feasibility, and the Network promise basis | Accepted |
-| [0021](./0021-multi-path-attribute-driven-routing.md) | Multi-path attribute-driven routing — closes ADR-0013's original deferral | Accepted |
+| [0021](./0021-multi-path-attribute-driven-routing.md) | Multi-path attribute-driven routing — closes ADR-0013's original deferral | Accepted; candidate set amended by 0042 |
 | [0022](./0022-transactional-outbox.md) | Transactional outbox for order-management's dual-topic event publishing | Accepted |
 | [0023](./0023-idempotency-key-middleware.md) | Transactional Idempotency-Key middleware for POST /orders | Accepted |
 | [0024](./0024-optimistic-concurrency-version-column.md) | Optimistic concurrency (version column) for the Order aggregate | Accepted |
@@ -101,6 +101,7 @@ Typos, broken links and formatting are of course fair game.
 | [0039](./0039-reports-api-openapi-contract.md) | The reports binary's routes are a contract: apis/openapi-reports.yaml | Accepted |
 | [0040](./0040-outbox-relay-attempt-cap.md) | The outbox relay stops claiming a row after `OUTBOX_MAX_ATTEMPTS` failures | Accepted |
 | [0041](./0041-trace-context-crosses-the-outbox.md) | The W3C trace context crosses the outbox in `outbox_events.headers` (D27 reference) | Accepted |
+| [0042](./0042-path-selection-honours-process-path-intake.md) | Path selection considers only paths whose intake admits customer orders | Accepted; amends 0021 |
 
 Each of these reconstructs a decision that is actually visible in this
 repository's `CLAUDE.md` and code — none is a generic placeholder.
