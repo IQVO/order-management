@@ -192,6 +192,7 @@ func NewWriter(brokers ...string) *kafkago.Writer {
 // onto every message (see encodeEvent) after the Phase 3 1->8
 // partition scaleup exposed the missing per-order ordering guarantee.
 func NewWriterForTopic(topic string, brokers ...string) *kafkago.Writer {
+	//kafka:fixed-topic-writer NewWriter (cmd/order/kafka.go) and the integration tests hand it only to NewPublisher, whose Publish writes Message{Key, Value, Headers} with no Topic; the package's Topic-setting Message (RelaySink.Send) goes through RelaySink.writer, which NewRelaySink builds with no Topic
 	return &kafkago.Writer{
 		BatchTimeout:           syncWriterBatchTimeout,
 		RequiredAcks:           syncWriterRequiredAcks,
