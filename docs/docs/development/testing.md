@@ -240,7 +240,7 @@ sends the row on a context without that span, and the consumed message's
 | `lint` | golangci-lint v2.13.1 | every push and PR |
 | `guide-lint` | `guide_lint.py`, `repo_lint.py`, `test_hook.py`, `test_repo_lint.py` | every push and PR |
 | `complexity` | golangci-lint with only gocyclo, gocognit, cyclop, funlen, nestif; gocyclo > 10 report | every push and PR |
-| `test` | build, vet, gofmt, `go test ./... -race` with coverage, 90 % gate | every push and PR |
+| `test` | build, vet, gofmt, then `make coverage` (`go test ./... -race` with the Makefile's coverage scope and 90 % gate) | every push and PR |
 | `bdd` | `go test ./... -run TestFeatures -v` | every push and PR |
 | `contract` | `scripts/contract-test.sh` | every push and PR |
 | `evals-tests` | `go test ./internal/adapters/inbound/mcp/... -race -run '^TestEval\|^TestMCPEvalSuite' -v` | every push and PR |
