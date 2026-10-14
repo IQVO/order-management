@@ -31,8 +31,13 @@ func (f fakeEligibilitySource) ListActive() []shared.ActivePathCandidate {
 	return f.active
 }
 
+// candidate builds a customer-order entry point: every candidate in the
+// eligibility/ranking tests below declares CUSTOMER_ORDER in its intake
+// (ADR-0042), so those tests keep exercising eligibility and ranking.
+// The intake rule itself is covered in path_selection_intake_test.go.
 func candidate(id shared.PathId, cycleTime time.Duration, known bool, e shared.Eligibility) shared.ActivePathCandidate {
-	return shared.ActivePathCandidate{PathId: id, CycleTimeP95: cycleTime, CycleTimeKnown: known, Eligibility: e}
+	return shared.ActivePathCandidate{PathId: id, CycleTimeP95: cycleTime, CycleTimeKnown: known, Eligibility: e,
+		Intake: []shared.DemandSource{shared.DemandSourceCustomerOrder}}
 }
 
 func TestPathSelectionPolicySelect(t *testing.T) {

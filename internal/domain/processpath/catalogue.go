@@ -47,6 +47,10 @@ var ErrUnknownPath = errors.New("processpath: unknown or inactive process path i
 // matching how Direct/RequiredCapabilities are carried in WES/FE's own
 // copies of this catalogue) — nothing in this service currently makes a
 // routing decision off it.
+//
+// Intake (ADR-0042) is the set of demand sources process-path-management
+// declares may route work onto the path (its ADR 0034); empty when the
+// path declares none or the producer predates the field.
 type PathDefinition struct {
 	Id                      string
 	MatchPrefix             string
@@ -54,6 +58,7 @@ type PathDefinition struct {
 	CycleTimeKnown          bool
 	Eligibility             shared.Eligibility
 	DestinationLocationRole string
+	Intake                  []shared.DemandSource
 }
 
 // Catalogue is the validated, in-memory set of currently active process

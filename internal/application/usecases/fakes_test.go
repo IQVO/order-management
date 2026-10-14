@@ -167,10 +167,17 @@ func (r *findFails) NextID(ctx context.Context) (shared.OrderId, error) {
 // style. cycleTimes/eligibilities are optional per-path scripts for
 // PromisePolicy tests; an unscripted path reports known=false for both,
 // matching a real path the catalogue has never seen a cycle time for.
+//
+// intake scripts a path's declared demand sources (ADR-0042). An
+// unscripted path is a customer-order entry point (intake
+// [CUSTOMER_ORDER]), so the eligibility-driven tests keep exercising
+// eligibility; a test scripts intake to model PACK/REBIN/SLAM ([]) or
+// RELOCATE.
 type fakeCatalogue struct {
 	inactive    map[shared.PathId]bool
 	cycleTimes  map[shared.PathId]time.Duration
 	eligibility map[shared.PathId]shared.Eligibility
+	intake      map[shared.PathId][]shared.DemandSource
 }
 
 func (c *fakeCatalogue) IsActive(pathID shared.PathId) bool {
@@ -206,6 +213,9 @@ func (c *fakeCatalogue) ListActive() []shared.ActivePathCandidate {
 	for id := range c.cycleTimes {
 		seen[id] = true
 	}
+	for id := range c.intake {
+		seen[id] = true
+	}
 
 	out := make([]shared.ActivePathCandidate, 0, len(seen))
 	for id := range seen {
@@ -218,9 +228,17 @@ func (c *fakeCatalogue) ListActive() []shared.ActivePathCandidate {
 			CycleTimeP95:   cycleTime,
 			CycleTimeKnown: cycleTimeKnown,
 			Eligibility:    c.eligibility[id],
+			Intake:         c.intakeOf(id),
 		})
 	}
 	return out
+}
+
+func (c *fakeCatalogue) intakeOf(id shared.PathId) []shared.DemandSource {
+	if in, scripted := c.intake[id]; scripted {
+		return in
+	}
+	return []shared.DemandSource{shared.DemandSourceCustomerOrder}
 }
 
 // fakeClassificationLookup is a scripted ports.ProductClassificationLookup.
