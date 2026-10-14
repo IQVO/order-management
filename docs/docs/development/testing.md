@@ -54,7 +54,10 @@ each commit and `make check` before each push, once a clone has run
 - Domain (`internal/domain/order`, `processpath`, `shared`): the
   aggregate, line state machine, status derivation, promise policy and
   promise groups, path selection and eligibility, planned-capacity
-  windows. Pure Go, no fakes needed.
+  windows. Pure Go, no fakes needed. `path_selection_intake_test.go` pins
+  ADR 0042: only `CUSTOMER_ORDER` paths are candidates, and the live
+  catalogue before seeding (PACK/PICK/REBIN/SLAM at 2h, no intake) resolves
+  to `pick`, never PACK.
 - Application (`internal/application/usecases`): every use case against
   in-memory repositories and the fakes in `fakes_test.go` (inventory
   client, publisher, metrics counter, clock).
@@ -89,7 +92,7 @@ clone one database per test.
 | `internal/adapters/inbound/mcp` | 1 | initialize, `tools/list` and `tools/call` over the real Streamable HTTP transport, with real Postgres (OLTP and analytics) behind it. |
 | `internal/adapters/outbound/analyticsstore` | 2 | Projection and report queries. |
 | `internal/adapters/outbound/kafka` | 1 | Publisher on a real broker, CloudEvents envelope asserted. |
-| `internal/adapters/outbound/kafkacatalog`, `kafkacptschedule`, `kafkapathcapacity` | 2, 1, 1 | The replay caches, including two catalogue consumers side by side. |
+| `internal/adapters/outbound/kafkacatalog`, `kafkacptschedule`, `kafkapathcapacity` | 3, 1, 1 | The replay caches, including two catalogue consumers side by side, and the catalogue's decoded `intake` driving `PathSelectionPolicy` on a real broker (`TestConsumer_RealBroker_IntakeDrivesPathSelection`, ADR 0042). |
 | `internal/adapters/outbound/postgres` | 9 | Order repository and version column, outbox and relay, outbox lag gauge, release events through the outbox, planned capacity, pool limits (`MaxConns`, `statement_timeout`), sweeper. |
 | `internal/adapters/outbound/productclassificationcopy` | 1 | The Postgres copy and its version guard. |
 | `internal/application/usecases` | 1 | Receive, allocate, release, retry, cancel against the real repository and UnitOfWork. |
@@ -237,7 +240,7 @@ sends the row on a context without that span, and the consumed message's
 | `lint` | golangci-lint v2.13.1 | every push and PR |
 | `guide-lint` | `guide_lint.py`, `repo_lint.py`, `test_hook.py`, `test_repo_lint.py` | every push and PR |
 | `complexity` | golangci-lint with only gocyclo, gocognit, cyclop, funlen, nestif; gocyclo > 10 report | every push and PR |
-| `test` | build, vet, gofmt, `go test ./... -race` with coverage, 90 % gate | every push and PR |
+| `test` | build, vet, gofmt, then `make coverage` (`go test ./... -race` with the Makefile's coverage scope and 90 % gate) | every push and PR |
 | `bdd` | `go test ./... -run TestFeatures -v` | every push and PR |
 | `contract` | `scripts/contract-test.sh` | every push and PR |
 | `evals-tests` | `go test ./internal/adapters/inbound/mcp/... -race -run '^TestEval\|^TestMCPEvalSuite' -v` | every push and PR |

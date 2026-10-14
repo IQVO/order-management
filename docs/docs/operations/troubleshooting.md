@@ -57,7 +57,7 @@ Optimistic concurrency surfaces as `409 concurrent-modification`.
 | --- | --- | --- | --- |
 | 400 | `malformed-request-body` | Body is not valid JSON. | Fix the client. |
 | 400 | `order-without-lines`, `empty-sku`, `empty-order-id`, `empty-path-id`, `order-line-not-found` | Validation in the adapter or domain. | Fix the request. |
-| 400 | `unknown-process-path` | The path chosen for a line is not active in the process-path catalogue (`PATH_CATALOGUE_SOURCE=kafka`). | Check process-path-management's catalogue for a deactivated path. |
+| 400 | `unknown-process-path` | The path chosen for a line is not active in the process-path catalogue (`PATH_CATALOGUE_SOURCE=kafka`). When no active path declares `CUSTOMER_ORDER` in its intake, selection falls back to `pick`, so this also fires if `pick` itself is not in the catalogue ([ADR 0042](../adr/0042-path-selection-honours-process-path-intake.md)). | Check process-path-management's catalogue for a deactivated path, and that its declared catalogue was seeded (`GET /process-paths` shows `intake: ["CUSTOMER_ORDER"]` on PICK). |
 | 400 | `idempotency-key-required` | `POST /orders` without `Idempotency-Key` while `DATABASE_URL` is set. | Send a fresh key per new order. The operator MFE sends one per submission (ADR 0038) and CORS allows the header; if the MFE still gets this, it is running an old `web/` build. |
 | 400 | `invalid-query-parameter` | `GET /planned-capacity` without `site`, or with a `from` that is not RFC 3339. | Fix the query. |
 | 404 | `order-not-found` | Unknown id. In-memory mode loses every order on restart. | Check the id and `DATABASE_URL`. |

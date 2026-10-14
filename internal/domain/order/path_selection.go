@@ -46,6 +46,14 @@ type EligibilitySource interface {
 // gives this policy every currently active path, so it can filter to the
 // eligible subset and pick the best one, rather than reject a line the
 // fleet's real catalogue could actually carry on some other path.
+//
+// ADR-0042 (process-path-management ADR 0034) narrows "every currently
+// active path" to the customer-order entry points: only paths whose
+// declared intake contains shared.DemandSourceCustomerOrder are
+// candidates. ListActive returns the whole catalogue, downstream stages
+// (PACK, REBIN, SLAM), RELOCATE and inventory-control families included;
+// treating all of them as order entry points let a customer line tie on
+// cycle time and resolve to PACK, the lowest id.
 type PathSelectionPolicy struct{}
 
 // giftWrapAttribute is the product-attribute-vocabulary string this
@@ -64,12 +72,15 @@ const giftWrapAttribute = "giftWrap"
 // future rule keyed directly on SKU needs no signature change again).
 //
 // catalogue is consulted via ListActive (ADR-0021) for every currently
-// active path's declared Eligibility and CycleTimeP95. A nil catalogue,
-// or one whose ListActive() returns no candidates, fails OPEN to
+// active path's declared Eligibility, CycleTimeP95 and Intake. Only paths
+// whose intake contains CUSTOMER_ORDER are candidates (ADR-0042). A nil
+// catalogue, one whose ListActive() returns no candidates, or one in which
+// no path declares CUSTOMER_ORDER (not yet seeded, or a producer older
+// than process-path-management ADR 0034) fails OPEN to
 // shared.DefaultPathId (ok=true) -- missing catalogue data is a
 // "not yet wired" state, never a rejection trigger, matching this
 // fleet's established convention for a read-only membership/eligibility
-// check.
+// check. It never falls back to the lowest path id.
 //
 // Among the candidates the line is eligible for, this policy picks the
 // one with the shortest KNOWN CycleTimeP95 (ADR-0014 §4's original
@@ -79,8 +90,8 @@ const giftWrapAttribute = "giftWrap"
 // candidates cycle-time-unknown) break on the lower PathId, so the same
 // inputs against an unchanged catalogue always resolve the same way.
 //
-// ok=false means: no currently active path's declared Eligibility admits
-// this line. The returned PathId is the zero value in that case; callers
+// ok=false means: at least one active path declares CUSTOMER_ORDER, but
+// none of those paths' declared Eligibility admits this line. The returned PathId is the zero value in that case; callers
 // must not use it.
 func (PathSelectionPolicy) Select(sku shared.SKU, quantity int, giftWrap bool, productAttributes []string, catalogue EligibilitySource) (shared.PathId, bool) {
 	_ = sku // accepted for signature symmetry/future use; this rule does not key on it directly
@@ -89,7 +100,7 @@ func (PathSelectionPolicy) Select(sku shared.SKU, quantity int, giftWrap bool, p
 		return shared.DefaultPathId, true
 	}
 
-	candidates := catalogue.ListActive()
+	candidates := customerOrderEntryPoints(catalogue.ListActive())
 	if len(candidates) == 0 {
 		return shared.DefaultPathId, true
 	}
@@ -121,6 +132,18 @@ func (PathSelectionPolicy) Select(sku shared.SKU, quantity int, giftWrap bool, p
 		return a.PathId < b.PathId
 	})
 	return eligible[0].PathId, true
+}
+
+// customerOrderEntryPoints keeps only the candidates whose intake admits
+// customer order lines (ADR-0042).
+func customerOrderEntryPoints(all []shared.ActivePathCandidate) []shared.ActivePathCandidate {
+	out := make([]shared.ActivePathCandidate, 0, len(all))
+	for _, c := range all {
+		if c.AcceptsDemandSource(shared.DemandSourceCustomerOrder) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // lineEligible reports whether a line with the given quantity and

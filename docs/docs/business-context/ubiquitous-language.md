@@ -51,7 +51,8 @@ wes-work-planning or fulfillment-execution — see
 | **Process path** | The building workflow a line's work is dispatched to (`pick`, ...). Owned by process-path-management; cached here. | `shared.PathId`, `processpath.PathDefinition` |
 | **Default path** | `pick`, used when no catalogue is wired or nothing better is eligible. | `shared.DefaultPathId` |
 | **Eligibility** | A path's admission rules: max units per line, required and excluded product attributes, non-sortable. | `shared.Eligibility` |
-| **Path selection** | Choosing, per line, the eligible active path with the shortest known `CycleTimeP95`, ties to the lower `PathId` (ADR 0021). Never caller-supplied. | `order.PathSelectionPolicy` |
+| **Path selection** | Choosing, per line, among the active paths whose intake contains `CUSTOMER_ORDER`, the eligible one with the shortest known `CycleTimeP95`, ties to the lower `PathId`; `pick` when no path declares `CUSTOMER_ORDER` (ADR 0021, ADR 0042). Never caller-supplied. | `order.PathSelectionPolicy` |
+| **Intake** / **demand source** | The demand sources process-path-management allows to route work onto a path (`CUSTOMER_ORDER`, `STOCK_TRANSFER`, `SLOT_RELOCATION`, `INVENTORY_CONTROL`, its ADR 0034). Order lines are the `CUSTOMER_ORDER` source; a path with another or an empty intake is never an order entry point (ADR 0042). | `shared.DemandSource`, `shared.ActivePathCandidate.Intake` |
 | **Product classification** | A SKU's handling tags (Hazmat, Fragile, TemperatureSensitive, Oversized, HighValue), owned by **product-master** and read here from a local copy of its `ProductClassified` events (ADR 0036). Used only as a routing hint (fail-open: an unknown SKU has no tags). | `ports.ProductClassificationLookup`, `product_classification_copy` |
 | **Work unit id** | `{orderId}-line-{lineNo}`, derived identically here and in wes-work-planning; never transmitted. | `usecases.WorkUnitID`, `ParseWorkUnitID` |
 

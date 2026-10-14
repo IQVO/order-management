@@ -147,6 +147,7 @@ const sidebars: SidebarsConfig = {
         'adr/0039-reports-api-openapi-contract',
         'adr/0040-outbox-relay-attempt-cap',
         'adr/0041-trace-context-crosses-the-outbox',
+        'adr/0042-path-selection-honours-process-path-intake',
       ],
     },
   ],

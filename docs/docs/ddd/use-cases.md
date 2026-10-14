@@ -45,8 +45,10 @@ Step-by-step diagrams for every row are on
 Intake. Validates the intake intent (a held order must be ship-complete),
 then for every requested line looks up the SKU's product classification
 (fail-open), resolves its process path with `PathSelectionPolicy` over the
-active catalogue paths (shortest known `CycleTimeP95` among eligible paths,
-ties to the lower `PathId`, `pick` when no catalogue is wired — ADR 0021),
+active catalogue paths whose `intake` contains `CUSTOMER_ORDER` (shortest
+known `CycleTimeP95` among eligible ones, ties to the lower `PathId` — ADR
+0021, ADR 0042; `pick` when no catalogue is wired or no path declares
+`CUSTOMER_ORDER`),
 and rejects an inactive path (`400` `unknown-process-path`) or a line no
 active path admits (`422` `line-ineligible-for-resolved-path`) before
 anything is persisted. It then mints an `OrderId`, persists the order in
