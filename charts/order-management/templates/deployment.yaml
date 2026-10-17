@@ -79,7 +79,7 @@ spec:
             # ADR 0040: outbox relay attempt cap ("0" = unlimited).
             - name: OUTBOX_MAX_ATTEMPTS
               value: {{ .Values.config.outboxMaxAttempts | quote }}
-            {{- if or (eq .Values.config.eventPublisher "kafka") .Values.plannedCapacity.consumerGroup .Values.productClassification.consumerGroup }}
+            {{- if or (eq .Values.config.eventPublisher "kafka") .Values.plannedCapacity.consumerGroup .Values.productClassification.consumerGroup (eq (.Values.releaseConfirmation.mode | default "") "kafka") }}
             - name: KAFKA_BROKERS
               value: {{ .Values.kafka.brokers | quote }}
             {{- end }}

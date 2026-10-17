@@ -162,6 +162,8 @@ func TestAnalyticsPublisher_GoldenCloudEvents(t *testing.T) {
 		{"OrderLineBackordered", shared.NewOrderLineBackordered(goldenTime, "o1", 1, sku, 2), `{"order_id":"o1","line_no":1,"path_id":"pick","sku":"SKU-1"}`},
 		{"OrderLineReleased", shared.NewOrderLineReleased(goldenTime, "o1", 1, "singles", "wu-1"), `{"order_id":"o1","line_no":1,"path_id":"singles","work_unit_id":"wu-1"}`},
 		{"OrderRepromised", shared.NewOrderRepromised(goldenTime, "o1", "a", "b", "TaskCPTMissed"), `{"order_id":"o1","cpt_id_old":"a","cpt_id_new":"b","reason":"TaskCPTMissed"}`},
+		// ADR 0043: analytics-only; the path rides on the event, not on an order lookup.
+		{"OrderReleaseUnconfirmed", shared.NewOrderReleaseUnconfirmed(goldenTime, "o1", 2, "singles", "o1-line-2", goldenTime.Add(-15*time.Minute)), `{"order_id":"o1","line_no":2,"path_id":"singles","work_unit_id":"o1-line-2","released_at":"2026-09-30T11:45:00Z"}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

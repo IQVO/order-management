@@ -40,6 +40,7 @@ func goldenEvents() []shared.DomainEvent {
 		shared.NewOrderPartiallyAllocatedWithPromise(at, "ord-1", 1, 1, promise, "sp1-1800", "Capability", lines),
 		shared.NewOrderLineReleased(at, "ord-1", 1, "path-a", "wu-5"),
 		shared.NewOrderReleased(at, "ord-1"),
+		shared.NewOrderReleaseUnconfirmed(at, "ord-1", 1, "path-a", "ord-1-line-1", at.Add(-15*time.Minute)),
 		shared.NewOrderCancelled(at, "ord-1", 2),
 		shared.NewOrderAllocationPartiallyFailed(at, "ord-1", 1, 2, "boom"),
 		shared.NewOrderRepromised(at, "ord-1", "sp1-1200", "sp1-1800", "TaskCPTMissed"),

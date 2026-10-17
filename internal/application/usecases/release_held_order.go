@@ -45,6 +45,10 @@ type ReleaseHeldOrder struct {
 	Clock      ports.Clock
 	Promise    order.PromisePolicy
 	UnitOfWork ports.UnitOfWork
+	// ReleaseConfirmations, when non-nil, opens a PENDING release
+	// confirmation for every line this release moves to Released, in the
+	// same unit of work (ADR 0043). Nil means the loop is off.
+	ReleaseConfirmations ports.ReleaseConfirmations
 }
 
 func (uc *ReleaseHeldOrder) Execute(ctx context.Context, id shared.OrderId) (*order.Order, error) {
@@ -86,7 +90,7 @@ func (uc *ReleaseHeldOrder) Execute(ctx context.Context, id shared.OrderId) (*or
 		return o, nil
 	}
 
-	deps := allocationDeps{Orders: uc.Orders, Inventory: uc.Inventory, Events: uc.Events, Clock: uc.Clock, Promise: uc.Promise, UnitOfWork: uc.UnitOfWork}
+	deps := allocationDeps{Orders: uc.Orders, Inventory: uc.Inventory, Events: uc.Events, Clock: uc.Clock, Promise: uc.Promise, UnitOfWork: uc.UnitOfWork, ReleaseConfirmations: uc.ReleaseConfirmations}
 	if _, err := allocateAndRelease(ctx, deps, o, nil, false, true); err != nil {
 		return nil, err
 	}

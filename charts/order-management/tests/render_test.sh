@@ -43,6 +43,27 @@ fi
 with_db="$(helm template "$release" "$chart_dir" --set database.url=postgres://x --show-only templates/configmap.yaml)"
 grep -q 'HOUSEKEEPING_INTERVAL: "1h"' <<<"$with_db" || fail "HOUSEKEEPING_INTERVAL missing with a database"
 
+# ADR 0043: the release-confirmation loop ships dark. Off by default it renders
+# no RELEASE_CONFIRMATION_* key; "kafka" renders the mode, a stable default
+# group, the 15m timeout, the 168h retention and KAFKA_BROKERS; tuned values and
+# a "0" (which means disabled / keep) reach the ConfigMap unchanged.
+if grep -q 'RELEASE_CONFIRMATION' <<<"$configmap"; then
+  fail "RELEASE_CONFIRMATION_* rendered while releaseConfirmation.mode is empty"
+fi
+rc_on="$(helm template "$release" "$chart_dir" --set releaseConfirmation.mode=kafka --show-only templates/configmap.yaml)"
+grep -q 'RELEASE_CONFIRMATION_MODE: "kafka"' <<<"$rc_on" || fail "RELEASE_CONFIRMATION_MODE missing with releaseConfirmation.mode=kafka"
+grep -q 'RELEASE_CONFIRMATION_CONSUMER_GROUP: "order-management-release-confirmation"' <<<"$rc_on" || fail "default release-confirmation consumer group missing"
+grep -q 'RELEASE_CONFIRMATION_TIMEOUT: "15m"' <<<"$rc_on" || fail "RELEASE_CONFIRMATION_TIMEOUT default 15m missing"
+grep -q 'RELEASE_CONFIRMATION_RETENTION: "168h"' <<<"$rc_on" || fail "RELEASE_CONFIRMATION_RETENTION default 168h missing"
+grep -q 'KAFKA_BROKERS:' <<<"$rc_on" || fail "KAFKA_BROKERS missing with releaseConfirmation.mode=kafka"
+rc_tuned="$(helm template "$release" "$chart_dir" --set releaseConfirmation.mode=kafka --set releaseConfirmation.consumerGroup=om-rc-x \
+  --set releaseConfirmation.timeout=0 --set releaseConfirmation.retention=0 --show-only templates/configmap.yaml)"
+grep -q 'RELEASE_CONFIRMATION_CONSUMER_GROUP: "om-rc-x"' <<<"$rc_tuned" || fail "releaseConfirmation.consumerGroup not rendered"
+grep -q 'RELEASE_CONFIRMATION_TIMEOUT: "0"' <<<"$rc_tuned" || fail "releaseConfirmation.timeout=0 was not kept"
+grep -q 'RELEASE_CONFIRMATION_RETENTION: "0"' <<<"$rc_tuned" || fail "releaseConfirmation.retention=0 was not kept"
+rc_api="$(helm template "$release" "$chart_dir" --set releaseConfirmation.mode=kafka --show-only templates/deployment.yaml)"
+grep -A3 'envFrom:' <<<"$rc_api" | grep -q 'configMapRef:' || fail "api Deployment lost its envFrom with releaseConfirmation.mode=kafka"
+
 # The other workloads read their own explicit env and must NOT inherit the
 # api's HTTP_ADDR from the ConfigMap.
 for template in reports-deployment.yaml projector-deployment.yaml mcp-deployment.yaml; do
