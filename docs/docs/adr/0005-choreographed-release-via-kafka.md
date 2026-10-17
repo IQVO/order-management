@@ -10,6 +10,8 @@ description: ADR 0005 — replace the public /allocate and /release REST verbs a
 
 ## Status
 
+> **Amended by [ADR 0043](./0043-release-confirmation-from-workunitcreated.md)**: the "no release-confirmation loop" decision below is closed (wes-work-planning's `WorkUnitCreated` confirms each released line; a timeout raises the `OrderReleaseUnconfirmed` fact). The body below keeps its original text.
+
 > **Partially superseded (envelope only) by ADR-0030** (the flat `event_id`/`event_type`/`occurred_at`/`source`/`data` integration envelope described here). Every Kafka message is now a
 > CloudEvents 1.0 event — see
 > [ADR 0030](./0030-cloudevents-mandatory-event-envelope.md). The rest of
