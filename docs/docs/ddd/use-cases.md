@@ -2,15 +2,16 @@
 title: Use Cases
 sidebar_label: Use Cases
 sidebar_position: 1
-description: The ten application-layer use cases, their HTTP, MCP and Kafka triggers, the events they raise and their failure modes.
+description: The twelve application-layer use cases, their HTTP, MCP, Kafka and housekeeping triggers, the events they raise and their failure modes.
 ---
 
 # Use Cases
 
-Ten use cases, one struct each, in `internal/application/usecases`. Each
+Twelve use cases, one struct each, in `internal/application/usecases`. Each
 depends only on the domain and on `application/ports` — never on an
 adapter. Dependencies are plain struct fields, wired in `cmd/order`
-(`main.go`, `wiring.go`, `planned_capacity.go`, `product_classification.go`)
+(`main.go`, `wiring.go`, `planned_capacity.go`, `product_classification.go`,
+`release_confirmation.go`)
 and, for `GetOrder` over MCP, in `cmd/mcp`.
 
 Per [ADR 0005](/docs/adr/0005-choreographed-release-via-kafka), allocation
@@ -36,6 +37,8 @@ infrastructure.
 | 8 | `GetPlannedCapacity` | `GET /planned-capacity?site=&from=` (registered only when the read model is wired) | — (query) |
 | 9 | `OrderCapacityConstraints` | every order response, when the read model is wired | — (query) |
 | 10 | `ApplyProductClassification` | Kafka `ProductClassified` on `warehouse.product-master.events` (opt-in, `PRODUCT_CLASSIFICATION_MODE=kafka`) | — (local copy write) |
+| 11 | `ConfirmRelease` | Kafka `WorkUnitCreated` on `warehouse.work-planning.events` (opt-in, `RELEASE_CONFIRMATION_MODE=kafka`, off by default) | — (process-manager write) |
+| 12 | `FlagUnconfirmedReleases` | the housekeeping sweeper, every `HOUSEKEEPING_INTERVAL` (same opt-in) | `OrderReleaseUnconfirmed` (analytics only) |
 
 Step-by-step diagrams for every row are on
 [Sequence Diagrams](./sequence-diagrams.md).
@@ -135,7 +138,10 @@ runs inside one `UnitOfWork` transaction.
    `Order.Release`.
 4. Saves the order once (version-guarded, ADR 0024) and publishes
    `OrderAllocated` or `OrderPartiallyAllocated` with a `lines[]` payload of
-   exactly what was released this pass.
+   exactly what was released this pass. With
+   `RELEASE_CONFIRMATION_MODE=kafka` (ADR 0043) it also opens a `PENDING`
+   `release_confirmations` row for each line released in this pass, in the
+   same unit of work, so the row commits or rolls back with the release.
 
 A BR3 block is not an error: the order is saved `Backordered` and the HTTP
 caller sees a success code.
@@ -247,6 +253,46 @@ and no event is raised. `ReceiveOrder` reads the copy through
 **Fails when:** a transient error (database down, deadlock) — the same
 message is retried with backoff and the offset is committed only after
 success.
+
+## 11. ConfirmRelease (Kafka-driven, opt-in, off by default)
+
+Runs only when `RELEASE_CONFIRMATION_MODE=kafka`, which also requires
+`RELEASE_CONFIRMATION_CONSUMER_GROUP`, `KAFKA_BROKERS`, `DATABASE_URL` and
+`EVENT_PUBLISHER=kafka`
+([ADR 0043](/docs/adr/0043-release-confirmation-from-workunitcreated)).
+`ReleaseConfirmationConsumer` acts only on wes-work-planning's
+`com.warehouse.wes.work-planning.workunit.WorkUnitCreated` and reads its two
+optional fields, `reference` (the order id) and `line_no`. The use case
+rejects an empty event id (`ErrInvalidReleaseConfirmation`, dead-lettered).
+An event without `reference` or a positive `line_no` is ignored and counted
+`ignored_no_reference`; one for a line this service never opened a row for
+(transfer, RELOCATE or legacy work, or an order released before the loop was
+on) is `ignored_unknown_line`. Otherwise, in one `UnitOfWork`, it reads the
+`release_confirmations` row, claims the CloudEvents id
+(`ports.ReleaseConfirmationProcessedEvents`) and sets the row `CONFIRMED`
+(`confirmed`), or clears an `UNCONFIRMED` one (`late_confirmed`, logged at
+WARN). A redelivered id or a second event for a `CONFIRMED` line is a
+`duplicate` no-op. The order is never loaded or changed and no event is
+raised.
+
+**Fails when:** a transient error — retried in process up to 3 attempts, then
+the message goes to `warehouse.work-planning.events.dlq`; a shutdown never
+dead-letters it.
+
+## 12. FlagUnconfirmedReleases (housekeeping, opt-in, off by default)
+
+Not reachable over HTTP or Kafka. The housekeeping sweeper (ADR 0032) calls
+it once per pass, after its deletes, only when
+`RELEASE_CONFIRMATION_MODE=kafka` and `RELEASE_CONFIRMATION_TIMEOUT` (default
+`15m`) is above `0`. In batches of 100, each in one `UnitOfWork`, it claims
+`PENDING` rows released longer ago than the timeout (`FOR UPDATE SKIP LOCKED`,
+so several replicas flag a line exactly once), moves each to `UNCONFIRMED` and
+raises one analytics-only `OrderReleaseUnconfirmed` through the outbox in the
+same transaction. After the commit it logs `release unconfirmed` at ERROR and
+increments `order.release_confirmation.unconfirmed`. It is a fact, never an
+action: nothing is cancelled, re-released or retried, and the order is not
+touched. With the default 1h `HOUSEKEEPING_INTERVAL` a line is flagged up to
+1h15m after release; use about `5m` when the loop is on.
 
 ## REST endpoint summary
 

@@ -37,9 +37,12 @@ pushed every 15 s.
 | `order.orders.received` | Int64Counter | `{order}` | `outcome` = `accepted` or `rejected` | `cmd/order`, `ReceiveOrder` (`internal/adapters/outbound/telemetry/metrics.go`) | One increment per intake. `accepted` is counted once the order is persisted and `OrderReceived` raised, before the best-effort allocation. `rejected` is counted when the use case refuses the intake: a held order that allows partial shipment, a line with no eligible path, an invalid line (for example a non-positive quantity), a resolved path the catalogue does not know, or `order.New` refusing the lines. Requests the HTTP adapter refuses first (malformed JSON, empty `lines`, empty SKU) are **not** counted. |
 | `circuit_breaker.state` | Int64Gauge | `{state}` | `dependency` = `inventory-storage` | `cmd/order` with `INVENTORY_STORAGE_MODE=http` (`telemetry/circuit_breaker_metrics.go`) | `0` closed, `1` half-open, `2` open. Recorded on each state **change** only, so the series does not exist until the breaker first changes state. Prometheus name `circuit_breaker_state`. |
 | `order.outbox.lag_seconds` | Float64ObservableGauge | `s` | none | `cmd/order` with `DATABASE_URL` and `EVENT_PUBLISHER=kafka` (`internal/adapters/outbound/postgres/outbox_metrics.go`) | Age of the oldest `outbox_events` row with `published_at IS NULL`; `0` when the outbox is drained. Sampled by a query on every collection. |
+| `order.release_confirmation.events` | Int64Counter | `{event}` | `outcome` = `confirmed`, `late_confirmed`, `duplicate`, `ignored_no_reference` or `ignored_unknown_line` | `cmd/order` with `RELEASE_CONFIRMATION_MODE=kafka` (`telemetry/release_confirmation_metrics.go`, ADR 0043) | One increment per `WorkUnitCreated` the release-confirmation consumer handled. `confirmed`: a `PENDING` line became `CONFIRMED`. `late_confirmed`: an `UNCONFIRMED` line was admitted after all. `duplicate`: a redelivered id, or a second event for an already `CONFIRMED` line. `ignored_no_reference`: no `reference` or no positive `line_no` (a transfer, RELOCATE or legacy work unit, or a producer that does not stamp the fields; a steady climb right after enabling means the producer is not stamping them). `ignored_unknown_line`: not a line this service opened a row for. Prometheus name `order_release_confirmation_events_total`. Absent while the mode is `off`. |
+| `order.release_confirmation.unconfirmed` | Int64Counter | `{line}` | none | `cmd/order` with `RELEASE_CONFIRMATION_MODE=kafka`, from the housekeeping sweep (same file) | One increment per released line flagged `UNCONFIRMED`: wes-work-planning did not confirm the work within `RELEASE_CONFIRMATION_TIMEOUT`. Any increase is an order line to look at (see the [runbook](./runbook.md#an-order-line-was-released-but-never-confirmed-orderreleaseunconfirmed)). Prometheus name `order_release_confirmation_unconfirmed_total`. Counted after the batch commits, once per line. |
 
-The two service meters are scoped
-`github.com/claudioed/order-management` (counter and gauge) and
+The service meters are scoped
+`github.com/claudioed/order-management` (the intake counter, the breaker
+gauge and the two release-confirmation counters) and
 `github.com/claudioed/order-management/internal/adapters/outbound/postgres`
 (outbox lag).
 
@@ -72,6 +75,7 @@ emits no HTTP metrics.
 | `kafka.consume warehouse.fulfillment.events` | consumer | re-promise consumer | parent extracted from the message headers; `messaging.message.id`, `cloudevents.event_type`, `cloudevents.event_source` |
 | `kafka.consume warehouse.warehouse-planning.events` | consumer | planned-capacity consumer | same shape |
 | `kafka.consume warehouse.product-master.events` | consumer | product-classification consumer | same shape |
+| `kafka.consume warehouse.work-planning.events` | consumer | release-confirmation consumer (`RELEASE_CONFIRMATION_MODE=kafka`, ADR 0043) | parent extracted from the message headers; `messaging.system`, `messaging.destination.name`, `messaging.operation.name=process`, `messaging.message.id`, `cloudevents.event_type`, `cloudevents.event_source` |
 | `kafka.consume warehouse.order-management.analytics` | consumer | analytics consumer in `cmd/order-projector` | parent extracted from the headers; `messaging.system`, `messaging.destination.name`, `messaging.operation.name=process` |
 | `mcp.tool get_order`, `mcp.tool get_promise_health` | internal | `cmd/mcp`, `internal/adapters/inbound/mcp/tools.go` | `mcp.tool.name`; status `Error` with the message when the tool fails |
 
@@ -102,7 +106,12 @@ Every binary writes JSON lines to stdout through `log/slog`, at
 | `domain event published` | `event_name`, `payload` | log publisher (`EVENT_PUBLISHER=log`) |
 | `outbox relay pass failed` | `error` | outbox relay, ERROR |
 | `outbox relay: row reached the attempt cap and is no longer claimed` | `outbox_id`, `topic`, `event_type`, `key`, `attempts`, `max_attempts`, `error`, `rearm` | outbox relay, ERROR, once per row that reaches `OUTBOX_MAX_ATTEMPTS` (ADR 0040) |
-| `housekeeping sweep` / `housekeeping sweep failed` | `idempotency_keys_deleted`, `outbox_events_deleted`, `error` | sweeper |
+| `housekeeping sweep` / `housekeeping sweep failed` | `idempotency_keys_deleted`, `outbox_events_deleted`, `release_confirmations_pruned`, `releases_unconfirmed`, `error` | sweeper |
+| `release unconfirmed` | `order_id`, `line_no`, `path_id`, `work_unit_id`, `released_at`, `timeout` | housekeeping sweep (`FlagUnconfirmedReleases`), ERROR, once per line flagged `UNCONFIRMED` (ADR 0043) |
+| `release confirmed late: the line flagged unconfirmed was admitted after all` | `order_id`, `line_no`, `work_unit_id`, `released_at`, `unconfirmed_at` | release-confirmation consumer, WARN, when a `WorkUnitCreated` clears an `UNCONFIRMED` line |
+| `release confirmation: kafka unavailable, retrying` | `stage`, `retry_in`, `error`, `partition`, `offset` | release-confirmation consumer, WARN |
+| `release confirmation: non-CloudEvents message, sending to dead-letter topic` / `…invalid work unit event, …` / `…exhausted retries, …` | `topic`, `partition`, `offset`, `dlq_topic`, `error`, `ce_id`/`ce_type` when it was a CloudEvent | release-confirmation consumer, WARN |
+| `release confirmation consumer configured` | `topic`, `group_id`, `timeout` | `cmd/order` boot, INFO, only with `RELEASE_CONFIRMATION_MODE=kafka` |
 | `repromise: kafka unavailable, retrying` | `stage`, `retry_in`, `error`, `partition`, `offset` | re-promise consumer |
 | `repromise: non-CloudEvents message, sending to dead-letter topic` | `topic`, `partition`, `offset`, `dlq_topic`, `error` | re-promise consumer |
 | `repromise: exhausted retries, sending to dead-letter topic` | `topic`, `dlq_topic`, `ce_id`, `ce_type`, `attempts`, `error` | re-promise consumer |
@@ -148,5 +157,7 @@ provisioned today.
 | Intake rejections climbing | `sum(rate(order_orders_received_total{outcome="rejected"}[15m])) / sum(rate(order_orders_received_total[15m])) > 0.2` | A caller or upstream integration is sending orders the domain refuses. |
 | API 5xx | `sum(rate(kong_http_requests_total{service=~"httproute\\.warehouse-systems\\.order-management\\..*", code=~"5.."}[5m])) > 0` for 10 m | 503 is how downstream outages and permissive mode surface. |
 | Analytics stale | probe `GET /reports/funnel/freshness` and alert on `lagSeconds > 300` | The report's SLA is p95 event-to-report lag under 30 s. |
-| DLQ traffic | broker-side end offset of `warehouse.fulfillment.events.dlq` or `warehouse.warehouse-planning.events.dlq` increasing | A dead-lettered message is a re-promise or a capacity window that was not applied. |
-| Consumer lag | broker-side lag of groups `order-management-repromise`, `order-management-analytics` and the planned-capacity and classification groups | The service exports no consumer-lag metric of its own. |
+| DLQ traffic | broker-side end offset of `warehouse.fulfillment.events.dlq`, `warehouse.warehouse-planning.events.dlq` or, with the release-confirmation loop on, `warehouse.work-planning.events.dlq` increasing | A dead-lettered message is a re-promise, a capacity window or a work-unit confirmation that was not applied. |
+| Consumer lag | broker-side lag of groups `order-management-repromise`, `order-management-analytics` and the planned-capacity, classification and release-confirmation groups | The service exports no consumer-lag metric of its own. |
+| Release unconfirmed | `increase(order_release_confirmation_unconfirmed_total[15m]) > 0` | A released order line that wes-work-planning never confirmed. A signal, not proof: see the [runbook](./runbook.md#an-order-line-was-released-but-never-confirmed-orderreleaseunconfirmed). |
+| Confirmations not matching | `sum(rate(order_release_confirmation_events_total{outcome="ignored_no_reference"}[15m])) > 0` right after enabling the loop | The producer does not stamp `reference`/`line_no` on `WorkUnitCreated`, so every line will be flagged. Transfer and legacy work also count here, so judge it by the trend. |

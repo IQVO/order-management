@@ -51,22 +51,35 @@ each commit and `make check` before each push, once a clone has run
 
 ## Unit tests
 
-- Domain (`internal/domain/order`, `processpath`, `shared`): the
+- Domain (`internal/domain/order`, `processpath`, `shared`,
+  `releaseconfirmation`): the
   aggregate, line state machine, status derivation, promise policy and
   promise groups, path selection and eligibility, planned-capacity
-  windows. Pure Go, no fakes needed. `path_selection_intake_test.go` pins
+  windows, and the release-confirmation state machine (`PENDING` ->
+  `CONFIRMED`, `PENDING` -> `UNCONFIRMED` once, late and duplicate
+  confirmation, the overdue boundary; ADR 0043). Pure Go, no fakes needed. `path_selection_intake_test.go` pins
   ADR 0042: only `CUSTOMER_ORDER` paths are candidates, and the live
   catalogue before seeding (PACK/PICK/REBIN/SLAM at 2h, no intake) resolves
   to `pick`, never PACK.
 - Application (`internal/application/usecases`): every use case against
   in-memory repositories and the fakes in `fakes_test.go` (inventory
-  client, publisher, metrics counter, clock).
+  client, publisher, metrics counter, clock). `release_confirmation_test.go`
+  pins ADR 0043: the `PENDING` row is written in the release's own unit of
+  work (a later failure rolls it back) and only for lines released in that
+  pass, an event without `reference`/`line_no` or for an unknown line is
+  ignored and counted without opening a transaction, and the timeout sweep
+  flags overdue rows exactly once (`0` disables it).
 - Adapters: the HTTP router through `httptest` (status codes, problem
   types, idempotency, readiness, logging), the Kafka consumers against
-  fake readers and DLQ writers, the publishers against fake writers, the
+  fake readers and DLQ writers (`release_confirmation_consumer_test.go`:
+  fixture JSON with and without the new fields, malformed data to the DLQ,
+  unknown types committed past, shutdown never dead-letters), the publishers
+  against fake writers, the
   inventory-storage client against a fake `HTTPDoer`, the circuit
-  breaker, the telemetry instruments, the composition root's wiring
-  helpers in `cmd/order`.
+  breaker, the telemetry instruments (including the two release-confirmation
+  counters), the composition root's wiring
+  helpers in `cmd/order` (`release_confirmation_test.go`: the
+  `RELEASE_CONFIRMATION_*` boot validation, the `15m` and `168h` defaults).
 - Golden files pin wire formats: `internal/adapters/outbound/kafka`
   (`cloudevents_golden_test.go`), `internal/adapters/outbound/events/testdata/log_payloads.golden`,
   `internal/adapters/inbound/mcp/testdata/tool_registry.golden` and
@@ -88,12 +101,12 @@ clone one database per test.
 | --- | --- | --- |
 | `cmd/order` | 1 | The housekeeping sweeper wiring against real Postgres. |
 | `internal/adapters/inbound/http` | 2 | The `Idempotency-Key` middleware and the router over real Postgres. |
-| `internal/adapters/inbound/kafka` | 6 | Re-promise consumer end to end, its version-conflict retry, its DLQ (including auto-creating a missing `.dlq` topic), the planned-capacity and product-classification consumers. |
+| `internal/adapters/inbound/kafka` | 8 | Re-promise consumer end to end, its version-conflict retry, its DLQ (including auto-creating a missing `.dlq` topic), the planned-capacity and product-classification consumers, the consumer-shutdown dead-letter guard, and the release-confirmation consumer (`release_confirmation_consumer_integration_test.go`, ADR 0043: a produced `WorkUnitCreated` CloudEvent ends `CONFIRMED`, a malformed one lands in the DLQ, and cancelling `Run` mid-handle returns `nil` with the DLQ empty). |
 | `internal/adapters/inbound/mcp` | 1 | initialize, `tools/list` and `tools/call` over the real Streamable HTTP transport, with real Postgres (OLTP and analytics) behind it. |
 | `internal/adapters/outbound/analyticsstore` | 2 | Projection and report queries. |
 | `internal/adapters/outbound/kafka` | 1 | Publisher on a real broker, CloudEvents envelope asserted. |
 | `internal/adapters/outbound/kafkacatalog`, `kafkacptschedule`, `kafkapathcapacity` | 3, 1, 1 | The replay caches, including two catalogue consumers side by side, and the catalogue's decoded `intake` driving `PathSelectionPolicy` on a real broker (`TestConsumer_RealBroker_IntakeDrivesPathSelection`, ADR 0042). |
-| `internal/adapters/outbound/postgres` | 9 | Order repository and version column, outbox and relay, outbox lag gauge, release events through the outbox, planned capacity, pool limits (`MaxConns`, `statement_timeout`), sweeper. |
+| `internal/adapters/outbound/postgres` | 10 | Order repository and version column, outbox and relay, outbox lag gauge, release events through the outbox, planned capacity, pool limits (`MaxConns`, `statement_timeout`), sweeper, trace headers through the outbox, and the release-confirmation repository and sweeper hook (`release_confirmation_integration_test.go`, ADR 0043, including two concurrent sweepers flagging a row once). |
 | `internal/adapters/outbound/productclassificationcopy` | 1 | The Postgres copy and its version guard. |
 | `internal/application/usecases` | 1 | Receive, allocate, release, retry, cancel against the real repository and UnitOfWork. |
 

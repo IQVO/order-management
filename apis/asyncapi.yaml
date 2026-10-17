@@ -190,22 +190,38 @@ channels:
 
   warehouse.work-planning.events:
     description: >-
-      wes-work-planning's integration topic. Replayed from FirstOffset by
-      the path-capacity local cache (ADR 0015), which acts only on
-      PathCapacityChanged; every other CloudEvents `type` is ignored and a
-      non-CloudEvents message is logged at WARN and skipped.
+      wes-work-planning's integration topic, read by TWO independent
+      consumers, each acting on one FULL CloudEvents `type` and ignoring every
+      other. (1) The path-capacity local cache (ADR 0015), replayed from
+      FirstOffset, acts only on PathCapacityChanged. (2) The release-confirmation
+      consumer (ADR 0043), under a STABLE shared consumer group (env
+      `RELEASE_CONFIRMATION_CONSUMER_GROUP`, ships dark behind
+      `RELEASE_CONFIRMATION_MODE=off|kafka`), acts only on WorkUnitCreated; a
+      message that is not a valid CloudEvent, or whose `data` cannot be decoded,
+      is dead-lettered to `warehouse.work-planning.events.dlq` and committed
+      past. A non-CloudEvents message is logged at WARN and skipped by the
+      cache.
     subscribe:
       operationId: consumeWorkPlanningEvents
-      summary: Maintain the local remaining-capacity cache.
+      summary: Maintain the local remaining-capacity cache; confirm released order lines.
       description: >-
-        Dispatch is on the FULL CloudEvents type
-        com.warehouse.wes.work-planning.workpool.PathCapacityChanged; the
-        cache is keyed by (path_id, cutoff_at) and each event is a
-        last-write-wins observation.
+        PathCapacityChanged is a last-write-wins observation keyed by
+        (path_id, cutoff_at). WorkUnitCreated confirms the order line named by
+        its OPTIONAL `reference` (the order id) and `line_no` fields: the
+        matching PENDING or UNCONFIRMED row of the release_confirmations
+        process manager becomes CONFIRMED, in one database transaction with the
+        idempotency claim on the CloudEvents `id`. An event without both
+        fields, or naming a line this service never released (transfer,
+        RELOCATE and legacy work share this event), is IGNORED and counted
+        (order.release_confirmation.events), never dead-lettered. These
+        contracts are wes-work-planning's own, decoded independently here,
+        never imported.
       tags:
         - name: order-management
       message:
-        $ref: "#/components/messages/PathCapacityChangedInbound"
+        oneOf:
+          - $ref: "#/components/messages/PathCapacityChangedInbound"
+          - $ref: "#/components/messages/WorkUnitCreatedInbound"
 
   warehouse.warehouse-planning.events:
     description: >-
@@ -292,7 +308,7 @@ channels:
         process path via an OrderRepo lookup) as a CloudEvents 1.0 event
         whose dataschema is
         urn:warehouse:order-management:analytics:<EventName>:v1. Unrecognised event types are skipped by the
-        publisher, so this channel only ever carries the ten types listed
+        publisher, so this channel only ever carries the eleven types listed
         under subscribe below. Since ADR 0019, OrderAllocated/
         OrderPartiallyAllocated additionally carry promise_basis/
         promise_cutoff_at/split_shipment (ADR 0014 §6's promise KPIs), and
@@ -326,6 +342,7 @@ channels:
           - $ref: "#/components/messages/OrderReleasedAnalytics"
           - $ref: "#/components/messages/OrderCancelledAnalytics"
           - $ref: "#/components/messages/OrderRepromisedAnalytics"
+          - $ref: "#/components/messages/OrderReleaseUnconfirmedAnalytics"
 
 components:
   messages:
@@ -912,6 +929,54 @@ components:
               path_id: pick
               work_unit_id: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2-line-1
 
+    OrderReleaseUnconfirmedAnalytics:
+      name: OrderReleaseUnconfirmed
+      title: Order Release Unconfirmed (analytics)
+      summary: A released line was never confirmed by wes-work-planning within the timeout.
+      description: >-
+        ADR 0043. Raised ONCE per line, by the housekeeping sweep, when a
+        PENDING release confirmation is older than
+        `RELEASE_CONFIRMATION_TIMEOUT` (default 15m) without a WorkUnitCreated
+        naming it. A FACT, never an action: nothing is cancelled, re-released
+        or retried because of it, and it is not retracted if a late
+        confirmation arrives. Analytics-only — the integration topic
+        `warehouse.order-management.events` keeps its three-event contract —
+        and the in-repo projector ignores the type. `subject` and the Kafka key
+        are the order id; `time` is when the line was flagged, `released_at`
+        when it was released.
+      tags:
+        - name: order-line
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/order-management }
+              type: { const: com.warehouse.wes.order-management.order.OrderReleaseUnconfirmed }
+              dataschema: { const: "urn:warehouse:order-management:analytics:OrderReleaseUnconfirmed:v1" }
+              data:
+                $ref: "#/components/schemas/OrderReleaseUnconfirmedAnalyticsData"
+      examples:
+        - name: orderReleaseUnconfirmed
+          summary: Line 2 was released at 10:01:30 and never confirmed; flagged 15 minutes later.
+          payload:
+            specversion: "1.0"
+            id: 0b9d1e44-3c52-4f7a-9a60-5d8e2f1c7b33
+            source: /warehouse/order-management
+            type: com.warehouse.wes.order-management.order.OrderReleaseUnconfirmed
+            subject: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
+            time: "2026-09-07T10:17:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:order-management:analytics:OrderReleaseUnconfirmed:v1"
+            data:
+              order_id: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
+              line_no: 2
+              path_id: pick
+              work_unit_id: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2-line-2
+              released_at: "2026-09-07T10:01:30Z"
+
     OrderReleasedAnalytics:
       name: OrderReleased
       title: Order Released (analytics)
@@ -1114,6 +1179,64 @@ components:
               dataschema: { const: "urn:warehouse:process-path-management:events:CPTScheduleChanged:v1" }
               data:
                 $ref: "#/components/schemas/CPTScheduleData"
+
+    WorkUnitCreatedInbound:
+      name: WorkUnitCreated
+      title: WorkUnitCreated (inbound, wes-work-planning)
+      summary: wes-work-planning admitted a unit of work; confirms an order-line release (ADR 0043).
+      description: >-
+        The enqueue confirmation. Since wes-work-planning's ADR 0041 its
+        integration-stream `data` carries two OPTIONAL fields beside the
+        existing `path_id` and `work_unit_id`: `reference` (the work unit's
+        originating reference; for order work, the order id) and `line_no`
+        (integer > 0; omitted when unknown). The CloudEvents `type`, `subject`
+        (the work unit id) and `dataschema` v1 are unchanged. Only
+        `reference` and `line_no` are read.
+      tags:
+        - name: order-management
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/wes-work-planning }
+              type: { const: com.warehouse.wes.work-planning.workunit.WorkUnitCreated }
+              dataschema: { const: "urn:warehouse:wes-work-planning:events:WorkUnitCreated:v1" }
+              data:
+                $ref: "#/components/schemas/WorkUnitCreatedData"
+      examples:
+        - name: workUnitCreatedForAnOrderLine
+          summary: Line 2 of an order was enqueued as a work unit.
+          payload:
+            specversion: "1.0"
+            id: 11111111-1111-4111-8111-111111111111
+            source: /warehouse/wes-work-planning
+            type: com.warehouse.wes.work-planning.workunit.WorkUnitCreated
+            subject: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2-line-2
+            time: "2026-09-07T10:01:35Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:wes-work-planning:events:WorkUnitCreated:v1"
+            data:
+              path_id: pick
+              work_unit_id: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2-line-2
+              reference: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
+              line_no: 2
+        - name: workUnitCreatedWithoutTheOptionalFields
+          summary: Transfer, RELOCATE or legacy work, or a producer that predates the fields — ignored and counted.
+          payload:
+            specversion: "1.0"
+            id: 22222222-2222-4222-8222-222222222222
+            source: /warehouse/wes-work-planning
+            type: com.warehouse.wes.work-planning.workunit.WorkUnitCreated
+            subject: wu-gold
+            time: "2026-09-07T10:02:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:wes-work-planning:events:WorkUnitCreated:v1"
+            data:
+              path_id: pick
+              work_unit_id: wu-gold
 
     PathCapacityChangedInbound:
       name: PathCapacityChanged
@@ -1582,6 +1705,22 @@ components:
           type: string
           description: '{order_id}-line-{line_no} — deterministic, derived by BOTH sides.'
 
+    OrderReleaseUnconfirmedAnalyticsData:
+      type: object
+      additionalProperties: false
+      required: [order_id, line_no, path_id, work_unit_id, released_at]
+      properties:
+        order_id: { type: string }
+        line_no: { type: integer, minimum: 1 }
+        path_id: { type: string }
+        work_unit_id:
+          type: string
+          description: '{order_id}-line-{line_no} — the same deterministic id OrderLineReleased carried.'
+        released_at:
+          type: string
+          format: date-time
+          description: When this service released the line (the CloudEvents `time` is when it was flagged).
+
     OrderPartiallyAllocatedAnalyticsData:
       type: object
       additionalProperties: false
@@ -1692,6 +1831,22 @@ components:
         cutoff_at: { type: string, format: date-time }
         remaining_units: { type: integer }
         known: { type: boolean }
+    WorkUnitCreatedData:
+      type: object
+      description: >-
+        wes-work-planning's WorkUnitCreated payload (integration stream). Only
+        `reference` and `line_no` are read by order-management (ADR 0043);
+        both are OPTIONAL and the other fields are ignored.
+      properties:
+        path_id: { type: string }
+        work_unit_id: { type: string }
+        reference:
+          type: string
+          description: The work unit's originating reference; for order work, the order id. Omitted for work without one.
+        line_no:
+          type: integer
+          minimum: 1
+          description: The order line number; omitted when unknown.
     CapacityPlanData:
       type: object
       description: >-

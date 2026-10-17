@@ -21,7 +21,7 @@ data:
   IDEMPOTENCY_KEY_TTL: {{ .Values.config.idempotencyKeyTtl | quote }}
   OUTBOX_RETENTION: {{ .Values.config.outboxRetention | quote }}
   {{- end }}
-  {{- if or (eq .Values.config.eventPublisher "kafka") .Values.plannedCapacity.consumerGroup .Values.productClassification.consumerGroup }}
+  {{- if or (eq .Values.config.eventPublisher "kafka") .Values.plannedCapacity.consumerGroup .Values.productClassification.consumerGroup (eq (.Values.releaseConfirmation.mode | default "") "kafka") }}
   KAFKA_BROKERS: {{ .Values.kafka.brokers | quote }}
   {{- end }}
   {{- if .Values.productClassification.mode }}
@@ -29,6 +29,15 @@ data:
   {{- end }}
   {{- if .Values.productClassification.consumerGroup }}
   PRODUCT_CLASSIFICATION_CONSUMER_GROUP: {{ .Values.productClassification.consumerGroup | quote }}
+  {{- end }}
+  {{- if eq (.Values.releaseConfirmation.mode | default "") "kafka" }}
+  # ADR 0043: confirm each released order line from WorkUnitCreated and flag
+  # OrderReleaseUnconfirmed. Rendered only when the mode is "kafka"; the
+  # consumer group has a fixed default so a restarted pod resumes.
+  RELEASE_CONFIRMATION_MODE: "kafka"
+  RELEASE_CONFIRMATION_CONSUMER_GROUP: {{ .Values.releaseConfirmation.consumerGroup | default "order-management-release-confirmation" | quote }}
+  RELEASE_CONFIRMATION_TIMEOUT: {{ .Values.releaseConfirmation.timeout | quote }}
+  RELEASE_CONFIRMATION_RETENTION: {{ .Values.releaseConfirmation.retention | quote }}
   {{- end }}
   {{- if .Values.plannedCapacity.consumerGroup }}
   PLANNED_CAPACITY_CONSUMER_GROUP: {{ .Values.plannedCapacity.consumerGroup | quote }}

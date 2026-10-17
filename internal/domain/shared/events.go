@@ -210,6 +210,27 @@ func NewOrderReleased(occurredAt time.Time, orderID OrderId) OrderReleased {
 	return OrderReleased{base: newBase("OrderReleased", occurredAt), OrderID: orderID}
 }
 
+// OrderReleaseUnconfirmed: a released line was never confirmed by
+// wes-work-planning's WorkUnitCreated within the confirmation timeout
+// (ADR 0043). It is a FACT for the analytics stream, never an action: nothing
+// is cancelled, re-released or retried because of it. ReleasedAt is when this
+// context released the line; OccurredAt is when it was flagged.
+type OrderReleaseUnconfirmed struct {
+	base
+	OrderID    OrderId
+	LineNo     int
+	PathID     PathId
+	WorkUnitID string
+	ReleasedAt time.Time
+}
+
+func NewOrderReleaseUnconfirmed(occurredAt time.Time, orderID OrderId, lineNo int, pathID PathId, workUnitID string, releasedAt time.Time) OrderReleaseUnconfirmed {
+	return OrderReleaseUnconfirmed{
+		base:    newBase("OrderReleaseUnconfirmed", occurredAt),
+		OrderID: orderID, LineNo: lineNo, PathID: pathID, WorkUnitID: workUnitID, ReleasedAt: releasedAt,
+	}
+}
+
 // OrderCancelled: the order was cancelled before any line was released,
 // and every allocated line's reservation was revoked upstream.
 type OrderCancelled struct {

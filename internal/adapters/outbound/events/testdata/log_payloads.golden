@@ -8,6 +8,7 @@
 {"eventName":"OrderPartiallyAllocated","occurredAt":"2026-08-25T09:00:00Z","OrderID":"ord-1","AllocatedLines":1,"BackorderedLines":1,"PromiseDate":"2026-08-26T09:00:00Z","PromiseCptId":"sp1-1800","PromiseBasis":"Capability","Lines":[{"LineNo":1,"SKU":"SKU-1","PathID":"path-a","GiftWrap":true,"FulfillmentClass":"SINGLE","PromiseCptId":null,"PromiseBasis":null,"PromiseCutoffAt":null},{"LineNo":2,"SKU":"SKU-2","PathID":"path-b","GiftWrap":false,"FulfillmentClass":"MULTI_LINE_MULTI","PromiseCptId":"sp1-1800","PromiseBasis":"Capability","PromiseCutoffAt":"2026-08-25T15:00:00Z"}]}
 {"eventName":"OrderLineReleased","occurredAt":"2026-08-25T09:00:00Z","OrderID":"ord-1","LineNo":1,"PathID":"path-a","WorkUnitID":"wu-5"}
 {"eventName":"OrderReleased","occurredAt":"2026-08-25T09:00:00Z","OrderID":"ord-1"}
+{"eventName":"OrderReleaseUnconfirmed","occurredAt":"2026-08-25T09:00:00Z","OrderID":"ord-1","LineNo":1,"PathID":"path-a","WorkUnitID":"ord-1-line-1","ReleasedAt":"2026-08-25T08:45:00Z"}
 {"eventName":"OrderCancelled","occurredAt":"2026-08-25T09:00:00Z","OrderID":"ord-1","RevokedReservations":2}
 {"eventName":"OrderAllocationPartiallyFailed","occurredAt":"2026-08-25T09:00:00Z","OrderID":"ord-1","AllocatedLines":1,"RemainingLines":2,"Cause":"boom"}
 {"eventName":"OrderRepromised","occurredAt":"2026-08-25T09:00:00Z","OrderID":"ord-1","CptIdOld":"sp1-1200","CptIdNew":"sp1-1800","Reason":"TaskCPTMissed"}

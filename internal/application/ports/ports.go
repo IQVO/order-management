@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/claudioed/order-management/internal/domain/order"
+	"github.com/claudioed/order-management/internal/domain/releaseconfirmation"
 	"github.com/claudioed/order-management/internal/domain/shared"
 )
 
@@ -423,4 +424,76 @@ type PlannedCapacityProcessedEvents interface {
 	// MarkProcessed records eventId if absent, returning true iff this
 	// call newly recorded it.
 	MarkProcessed(ctx context.Context, eventId string) (bool, error)
+}
+
+// ReleaseConfirmations is the process-manager table of ADR 0043: one row per
+// released order line, tracking whether wes-work-planning confirmed the
+// release with WorkUnitCreated. Every method joins the ctx transaction when
+// there is one (the release's own unit of work, the consumer's, the
+// sweeper's), so a row commits or rolls back with the work that wrote it.
+type ReleaseConfirmations interface {
+	// Open inserts c as a new row. It is a no-op when (order id, line no)
+	// already has a row, so a re-release never resets a line's history.
+	Open(ctx context.Context, c releaseconfirmation.Confirmation) error
+
+	// Find returns the row of (orderID, lineNo), found=false when this
+	// context never opened one. Inside a UnitOfWork the row is locked for
+	// the rest of the transaction, so a confirmation and the timeout sweep
+	// serialise on it.
+	Find(ctx context.Context, orderID shared.OrderId, lineNo int) (c releaseconfirmation.Confirmation, found bool, err error)
+
+	// Save persists c's state and times over its existing row.
+	Save(ctx context.Context, c releaseconfirmation.Confirmation) error
+
+	// ClaimOverdue returns up to limit PENDING rows released strictly before
+	// releasedBefore, oldest first, locked for the rest of the transaction
+	// and skipping rows another transaction holds, so concurrent replicas
+	// never flag the same line twice.
+	ClaimOverdue(ctx context.Context, releasedBefore time.Time, limit int) ([]releaseconfirmation.Confirmation, error)
+}
+
+// ReleaseConfirmationProcessedEvents is ConfirmRelease's idempotency gate on
+// the CloudEvents id. MarkProcessed MUST be called inside the same
+// UnitOfWork as the state change it guards, so a rolled-back handling
+// un-claims the id and the redelivery is processed rather than silently
+// skipped. Its own table (release_confirmation_processed_events), so it never
+// collides with the other consumers' gates.
+type ReleaseConfirmationProcessedEvents interface {
+	// MarkProcessed records eventId if absent, returning true iff this
+	// call newly recorded it.
+	MarkProcessed(ctx context.Context, eventId string) (bool, error)
+}
+
+// ReleaseConfirmationOutcome is what handling one WorkUnitCreated came to.
+// Its string value is the `outcome` attribute of the
+// order.release_confirmation.events counter.
+type ReleaseConfirmationOutcome string
+
+const (
+	// ReleaseConfirmationConfirmed: a PENDING line became CONFIRMED.
+	ReleaseConfirmationConfirmed ReleaseConfirmationOutcome = "confirmed"
+	// ReleaseConfirmationLateConfirmed: an UNCONFIRMED line became
+	// CONFIRMED (the timeout had already flagged it).
+	ReleaseConfirmationLateConfirmed ReleaseConfirmationOutcome = "late_confirmed"
+	// ReleaseConfirmationDuplicate: a redelivered id, or a second event for
+	// a line that was already CONFIRMED; nothing changed.
+	ReleaseConfirmationDuplicate ReleaseConfirmationOutcome = "duplicate"
+	// ReleaseConfirmationIgnoredNoReference: the event carries no
+	// reference or no positive line_no (a transfer, RELOCATE or legacy work
+	// unit, or a producer that predates the fields).
+	ReleaseConfirmationIgnoredNoReference ReleaseConfirmationOutcome = "ignored_no_reference"
+	// ReleaseConfirmationIgnoredUnknownLine: (reference, line_no) is not a
+	// line this context opened a confirmation for.
+	ReleaseConfirmationIgnoredUnknownLine ReleaseConfirmationOutcome = "ignored_unknown_line"
+)
+
+// ReleaseConfirmationMetrics records the release-confirmation loop's
+// signals. Use cases treat a nil value as "not instrumented".
+type ReleaseConfirmationMetrics interface {
+	// Handled counts one WorkUnitCreated by outcome
+	// (order.release_confirmation.events).
+	Handled(ctx context.Context, outcome ReleaseConfirmationOutcome)
+	// LineUnconfirmed counts one line flagged UNCONFIRMED
+	// (order.release_confirmation.unconfirmed).
+	LineUnconfirmed(ctx context.Context)
 }

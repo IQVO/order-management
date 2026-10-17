@@ -18,16 +18,25 @@ type housekeepingSettings struct {
 	interval        time.Duration
 	idempotencyTTL  time.Duration
 	outboxRetention time.Duration
+	// releaseConfirmationRetention is how long a CONFIRMED release
+	// confirmation row is kept (ADR 0043); 0 keeps them forever.
+	releaseConfirmationRetention time.Duration
+	// flagUnconfirmed is the release-confirmation timeout sweep (ADR 0043),
+	// run on every pass; nil when the loop is off or its timeout is 0.
+	flagUnconfirmed func(context.Context) (int, error)
 }
 
 // housekeepingSettingsFromEnv reads HOUSEKEEPING_INTERVAL (default 1h),
 // IDEMPOTENCY_KEY_TTL (default 24h) and OUTBOX_RETENTION (default 168h =
-// 7d), mirroring inventory-storage's ADR-0026 env knobs exactly.
+// 7d), mirroring inventory-storage's ADR-0026 env knobs exactly, plus
+// RELEASE_CONFIRMATION_RETENTION (default 168h; ADR 0043). The
+// release-confirmation timeout sweep itself is attached by closeWithSweeper.
 func housekeepingSettingsFromEnv(logger *slog.Logger) housekeepingSettings {
 	return housekeepingSettings{
-		interval:        housekeepingDurationEnv(logger, "HOUSEKEEPING_INTERVAL", postgres.DefaultSweepInterval),
-		idempotencyTTL:  housekeepingDurationEnv(logger, "IDEMPOTENCY_KEY_TTL", postgres.DefaultIdempotencyKeyTTL),
-		outboxRetention: housekeepingDurationEnv(logger, "OUTBOX_RETENTION", postgres.DefaultOutboxRetention),
+		interval:                     housekeepingDurationEnv(logger, "HOUSEKEEPING_INTERVAL", postgres.DefaultSweepInterval),
+		idempotencyTTL:               housekeepingDurationEnv(logger, "IDEMPOTENCY_KEY_TTL", postgres.DefaultIdempotencyKeyTTL),
+		outboxRetention:              housekeepingDurationEnv(logger, "OUTBOX_RETENTION", postgres.DefaultOutboxRetention),
+		releaseConfirmationRetention: housekeepingDurationEnv(logger, releaseConfirmationRetentionEnv, postgres.DefaultReleaseConfirmationRetention),
 	}
 }
 
@@ -59,7 +68,11 @@ const sweeperShutdownBudget = 10 * time.Second
 // outbox-lag gauge when the outbox is the publish path, and returns the
 // closer that stops both BEFORE the pool closes.
 func closeWithSweeper(pool *pgxpool.Pool, outboxEnabled bool, logger *slog.Logger) func() {
-	stopSweeper := startSweeper(pool, housekeepingSettingsFromEnv(logger), logger)
+	settings := housekeepingSettingsFromEnv(logger)
+	// ADR 0043: the release-confirmation timeout rides this same loop; there
+	// is no second scheduler.
+	settings.flagUnconfirmed = buildFlagUnconfirmed(pool, logger)
+	stopSweeper := startSweeper(pool, settings, logger)
 	var unregisterLagGauge func()
 	if outboxEnabled {
 		// order.outbox.lag_seconds (ADR-0032): only meaningful when the
@@ -99,6 +112,8 @@ func startSweeper(pool *pgxpool.Pool, cfg housekeepingSettings, logger *slog.Log
 		postgres.WithSweepInterval(cfg.interval),
 		postgres.WithIdempotencyKeyTTL(cfg.idempotencyTTL),
 		postgres.WithOutboxRetention(cfg.outboxRetention),
+		postgres.WithReleaseConfirmationRetention(cfg.releaseConfirmationRetention),
+		postgres.WithReleaseConfirmationSweep(cfg.flagUnconfirmed),
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -107,7 +122,9 @@ func startSweeper(pool *pgxpool.Pool, cfg housekeepingSettings, logger *slog.Log
 		_ = sweeper.Run(ctx) // only ever returns nil, on cancellation
 	}()
 	logger.Info("housekeeping sweeper started", "interval", cfg.interval,
-		"idempotency_key_ttl", cfg.idempotencyTTL, "outbox_retention", cfg.outboxRetention)
+		"idempotency_key_ttl", cfg.idempotencyTTL, "outbox_retention", cfg.outboxRetention,
+		"release_confirmation_retention", cfg.releaseConfirmationRetention,
+		"release_confirmation_sweep", cfg.flagUnconfirmed != nil)
 	return func() {
 		cancel()
 		select {

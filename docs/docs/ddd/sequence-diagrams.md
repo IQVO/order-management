@@ -107,6 +107,7 @@ sequenceDiagram
   participant O as Order
   participant PP as PromisePolicy
   participant R as OrderRepo
+  participant RC as ReleaseConfirmations
   participant OB as Outbox
 
   loop every line to allocate
@@ -154,6 +155,9 @@ sequenceDiagram
         UC->>O: Release(lineNo) for every Allocated line
       end
       UC->>R: Save(order) with version guard
+      opt RELEASE_CONFIRMATION_MODE=kafka (ADR 0043)
+        UC->>RC: Open(PENDING) for each line released in this pass
+      end
       UC->>OB: Publish(OrderAllocated or OrderPartiallyAllocated) with released lines
       opt lines were released in this pass
         UC->>OB: Publish(OrderLineReleased) for each line released now
@@ -169,7 +173,7 @@ sequenceDiagram
 Source: `internal/application/usecases/allocation.go`
 (`allocateLines`, `salvageAllocationFailure`, `reconfirmBeforeRelease`,
 `releaseAllocatedLines`, `publishOrderAllocationOutcome`,
-`publishReleaseFacts`),
+`publishReleaseFacts`, `openReleaseConfirmations`),
 `internal/adapters/outbound/inventorystorage/client.go`. Omits: the circuit
 breaker wrapping the inventory client (ADR 0025), and the rule that the
 outcome event is skipped when the order ends `Backordered` or the pass
@@ -510,3 +514,69 @@ in-memory configuration (no `DATABASE_URL`, no `UnitOfWork`). There is no
 dead-letter topic: the payload is a full-state replacement, so the next
 `ProductClassified` for the SKU repairs the copy
 ([ADR 0036](/docs/adr/0036-product-classification-local-copy)).
+
+## 11. ConfirmRelease and the timeout sweep — Kafka `warehouse.work-planning.events`
+
+Only with `RELEASE_CONFIRMATION_MODE=kafka` (available, off by default,
+[ADR 0043](/docs/adr/0043-release-confirmation-from-workunitcreated)). The
+`PENDING` row is written by the allocation pass (diagram 2).
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant WP as wes-work-planning
+  participant K as ReleaseConfirmationConsumer
+  participant UC as ConfirmRelease
+  participant RC as ReleaseConfirmations
+  participant PE as ReleaseConfirmationProcessedEvents
+  participant SW as Sweeper
+  participant FU as FlagUnconfirmedReleases
+  participant OB as Outbox
+
+  WP-)K: WorkUnitCreated CloudEvent, optional data.reference and data.line_no
+  K->>K: FetchMessage then cloudevents.Decode
+  alt not a CloudEvent
+    K->>K: publish to warehouse.work-planning.events.dlq, CommitMessages
+  end
+  alt any other type on the topic
+    K->>K: CommitMessages, ignore
+  end
+  K->>K: decode data (reference, line_no)
+  alt data cannot be decoded
+    K->>K: publish to the .dlq, CommitMessages
+  end
+  K->>UC: Execute(eventId, reference, lineNo), up to 3 attempts
+  alt no reference or line_no not above 0
+    UC-->>K: nil, counted ignored_no_reference
+  end
+  UC->>RC: Find(reference, lineNo) in UnitOfWork, row locked
+  alt no row for that line
+    UC-->>K: nil, counted ignored_unknown_line, nothing claimed
+  end
+  UC->>PE: MarkProcessed(ce id) in the same UnitOfWork
+  alt already processed, or row already CONFIRMED
+    UC-->>K: nil, counted duplicate
+  end
+  UC->>RC: Save(CONFIRMED), confirmed or late_confirmed
+  K->>K: CommitMessages
+
+  loop every HOUSEKEEPING_INTERVAL
+    SW->>FU: Execute, after the deletes, only when the timeout is above 0
+    loop batches of 100 overdue lines
+      FU->>RC: ClaimOverdue(now minus timeout) FOR UPDATE SKIP LOCKED
+      FU->>RC: Save(UNCONFIRMED) once per PENDING row
+      FU->>OB: Publish(OrderReleaseUnconfirmed), analytics topic only
+    end
+    FU->>FU: after the commit, ERROR log release unconfirmed and counter
+  end
+```
+
+Source: `internal/adapters/inbound/kafka/release_confirmation_consumer.go`,
+`internal/application/usecases/release_confirmation.go`,
+`internal/adapters/outbound/postgres/release_confirmation_repo.go`,
+`sweeper.go`, `cmd/order/release_confirmation.go`. Omits: OpenTelemetry
+spans, the in-process backoff when Kafka is unreachable, and the missing
+CloudEvents id case (dead-lettered). A confirmation racing the sweep
+serialises on the row lock: whichever commits first wins, and a confirmation
+that loses is simply a late confirmation, which still clears the line. The
+sweep never cancels, re-releases or retries anything.

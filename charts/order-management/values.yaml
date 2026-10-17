@@ -230,6 +230,33 @@ productClassification:
   # there is deliberately no default in the binary.
   consumerGroup: ""
 
+# Release confirmation loop (ADR 0043, gap OM-0005). When mode is "kafka",
+# cmd/order consumes wes-work-planning's WorkUnitCreated from
+# warehouse.work-planning.events, confirms each released order line in the
+# release_confirmations table, and flags a line that stays unconfirmed past
+# `timeout` with one analytics-only OrderReleaseUnconfirmed fact (nothing is
+# cancelled or retried). EMPTY mode (the default) renders no env at all and the
+# service behaves exactly as before: the feature ships dark. "kafka" also needs
+# config.eventPublisher "kafka" and a database; the binary fails boot naming
+# the missing variable. Do not enable it before the deployed wes-work-planning
+# carries ADR 0041 (reference + line_no on WorkUnitCreated): without them every
+# event is ignored and every line would be flagged.
+releaseConfirmation:
+  # RELEASE_CONFIRMATION_MODE: "" (off) or "kafka".
+  mode: ""
+  # RELEASE_CONFIRMATION_CONSUMER_GROUP. A fixed, stable id: a restarted pod
+  # resumes from its committed offsets and N replicas share partitions. Empty
+  # renders order-management-release-confirmation when mode is "kafka".
+  consumerGroup: ""
+  # RELEASE_CONFIRMATION_TIMEOUT: a PENDING line older than this becomes
+  # UNCONFIRMED. "0" disables the sweep and keeps confirmations. The sweep
+  # rides config.housekeepingInterval (default 1h, so up to 1h15m before a line
+  # is flagged); set that to about 5m when the loop is on.
+  timeout: "15m"
+  # RELEASE_CONFIRMATION_RETENTION: CONFIRMED rows older than this are deleted.
+  # "0" keeps them. PENDING and UNCONFIRMED rows are never pruned.
+  retention: "168h"
+
 # Planned capacity from warehouse-planning (ADR 0031). When consumerGroup is
 # set, cmd/order consumes warehouse.warehouse-planning.events into a local
 # planned-capacity read model, serves GET /planned-capacity, and annotates an

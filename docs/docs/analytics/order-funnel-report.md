@@ -48,6 +48,13 @@ Before that change no use case raised them and these two columns were always
 releases from that deploy onwards. A partial-shipment order raises
 `OrderLineReleased` per pass and `OrderReleased` only when its last
 backordered line is retried and released.
+
+`linesReleased` and `ordersReleased` count lines this service released, not
+lines wes-work-planning confirmed. The analytics-only
+`OrderReleaseUnconfirmed` ([ADR 0043](/docs/adr/0043-release-confirmation-from-workunitcreated),
+only with `RELEASE_CONFIRMATION_MODE=kafka`) flags a released line that was
+never confirmed, but the projector ignores it: it feeds no funnel column and
+does not subtract from these two.
 :::
 
 ### Promise KPIs (ADR 0019)

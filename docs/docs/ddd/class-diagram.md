@@ -12,7 +12,8 @@ Drawn from `internal/domain/**` and `internal/application/ports` on
 fields are unexported). Go pointers and slices are shown as plain types
 (`Time`, `OrderLine[]`); only state-changing methods and the key queries
 are listed. Stereotypes: `<<AggregateRoot>>`, `<<Entity>>`,
-`<<ValueObject>>`, `<<Enumeration>>`, `<<DomainEvent>>`, `<<Repository>>`
+`<<ValueObject>>`, `<<Enumeration>>`, `<<DomainEvent>>`, `<<ProcessManager>>`
+(the release-confirmation row, ADR 0043), `<<Repository>>`
 (persistence ports) and `<<Port>>` (other outbound ports).
 
 ## 1. The Order aggregate
@@ -276,6 +277,52 @@ Omits: unexported helpers (`linesFitWindow`, `fallback`,
 `ports.PathCapacity` structurally satisfy `CapabilitySource`/
 `EligibilitySource`, `ScheduleSource` and `CapacitySource`.
 
+### Release confirmation process manager (ADR 0043)
+
+Not part of the `Order` aggregate: one row per released line in
+`release_confirmations`, keyed by order id and line number. Used only while
+`RELEASE_CONFIRMATION_MODE=kafka`.
+
+```mermaid
+classDiagram
+  direction LR
+  class Confirmation {
+    <<ProcessManager>>
+    -orderID OrderId
+    -lineNo int
+    -workUnitID string
+    -pathID PathId
+    -releasedAt Time
+    -state State
+    -confirmedAt Time
+    -unconfirmedAt Time
+    +Confirm(at Time) ConfirmResult
+    +MarkUnconfirmed(at Time) bool
+    +Overdue(cutoff Time) bool
+  }
+  class State {
+    <<Enumeration>>
+    PENDING
+    CONFIRMED
+    UNCONFIRMED
+  }
+  class ConfirmResult {
+    <<Enumeration>>
+    ConfirmedNow
+    ConfirmedLate
+    AlreadyConfirmed
+  }
+  Confirmation --> State
+  Confirmation ..> ConfirmResult
+```
+
+Source: `internal/domain/releaseconfirmation/confirmation.go`. `NewPending`
+opens a `PENDING` row; `Rehydrate` rebuilds one from the table. `Confirm`
+moves `PENDING` or `UNCONFIRMED` to `CONFIRMED` (`ConfirmedLate` for the
+latter) and does nothing to a `CONFIRMED` row. `MarkUnconfirmed` only moves
+a `PENDING` row, exactly once. `Overdue` is true only for a `PENDING` row
+released strictly before the cutoff.
+
 ## 3. Domain events
 
 ```mermaid
@@ -365,6 +412,14 @@ classDiagram
     <<DomainEvent>>
     +OrderID OrderId
   }
+  class OrderReleaseUnconfirmed {
+    <<DomainEvent>>
+    +OrderID OrderId
+    +LineNo int
+    +PathID PathId
+    +WorkUnitID string
+    +ReleasedAt Time
+  }
 
   DomainEvent <|.. OrderReceived
   DomainEvent <|.. OrderLineAllocated
@@ -376,6 +431,7 @@ classDiagram
   DomainEvent <|.. OrderRepromised
   DomainEvent <|.. OrderLineReleased
   DomainEvent <|.. OrderReleased
+  DomainEvent <|.. OrderReleaseUnconfirmed
   OrderAllocated *-- ReleasedLine
   OrderPartiallyAllocated *-- ReleasedLine
 ```
@@ -384,6 +440,9 @@ Source: `internal/domain/shared/events.go`. Omits: the embedded `base`
 struct (`eventName`, `occurredAt`) that implements `DomainEvent` for every
 event. `OrderLineReleased` and `OrderReleased` are raised by
 `allocateAndRelease` at the release transition (analytics topic only).
+`OrderReleaseUnconfirmed` is raised by `FlagUnconfirmedReleases`, inside
+the housekeeping sweep, when a released line was not confirmed within the
+timeout (analytics topic only; ADR 0043).
 
 ## 4. Application ports
 
@@ -433,6 +492,22 @@ classDiagram
   class ProductClassificationProcessedEvents {
     <<Repository>>
     +MarkProcessed(ctx, eventId string) bool
+  }
+  class ReleaseConfirmations {
+    <<Repository>>
+    +Open(ctx, c Confirmation) error
+    +Find(ctx, orderID OrderId, lineNo int) Confirmation
+    +Save(ctx, c Confirmation) error
+    +ClaimOverdue(ctx, releasedBefore Time, limit int) Confirmation[]
+  }
+  class ReleaseConfirmationProcessedEvents {
+    <<Repository>>
+    +MarkProcessed(ctx, eventId string) bool
+  }
+  class ReleaseConfirmationMetrics {
+    <<Port>>
+    +Handled(ctx, outcome ReleaseConfirmationOutcome)
+    +LineUnconfirmed(ctx)
   }
   class ProcessPathCatalogue {
     <<Port>>
@@ -487,24 +562,25 @@ flowchart LR
     KREP["inbound/kafka<br/>RepromiseConsumer"]
     KPC["inbound/kafka<br/>PlannedCapacityConsumer"]
     KCLS["inbound/kafka<br/>ProductClassificationConsumer"]
+    KRC["inbound/kafka<br/>ReleaseConfirmationConsumer (opt-in)"]
     KAN["inbound/kafka<br/>AnalyticsConsumer"]
   end
   subgraph APP["Application"]
-    UC["usecases<br/>ReceiveOrder, RetryAllocation, ReleaseHeldOrder,<br/>CancelOrder, GetOrder, RepromiseOrder,<br/>ApplyPlannedCapacity, GetPlannedCapacity,<br/>OrderCapacityConstraints, ApplyProductClassification"]
+    UC["usecases<br/>ReceiveOrder, RetryAllocation, ReleaseHeldOrder,<br/>CancelOrder, GetOrder, RepromiseOrder,<br/>ApplyPlannedCapacity, GetPlannedCapacity,<br/>OrderCapacityConstraints, ApplyProductClassification,<br/>ConfirmRelease, FlagUnconfirmedReleases"]
     PORTS["ports"]
   end
   subgraph DOM["Domain"]
-    D["order, processpath, shared"]
+    D["order, processpath, releaseconfirmation, shared"]
   end
   subgraph OUT["Outbound adapters"]
-    PG["postgres<br/>OrderRepo, UnitOfWork, OutboxPublisher,<br/>OutboxRelay, Sweeper, PlannedCapacityRepo"]
+    PG["postgres<br/>OrderRepo, UnitOfWork, OutboxPublisher,<br/>OutboxRelay, Sweeper, PlannedCapacityRepo,<br/>ReleaseConfirmationRepo"]
     MEM["memory<br/>in-memory repos, SystemClock"]
     INV["inventorystorage<br/>Client, BreakerClient, PermissiveClient"]
     CLS["productclassificationcopy<br/>PostgresStore, MemoryStore, PermissiveLookup,<br/>Postgres/MemoryProcessedEvents"]
     CACHE["kafkacatalog, kafkacptschedule,<br/>kafkapathcapacity, pathcapacity"]
     KPUB["kafka<br/>Publisher, AnalyticsPublisher, RelaySink"]
     LOG["events<br/>LogPublisher"]
-    TEL["telemetry<br/>OrderMetrics"]
+    TEL["telemetry<br/>OrderMetrics, ReleaseConfirmationMetrics"]
     ANS["analyticsstore<br/>projection, report"]
   end
   REP["analytics/report"]
@@ -514,6 +590,7 @@ flowchart LR
   KREP --> UC
   KPC --> UC
   KCLS --> UC
+  KRC --> UC
   KAN --> REP
   UC --> PORTS
   UC --> D
@@ -531,6 +608,7 @@ flowchart LR
 
 Source: `cmd/order/main.go`, `cmd/order/wiring.go`,
 `cmd/order/planned_capacity.go`, `cmd/order/product_classification.go`,
+`cmd/order/release_confirmation.go`,
 `cmd/mcp/main.go`,
 `cmd/order-projector/main.go`, `internal/adapters/**`. Omits:
 `cmd/order-reports` (reads `analytics/report` through `analyticsstore` and

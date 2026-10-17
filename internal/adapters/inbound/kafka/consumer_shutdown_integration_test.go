@@ -125,6 +125,26 @@ func TestConsumers_ShutdownMidHandle_IsCleanAndDeadLettersNothing(t *testing.T) 
 			pcItEvent(t, pcItTypePub, fmt.Sprintf("evt-plan-shutdown-%d", time.Now().UnixNano()), pcItPlanID,
 				time.Date(2026, 10, 4, 21, 45, 10, 0, time.UTC), pcItData(pcItPlanID, 4000)))
 	})
+
+	t.Run("ReleaseConfirmationConsumer", func(t *testing.T) {
+		topic := fmt.Sprintf("warehouse.work-planning.events.shutdown-itest-%d", time.Now().UnixNano())
+		uow := &parkingUnitOfWork{entered: make(chan struct{}, 1)}
+		logs := &syncBuffer{}
+		newConsumer := func() shutdownConsumer {
+			return inboundkafka.NewReleaseConfirmationConsumerForTopic(brokers,
+				fmt.Sprintf("om-release-confirmation-shutdown-itest-%d", time.Now().UnixNano()), topic,
+				&usecases.ConfirmRelease{
+					// Never reached: the parked unit of work reports the
+					// cancellation before the closure runs.
+					Clock:      memory.NewFixedClock(time.Date(2026, 10, 17, 9, 0, 5, 0, time.UTC)),
+					UnitOfWork: uow,
+				},
+				slog.New(slog.NewTextHandler(logs, nil)))
+		}
+		assertCleanShutdownMidHandle(t, ctx, brokers, topic, newConsumer, uow, logs,
+			rcItEvent(t, rcItTypeCreated, fmt.Sprintf("evt-wu-shutdown-%d", time.Now().UnixNano()), "ord-shutdown-line-1",
+				rcItOrderData("ord-shutdown", 1)))
+	})
 }
 
 // assertCleanShutdownMidHandle publishes one healthy message, waits until the

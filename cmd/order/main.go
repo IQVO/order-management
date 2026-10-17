@@ -13,6 +13,7 @@
 //	http.go          inbound server + http.Server construction
 //	housekeeping.go  idempotency/outbox sweeper
 //	shutdown.go      serve loop and ADR-0025 graceful shutdown
+//	release_confirmation.go  ADR 0043 release-confirmation loop (config, consumer, timeout sweep)
 //	planned_capacity.go, wiring.go  ADR 0031 / catalogue consumers
 package main
 
@@ -68,6 +69,13 @@ func run() error {
 		return err
 	}
 
+	// ADR 0043: validate RELEASE_CONFIRMATION_* before anything else is built,
+	// so kafka mode without its prerequisites fails boot first.
+	releaseConfirmationCfg, err := releaseConfirmationConfigFromEnv(logger)
+	if err != nil {
+		return err
+	}
+
 	orders, publisher, dbPool, uow, relay, closeAdapters, err := buildRepoAdapters(ctx, db.url, db.migrationsURL, db.migrationsPath, getenv("EVENT_PUBLISHER", "log"), logger)
 	if err != nil {
 		return err
@@ -91,12 +99,17 @@ func run() error {
 	promise := buildPromisePolicy(catalogue, cptSchedule, capacity, logger)
 
 	clock := memory.SystemClock{}
-	server := buildInboundServer(orders, publisher, clock, promise, inventory, classification.lookup, catalogue, orderMetrics, uow, dbPool, readiness, logger)
+	server := buildInboundServer(orders, publisher, clock, promise, inventory, classification.lookup, catalogue, orderMetrics, uow, buildReleaseConfirmations(releaseConfirmationCfg, dbPool), dbPool, readiness, logger)
 
 	// ADR 0036: in kafka mode the local classification copy's consumer
 	// runs for the process lifetime; its stop runs after the HTTP drain
 	// (serveAndShutdown returns first) and before the pool closes.
 	defer classification.startConsumer(logger)()
+
+	// ADR 0043: with RELEASE_CONFIRMATION_MODE=kafka the consumer of
+	// wes-work-planning's WorkUnitCreated runs for the process lifetime; off
+	// (the default) starts nothing.
+	defer startReleaseConfirmationConsumer(releaseConfirmationCfg, dbPool, clock, logger)()
 
 	// ADR 0031 planned capacity: a nil value (consumer-group env unset)
 	// leaves everything below exactly as before.

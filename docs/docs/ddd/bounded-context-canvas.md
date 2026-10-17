@@ -111,7 +111,7 @@ flowchart LR
     BC ==>|"evt - Kafka<br/>warehouse.order-management.events<br/>SiteSkuDemandChanged (per-line<br/>demand projection)"| out2
     BC ==>|"evt - Kafka<br/>warehouse.order-management.events<br/>OrderRepromised"| out3
     BC ==>|"evt - Kafka<br/>warehouse.order-management.analytics<br/>every raised domain event"| out4
-    BC ==>|"evt - Kafka fulfillment and<br/>warehouse-planning .dlq<br/>unprocessable inbound message"| out5
+    BC ==>|"evt - Kafka fulfillment,<br/>warehouse-planning and work-planning .dlq<br/>unprocessable inbound message"| out5
     linkStyle 0 stroke:#1971c2,stroke-width:1.5px
     linkStyle 1 stroke:#e8590c,stroke-width:2.5px
     linkStyle 2 stroke:#e8590c,stroke-width:2.5px
@@ -177,6 +177,7 @@ holding network-originated orders until their caller commits.
 | process-path-management | ProcessPathCreated, ProcessPathUpdated, ProcessPathDeactivated | Event | Kafka `warehouse.process-path-management.events`, `com.warehouse.wes.process-path-management.processpath.*` | Published Language, ACL |
 | process-path-management | CPTScheduleChanged | Event | Kafka `warehouse.process-path-management.events`, `com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged` | Published Language, ACL |
 | wes-work-planning | PathCapacityChanged | Event | Kafka `warehouse.work-planning.events`, `com.warehouse.wes.work-planning.workpool.PathCapacityChanged` | Published Language, ACL |
+| wes-work-planning | WorkUnitCreated | Event | Kafka `warehouse.work-planning.events`, `com.warehouse.wes.work-planning.workunit.WorkUnitCreated`; only the optional `reference` and `line_no` are read, to confirm a released order line (opt-in `RELEASE_CONFIRMATION_MODE=kafka`, ADR 0043; available, off by default) | Published Language, ACL |
 | warehouse-planning | CapacityPlanCreated, CapacityPlanPublished, CapacityShortageDetected | Event | Kafka `warehouse.warehouse-planning.events`, `com.warehouse.wes.warehouse-planning.capacityplan.*` (opt-in) | Published Language, ACL |
 | product-master | ProductClassified | Event | Kafka `warehouse.product-master.events`, `com.warehouse.wms.product-master.product.ProductClassified` → local copy read at intake (opt-in `PRODUCT_CLASSIFICATION_MODE=kafka`, ADR 0036, fail-open for unknown SKUs) | Published Language, ACL (local copy) |
 
@@ -190,8 +191,8 @@ holding network-originated orders until their caller commits.
 | wes-work-planning | OrderPartiallyAllocated | Event | Kafka `warehouse.order-management.events`, `com.warehouse.wes.order-management.order.OrderPartiallyAllocated` | Published Language |
 | slotting-optimization, network-inventory-planning | SiteSkuDemandChanged | Event | Kafka `warehouse.order-management.events`, `com.warehouse.wes.order-management.siteskudemand.SiteSkuDemandChanged` (per-line demand projection, [ADR 0035](/docs/adr/0035-site-sku-demand-projection-event)) | Published Language |
 | any subscriber (none known) | OrderRepromised | Event | Kafka `warehouse.order-management.events`, `com.warehouse.wes.order-management.order.OrderRepromised` | Published Language |
-| order-projector (this repo) | every raised domain event | Event | Kafka `warehouse.order-management.analytics`, `com.warehouse.wes.order-management.order.*` | internal |
-| Dead-letter topics | unprocessable inbound message | Event | Kafka `warehouse.fulfillment.events.dlq`, `warehouse.warehouse-planning.events.dlq` | internal |
+| order-projector (this repo) | every raised domain event | Event | Kafka `warehouse.order-management.analytics`, `com.warehouse.wes.order-management.order.*` (including the analytics-only `OrderReleaseUnconfirmed`, ADR 0043, which the projector ignores) | internal |
+| Dead-letter topics | unprocessable inbound message | Event | Kafka `warehouse.fulfillment.events.dlq`, `warehouse.warehouse-planning.events.dlq`, and (ADR 0043, when the release-confirmation consumer is on) `warehouse.work-planning.events.dlq` | internal |
 
 ## Ubiquitous Language
 
@@ -204,6 +205,7 @@ Top terms:
 | Allocation | Reserving stock for a line in inventory-storage |
 | Backordered | A line inventory-storage answered `409` for |
 | Release | Marking allocated lines `Released` and announcing them on Kafka |
+| Release confirmation | Knowing that wes-work-planning admitted a released line: `PENDING` -> `CONFIRMED` by its `WorkUnitCreated`, or `UNCONFIRMED` after `RELEASE_CONFIRMATION_TIMEOUT` (ADR 0043; off by default) |
 | Ship-complete | Release nothing until every line is allocated (BR3) |
 | Held order | Allocated but waiting for `POST /orders/{id}/release` (ADR 0020) |
 | Promise / promise group | The CPT window a shipment group is promised to leave by |
@@ -220,6 +222,11 @@ Top terms:
 - **BR6 — cancellation boundary at release.** No cancel once any line is
   `Released`; released work is not clawed back (ADR 0004).
 - **Release is a published fact, not a call** (ADR 0005).
+- **A release confirmation is observed, never enforced** (ADR 0043). With
+  `RELEASE_CONFIRMATION_MODE=kafka`, a released line that wes-work-planning
+  never confirms is flagged `UNCONFIRMED` and announced as the analytics-only
+  `OrderReleaseUnconfirmed`; the order's status is untouched and nothing is
+  cancelled, re-released or retried.
 - **Promise from capability** — CPT schedule, path cycle time and capacity,
   per shipment group; lead time only as fallback (ADR 0014, 0017).
 - **Path is chosen, never supplied** — shortest known cycle time among
@@ -240,8 +247,10 @@ Top terms:
 - One site per deployment: the promise uses `DEFAULT_SITE_ID`, and the
   planned-capacity annotation uses `PLANNED_CAPACITY_SITE_ID` (defaulting to
   the same value).
-- wes-work-planning accepts every released line; there is no confirmation
-  event back.
+- wes-work-planning accepts every released line. There is no dedicated reply
+  event; by default nothing confirms it, and with
+  `RELEASE_CONFIRMATION_MODE=kafka` (ADR 0043, off by default) its
+  `WorkUnitCreated` is the confirmation.
 - Upstream catalogue, CPT-schedule and capacity topics are replayable from
   the first offset (local caches rebuild on every start).
 - REST and MCP are unauthenticated (ADR 0012); network-level controls are
@@ -256,6 +265,7 @@ Top terms:
 | Promise basis mix, split shipments, promise-to-cutoff gap | `funnel_rollup` (ADR 0019), MCP `get_promise_health` |
 | Re-promises per hour | `repromise_rollup` |
 | Outbox lag | `order.outbox.lag_seconds` gauge (ADR 0032) |
+| Release confirmation (only with `RELEASE_CONFIRMATION_MODE=kafka`) | `order.release_confirmation.events` (by `outcome`) and `order.release_confirmation.unconfirmed` counters (`telemetry/release_confirmation_metrics.go`, ADR 0043) |
 
 ## Open Questions
 
@@ -263,5 +273,7 @@ Top terms:
   wes-work-planning or network-fulfillment need it?
 - **Held orders are never swept.** Nothing expires an orphaned hold; ADR
   0020 names network-fulfillment as the natural owner of a sweeper.
-- No release confirmation from wes-work-planning (fire-and-forget,
-  README Deferred list).
+- Release confirmation (ADR 0043) is available but off by default, and a line
+  it flags `UNCONFIRMED` is only reported. Whether an automatic reaction
+  (re-publishing `OrderAllocated`, revoking reservations, cancelling) is ever
+  wanted is open and needs its own ADR.
