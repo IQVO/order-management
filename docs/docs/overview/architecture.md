@@ -28,6 +28,8 @@ internal/
                                PromisePolicy (+ LeadTimePolicy fallback),
                                PathSelectionPolicy
     processpath/              process-path definitions
+    releaseconfirmation/      Confirmation process manager, PENDING -> CONFIRMED /
+                               UNCONFIRMED (ADR 0043); outside the Order aggregate
     shared/                   value objects: OrderId, SKU, PathId, events, errors
   application/
     ports/                    OUT: OrderRepo, EventPublisher, UnitOfWork, Clock,
@@ -37,11 +39,15 @@ internal/
                                RepromiseProcessedEvents, PlannedCapacityRepo,
                                PlannedCapacityProcessedEvents,
                                ProductClassificationCopy,
-                               ProductClassificationProcessedEvents
+                               ProductClassificationProcessedEvents,
+                               ReleaseConfirmations,
+                               ReleaseConfirmationProcessedEvents,
+                               ReleaseConfirmationMetrics
     usecases/                 ReceiveOrder, RetryAllocation, CancelOrder,
                                GetOrder, ReleaseHeldOrder, RepromiseOrder,
                                ApplyPlannedCapacity, GetPlannedCapacity,
-                               OrderCapacityConstraints, ApplyProductClassification
+                               OrderCapacityConstraints, ApplyProductClassification,
+                               ConfirmRelease, FlagUnconfirmedReleases
                                (allocation + release folded into allocateAndRelease)
   adapters/
     inbound/http/             chi handlers, DTOs, RFC 7807 error mapping,
@@ -49,6 +55,8 @@ internal/
     inbound/kafka/            RepromiseConsumer (warehouse.fulfillment.events),
                                PlannedCapacityConsumer (warehouse.warehouse-planning.events),
                                ProductClassificationConsumer (warehouse.product-master.events),
+                               ReleaseConfirmationConsumer (warehouse.work-planning.events,
+                               ADR 0043, off by default),
                                AnalyticsConsumer (cmd/order-projector)
     inbound/mcp/              MCP tools
     kafka/cloudevents/        the only CloudEvents 1.0 New/Decode helper (ADR 0030)
@@ -79,10 +87,10 @@ docs/docs/adr/                Architecture Decision Records
 ```mermaid
 flowchart TB
   HTTP["inbound/http<br/>chi handlers, DTOs, RFC 7807"]
-  KIN["inbound/kafka<br/>RepromiseConsumer · PlannedCapacityConsumer<br/>ProductClassificationConsumer"]
-  UC["application/usecases<br/>ReceiveOrder, RetryAllocation, CancelOrder,<br/>GetOrder, ReleaseHeldOrder, RepromiseOrder,<br/>ApplyPlannedCapacity, GetPlannedCapacity,<br/>ApplyProductClassification"]
+  KIN["inbound/kafka<br/>RepromiseConsumer · PlannedCapacityConsumer<br/>ProductClassificationConsumer · ReleaseConfirmationConsumer"]
+  UC["application/usecases<br/>ReceiveOrder, RetryAllocation, CancelOrder,<br/>GetOrder, ReleaseHeldOrder, RepromiseOrder,<br/>ApplyPlannedCapacity, GetPlannedCapacity,<br/>ApplyProductClassification, ConfirmRelease,<br/>FlagUnconfirmedReleases"]
   P["application/ports<br/>OrderRepo · EventPublisher · Clock<br/>InventoryReservationClient · ProcessPathCatalogue<br/>CPTScheduleCache · PathCapacity · ..."]
-  D["domain<br/>order · processpath · shared"]
+  D["domain<br/>order · processpath · releaseconfirmation · shared"]
   PG["outbound/postgres · memory"]
   EV["outbound/events · kafka"]
   INVC["outbound/inventorystorage<br/>productclassificationcopy"]
@@ -122,7 +130,7 @@ root and its own Deployment in `charts/order-management`.
 
 | Binary | Role | Listens on | Inbound adapters | Stores it touches |
 | --- | --- | --- | --- | --- |
-| `cmd/order` | The OLTP service: order intake, allocation, release, cancellation, re-promise, planned-capacity and classification consumers, outbox relay, housekeeping sweeper | `HTTP_ADDR` `:8080` (REST, `/healthz`, `/readyz`) | `inbound/http`, `inbound/kafka` (re-promise, planned-capacity, product-classification) | OLTP Postgres (read-write, migrates), Kafka (produces both topics, consumes five) |
+| `cmd/order` | The OLTP service: order intake, allocation, release, cancellation, re-promise, planned-capacity, classification and (opt-in, ADR 0043) release-confirmation consumers, outbox relay, housekeeping sweeper (which also runs the release-confirmation timeout) | `HTTP_ADDR` `:8080` (REST, `/healthz`, `/readyz`) | `inbound/http`, `inbound/kafka` (re-promise, planned-capacity, product-classification, release-confirmation) | OLTP Postgres (read-write, migrates), Kafka (produces both topics, consumes five) |
 | `cmd/mcp` | Read-only MCP server (ADR 0010): `get_order`, `get_promise_health` | `MCP_ADDR` `:8090` (Streamable HTTP on `/*`) | `inbound/mcp` | OLTP Postgres (reads, also migrates), analytical Postgres (read-only) |
 | `cmd/order-projector` | The only writer of the analytical database (ADR 0006) | `ADMIN_ADDR` `:8091` (`/healthz` only) | `inbound/kafka` (analytics consumer) | Kafka `warehouse.order-management.analytics`, analytical Postgres (read-write, migrates) |
 | `cmd/order-reports` | Read-only funnel report API | `HTTP_ADDR` `:8092` (`/reports/funnel`, `/reports/funnel/freshness`, `/healthz`) | `inbound/http` (reports router) | analytical Postgres (read-only pool) |
@@ -165,7 +173,7 @@ Source: `cmd/order/main.go`, `cmd/mcp/main.go`, `cmd/order-projector/main.go`, `
 
 | Store | Tables (migration that creates them) | Owner |
 | --- | --- | --- |
-| OLTP Postgres (`DATABASE_URL`) | `orders`, `order_lines` (0001), `order_promise_groups` (0003), `repromise_processed_events` (0004), `outbox_events` (0007, which also drops 0001's `events`), `idempotency_keys` (0008), `orders.version` column (0009), `planned_capacity_windows`, `planned_capacity_processed_events` (0010), `product_classification_copy`, `product_classification_processed_events` (0011) | `cmd/order` and `cmd/mcp` both apply `migrations/` at boot |
+| OLTP Postgres (`DATABASE_URL`) | `orders`, `order_lines` (0001), `order_promise_groups` (0003), `repromise_processed_events` (0004), `outbox_events` (0007, which also drops 0001's `events`), `idempotency_keys` (0008), `orders.version` column (0009), `planned_capacity_windows`, `planned_capacity_processed_events` (0010), `product_classification_copy`, `product_classification_processed_events` (0011), `release_confirmations`, `release_confirmation_processed_events` (0012; empty while `RELEASE_CONFIRMATION_MODE=off`) | `cmd/order` and `cmd/mcp` both apply `migrations/` at boot |
 | Analytical Postgres (`ANALYTICS_DATABASE_URL`) | `analytics_processed_events`, `analytics_consumed_events`, `funnel_rollup` (`analytics/0001`), `repromise_rollup` (`analytics/0002`) | `cmd/order-projector` applies `migrations/analytics/` and is the only writer |
 | In-memory | the same repositories in `outbound/memory` and `outbound/productclassificationcopy` | used when `DATABASE_URL` is unset; lost on restart |
 | Per-process caches | process-path catalogue, CPT schedule, path capacity | rebuilt from Kafka on every boot when `PATH_CATALOGUE_SOURCE=kafka` |
@@ -189,6 +197,9 @@ Source: `cmd/order/main.go`, `cmd/mcp/main.go`, `cmd/order-projector/main.go`, `
 | `RepromiseProcessedEvents` | Idempotency gate for the re-promise consumer (ADR 0018) | `postgres`, `memory` |
 | `PlannedCapacityRepo` | Local read model of warehouse-planning's capacity windows (ADR 0031) | `postgres`, `memory` |
 | `PlannedCapacityProcessedEvents` | Idempotency gate for the planned-capacity consumer (ADR 0031) | `postgres`, `memory` |
+| `ReleaseConfirmations` | The `release_confirmations` process-manager table: one row per released line, `PENDING` -> `CONFIRMED` / `UNCONFIRMED` (ADR 0043) | `postgres` (wired only when `RELEASE_CONFIRMATION_MODE=kafka`; a nil port means the loop is off) |
+| `ReleaseConfirmationProcessedEvents` | Idempotency gate for the release-confirmation consumer (ADR 0043) | `postgres` |
+| `ReleaseConfirmationMetrics` | `order.release_confirmation.events` and `.unconfirmed` counters (ADR 0043) | `telemetry` (OpenTelemetry) |
 
 The inventory-storage reservation client is env-selected
 `INVENTORY_STORAGE_MODE=http|permissive` and the classification lookup
@@ -208,7 +219,8 @@ deployment.
 (memory vs Postgres repositories and the event publisher), `kafka.go`
 (publishing, outbox relay, re-promise consumer), `outbound.go`
 (inventory-storage client, catalogue, promise policy),
-`product_classification.go`, `planned_capacity.go`, `wiring.go` (the Kafka
+`product_classification.go`, `planned_capacity.go`, `release_confirmation.go`
+(ADR 0043: config, consumer and the timeout hook), `wiring.go` (the Kafka
 caches), `http.go`, `housekeeping.go` and `shutdown.go`. It is the only
 place that knows both a port and its implementation. `cmd/mcp`,
 `cmd/order-projector` and `cmd/order-reports` are smaller composition

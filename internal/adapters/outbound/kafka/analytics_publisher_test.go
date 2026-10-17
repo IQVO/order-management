@@ -115,6 +115,15 @@ func TestAnalyticsPublisher_PublishesEachEventType(t *testing.T) {
 			wantDataValue: "o1",
 		},
 		{
+			name:          "OrderReleaseUnconfirmed",
+			event:         shared.NewOrderReleaseUnconfirmed(at, "o1", 2, "singles", "o1-line-2", at.Add(-15*time.Minute)),
+			wantType:      "OrderReleaseUnconfirmed",
+			wantKey:       "o1",
+			wantPath:      "singles", // carried by the event, not looked up on the order
+			wantDataField: "work_unit_id",
+			wantDataValue: "o1-line-2",
+		},
+		{
 			name:          "OrderCancelled",
 			event:         shared.NewOrderCancelled(at, "o1", 3),
 			wantType:      "OrderCancelled",

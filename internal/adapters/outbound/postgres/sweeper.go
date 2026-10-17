@@ -21,6 +21,11 @@ const (
 	// kept for forensics before deletion (ADR-0022). Unpublished rows are
 	// never swept, however old.
 	DefaultOutboxRetention = 7 * 24 * time.Hour
+	// DefaultReleaseConfirmationRetention is how long a CONFIRMED
+	// release_confirmations row is kept (by confirmed_at) before deletion
+	// (ADR 0043) -- the same window as published outbox rows. PENDING and
+	// UNCONFIRMED rows are open problems and are never swept.
+	DefaultReleaseConfirmationRetention = 7 * 24 * time.Hour
 	// defaultSweepBatch bounds each DELETE statement so a large backlog is
 	// removed in short transactions instead of one long table lock.
 	defaultSweepBatch = 1000
@@ -30,6 +35,12 @@ const (
 type SweepResult struct {
 	IdempotencyKeys int64
 	OutboxEvents    int64
+	// ReleaseConfirmationsPruned counts CONFIRMED release_confirmations rows
+	// deleted past their retention (ADR 0043).
+	ReleaseConfirmationsPruned int64
+	// ReleasesUnconfirmed counts the PENDING release confirmations the
+	// timeout sweep flagged UNCONFIRMED in this pass (ADR 0043).
+	ReleasesUnconfirmed int64
 }
 
 // Sweeper is the periodic housekeeping job that bounds the two append-only
@@ -52,6 +63,11 @@ type Sweeper struct {
 	idempotencyTTL  time.Duration
 	outboxRetention time.Duration
 	batchSize       int
+
+	releaseConfirmationRetention time.Duration
+	// flagUnconfirmed is the ADR 0043 timeout sweep, run on each pass. It is
+	// a hook so this adapter stays free of the use case that implements it.
+	flagUnconfirmed func(ctx context.Context) (int, error)
 }
 
 // SweeperOption configures a Sweeper beyond its required pool.
@@ -71,6 +87,21 @@ func WithIdempotencyKeyTTL(d time.Duration) SweeperOption {
 // (<=0 disables).
 func WithOutboxRetention(d time.Duration) SweeperOption {
 	return func(s *Sweeper) { s.outboxRetention = d }
+}
+
+// WithReleaseConfirmationRetention overrides the default 7d retention of
+// CONFIRMED release_confirmations rows (<=0 keeps them forever).
+func WithReleaseConfirmationRetention(d time.Duration) SweeperOption {
+	return func(s *Sweeper) { s.releaseConfirmationRetention = d }
+}
+
+// WithReleaseConfirmationSweep registers the ADR 0043 timeout sweep, which
+// flags overdue PENDING release confirmations UNCONFIRMED. fn runs once per
+// pass, after the deletes, inside this same loop (there is no second
+// scheduler), and returns how many lines it flagged. nil (the default) means
+// the loop is off.
+func WithReleaseConfirmationSweep(fn func(ctx context.Context) (int, error)) SweeperOption {
+	return func(s *Sweeper) { s.flagUnconfirmed = fn }
 }
 
 // WithSweepBatchSize overrides the default 1000-row DELETE batch.
@@ -96,6 +127,8 @@ func NewSweeper(pool *pgxpool.Pool, opts ...SweeperOption) *Sweeper {
 		idempotencyTTL:  DefaultIdempotencyKeyTTL,
 		outboxRetention: DefaultOutboxRetention,
 		batchSize:       defaultSweepBatch,
+
+		releaseConfirmationRetention: DefaultReleaseConfirmationRetention,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -116,10 +149,12 @@ func (s *Sweeper) Run(ctx context.Context) error {
 		switch {
 		case err != nil && ctx.Err() == nil:
 			s.logger.Error("housekeeping sweep failed", "error", err,
-				"idempotency_keys_deleted", res.IdempotencyKeys, "outbox_events_deleted", res.OutboxEvents)
-		case res.IdempotencyKeys > 0 || res.OutboxEvents > 0:
+				"idempotency_keys_deleted", res.IdempotencyKeys, "outbox_events_deleted", res.OutboxEvents,
+				"release_confirmations_pruned", res.ReleaseConfirmationsPruned, "releases_unconfirmed", res.ReleasesUnconfirmed)
+		case res.IdempotencyKeys > 0 || res.OutboxEvents > 0 || res.ReleaseConfirmationsPruned > 0 || res.ReleasesUnconfirmed > 0:
 			s.logger.Info("housekeeping sweep",
-				"idempotency_keys_deleted", res.IdempotencyKeys, "outbox_events_deleted", res.OutboxEvents)
+				"idempotency_keys_deleted", res.IdempotencyKeys, "outbox_events_deleted", res.OutboxEvents,
+				"release_confirmations_pruned", res.ReleaseConfirmationsPruned, "releases_unconfirmed", res.ReleasesUnconfirmed)
 		}
 
 		select {
@@ -159,6 +194,30 @@ func (s *Sweeper) SweepOnce(ctx context.Context) (SweepResult, error) {
 				ORDER BY id
 				LIMIT $2
 			)`, s.outboxRetention)
+		if err != nil {
+			return res, err
+		}
+	}
+
+	if s.releaseConfirmationRetention > 0 {
+		res.ReleaseConfirmationsPruned, err = s.deleteInBatches(ctx, `
+			DELETE FROM release_confirmations rc USING (
+				SELECT order_id, line_no FROM release_confirmations
+				WHERE state = 'CONFIRMED'
+				  AND confirmed_at < now() - ($1 * interval '1 second')
+				ORDER BY confirmed_at
+				LIMIT $2
+			) old
+			WHERE rc.order_id = old.order_id AND rc.line_no = old.line_no AND rc.state = 'CONFIRMED'`,
+			s.releaseConfirmationRetention)
+		if err != nil {
+			return res, err
+		}
+	}
+
+	if s.flagUnconfirmed != nil {
+		n, err := s.flagUnconfirmed(ctx)
+		res.ReleasesUnconfirmed = int64(n)
 		if err != nil {
 			return res, err
 		}

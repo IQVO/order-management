@@ -28,15 +28,16 @@ func buildInboundServer(
 	catalogue ports.ProcessPathCatalogue,
 	orderMetrics *telemetry.OrderMetrics,
 	uow ports.UnitOfWork,
+	releaseConfirmations ports.ReleaseConfirmations,
 	dbPool *pgxpool.Pool,
 	readiness *inboundhttp.Readiness,
 	logger *slog.Logger,
 ) *inboundhttp.Server {
 	demand := buildDemandProjection(logger)
 	return &inboundhttp.Server{
-		ReceiveOrder:    &usecases.ReceiveOrder{Orders: orders, Events: publisher, Clock: clock, Inventory: inventory, Promise: promise, Catalogue: catalogue, Classification: classification, Metrics: orderMetrics, DemandProjection: demand, UnitOfWork: uow},
-		ReleaseHeld:     &usecases.ReleaseHeldOrder{Orders: orders, Events: publisher, Clock: clock, Inventory: inventory, Promise: promise, UnitOfWork: uow},
-		RetryAllocation: &usecases.RetryAllocation{Orders: orders, Inventory: inventory, Events: publisher, Clock: clock, Promise: promise, DemandProjection: demand, UnitOfWork: uow},
+		ReceiveOrder:    &usecases.ReceiveOrder{Orders: orders, Events: publisher, Clock: clock, Inventory: inventory, Promise: promise, Catalogue: catalogue, Classification: classification, Metrics: orderMetrics, DemandProjection: demand, UnitOfWork: uow, ReleaseConfirmations: releaseConfirmations},
+		ReleaseHeld:     &usecases.ReleaseHeldOrder{Orders: orders, Events: publisher, Clock: clock, Inventory: inventory, Promise: promise, UnitOfWork: uow, ReleaseConfirmations: releaseConfirmations},
+		RetryAllocation: &usecases.RetryAllocation{Orders: orders, Inventory: inventory, Events: publisher, Clock: clock, Promise: promise, DemandProjection: demand, UnitOfWork: uow, ReleaseConfirmations: releaseConfirmations},
 		CancelOrder:     &usecases.CancelOrder{Orders: orders, Inventory: inventory, Events: publisher, Clock: clock, DemandProjection: demand, UnitOfWork: uow},
 		GetOrder:        &usecases.GetOrder{Orders: orders},
 		// IdempotencyPool reuses the SAME pool buildRepoAdapters opened

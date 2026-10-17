@@ -79,6 +79,9 @@ internal/
                                   invariants, PromisePolicy (+ LeadTimePolicy
                                   fallback), PathSelectionPolicy
     processpath/                  process-path definitions
+    releaseconfirmation/          Confirmation process manager: PENDING ->
+                                  CONFIRMED / UNCONFIRMED (ADR 0043); not
+                                  part of the Order aggregate
     shared/                       OrderId, SKU, PathId, domain events, errors
   application/
     ports/                        OUT: OrderRepo, EventPublisher, UnitOfWork,
@@ -90,14 +93,20 @@ internal/
                                   PlannedCapacityRepo,
                                   PlannedCapacityProcessedEvents,
                                   ProductClassificationCopy,
-                                  ProductClassificationProcessedEvents
+                                  ProductClassificationProcessedEvents,
+                                  ReleaseConfirmations,
+                                  ReleaseConfirmationProcessedEvents,
+                                  ReleaseConfirmationMetrics
     usecases/                     ReceiveOrder (allocates+releases
                                   implicitly), RetryAllocation (retries+
                                   releases), ReleaseHeldOrder, CancelOrder,
                                   GetOrder, RepromiseOrder (Kafka-driven),
                                   ApplyPlannedCapacity (Kafka-driven),
                                   GetPlannedCapacity, OrderCapacityConstraints,
-                                  ApplyProductClassification (Kafka-driven)
+                                  ApplyProductClassification (Kafka-driven),
+                                  ConfirmRelease (Kafka-driven) and
+                                  FlagUnconfirmedReleases (housekeeping
+                                  sweep), both ADR 0043
   adapters/
     inbound/http/                 chi handlers, DTOs, RFC 7807 error mapping,
                                   Idempotency-Key middleware, /readyz gate
@@ -106,6 +115,9 @@ internal/
                                   (warehouse.warehouse-planning.events),
                                   product-classification consumer
                                   (warehouse.product-master.events),
+                                  release-confirmation consumer
+                                  (warehouse.work-planning.events, ADR 0043;
+                                  off by default),
                                   analytics consumer (cmd/order-projector)
     inbound/mcp/                  MCP tools
     kafka/cloudevents/            the only CloudEvents 1.0 New/Decode helper
@@ -218,11 +230,15 @@ Release no longer calls any Supplier synchronously — see
 | `PRODUCT_CLASSIFICATION_CONSUMER_GROUP` | *(unset)* | Stable consumer group of the classification copy's consumer on `warehouse.product-master.events`; **required** when `PRODUCT_CLASSIFICATION_MODE=kafka` (ADR 0036). |
 | `PATH_CATALOGUE_SOURCE` | `none` | `kafka` enables the process-path catalogue, CPT-schedule and path-capacity caches that drive the capability-derived promise (ADR 0013–0015); `none` ⇒ lead-time promise only. |
 | `EVENT_PUBLISHER` | `log` | `log` (default, structured-log publisher) or `kafka` — forwards `OrderAllocated`/`OrderPartiallyAllocated`/`OrderRepromised` to the integration topic **and** fans every domain event out to the analytics topic (ADR 0006). With `DATABASE_URL` set, `kafka` goes through the transactional outbox (`outbox_events` + in-process relay, ADR 0022); without it, events are written to Kafka directly. |
-| `KAFKA_BROKERS` | `localhost:9092` for the publishers; unset disables the consumers | Comma-separated broker addresses. When set, `cmd/order` also runs the re-promise consumer (ADR 0018) and, if enabled, the planned-capacity consumer (ADR 0031); required by `PRODUCT_CLASSIFICATION_MODE=kafka` (ADR 0036). |
+| `KAFKA_BROKERS` | `localhost:9092` for the publishers; unset disables the consumers | Comma-separated broker addresses. When set, `cmd/order` also runs the re-promise consumer (ADR 0018) and, if enabled, the planned-capacity consumer (ADR 0031) and the release-confirmation consumer (ADR 0043); required by `PRODUCT_CLASSIFICATION_MODE=kafka` (ADR 0036) and `RELEASE_CONFIRMATION_MODE=kafka`. |
 | `OUTBOX_RELAY_INTERVAL` | `1s` | Outbox relay poll interval (ADR 0022). |
-| `HOUSEKEEPING_INTERVAL` | `1h` | Sweeper period; `0` disables it (ADR 0032). |
+| `HOUSEKEEPING_INTERVAL` | `1h` | Sweeper period; `0` disables it (ADR 0032). It also paces the release-confirmation timeout sweep (ADR 0043): with the default a line is flagged up to 1h15m after release, so set about `5m` when `RELEASE_CONFIRMATION_MODE=kafka`. |
 | `IDEMPOTENCY_KEY_TTL` | `24h` | Age after which `idempotency_keys` rows are swept (ADR 0032). |
 | `OUTBOX_RETENTION` | `168h` | Age after which PUBLISHED `outbox_events` rows are swept (ADR 0032). |
+| `RELEASE_CONFIRMATION_MODE` | `off` | `off` or `kafka` (anything else fails boot). `kafka` opens a `PENDING` `release_confirmations` row per released line and runs a consumer of wes-work-planning's `WorkUnitCreated` that confirms it (ADR 0043). Available, off by default: `off` changes nothing. Needs `DATABASE_URL`, `KAFKA_BROKERS`, `EVENT_PUBLISHER=kafka` and the consumer group below, or boot fails naming the missing one. |
+| `RELEASE_CONFIRMATION_CONSUMER_GROUP` | *(unset)* | Stable consumer group of that consumer on `warehouse.work-planning.events`; **required** when the mode is `kafka`, no default on purpose (ADR 0043). |
+| `RELEASE_CONFIRMATION_TIMEOUT` | `15m` | A `PENDING` line older than this becomes `UNCONFIRMED` in the housekeeping sweep and raises the analytics-only `OrderReleaseUnconfirmed`; `0` disables the sweep (ADR 0043). |
+| `RELEASE_CONFIRMATION_RETENTION` | `168h` | Age (by `confirmed_at`) after which `CONFIRMED` rows are swept; `0` keeps them. `PENDING` and `UNCONFIRMED` rows are never swept (ADR 0043). |
 | `PLANNED_CAPACITY_CONSUMER_GROUP` | *(unset)* | Stable consumer group for warehouse-planning's capacity plans; unset ⇒ the feature is off and `GET /planned-capacity` is not registered (ADR 0031). |
 | `PLANNED_CAPACITY_SITE_ID` | `DEFAULT_SITE_ID` | Site whose planned-capacity windows annotate orders (ADR 0031). |
 | `DEMAND_PROJECTION_SITE_ID` | *(unset)* | Static demand-site scope for the additive, PII-free `SiteSkuDemandChanged` integration event (keyed `<order_id>/line/<line_no>`, assignment_version `static-site-v1`); unset ⇒ the projection is off and the event is never emitted (ADR 0035). |
@@ -252,8 +268,9 @@ subscriber) consumes independently:
   `SiteSkuDemandChanged` projection — every other domain event
   (`OrderReceived`, `OrderLineAllocated`, `OrderLineBackordered`,
   `OrderLineReleased`, `OrderReleased`, `OrderCancelled`,
-  `OrderAllocationPartiallyFailed`) stays off the integration topic,
-  mirroring `inventory-storage`'s own precedent of forwarding only a subset.
+  `OrderAllocationPartiallyFailed`, and (ADR 0043) `OrderReleaseUnconfirmed`)
+  stays off the integration topic, mirroring `inventory-storage`'s own
+  precedent of forwarding only a subset.
 - **Payload (`data` field; the four line fields below are frozen, newer
   fields such as `fulfillment_class` and `promise_cpt_id`/`promise_basis`/
   `promise_cutoff_at` are additive — see `apis/asyncapi.yaml`):**
@@ -276,19 +293,37 @@ subscriber) consumes independently:
   cluster, reachable from the host at `localhost:9092` (bring it up with
   warehouse-infra). The repo-local `docker-compose.kafka.yml` was retired:
   it bound the same port.
-- **Fire-and-forget, deliberately.** There is no release-confirmation
-  reply event from `wes-work-planning` in v1 — see "Deferred" below.
+- **Fire-and-forget by default; confirmed from `WorkUnitCreated` when
+  switched on.** There is still no dedicated release-confirmation reply
+  *event* from `wes-work-planning`. With `RELEASE_CONFIRMATION_MODE=off`
+  (the default) release stays fire-and-forget exactly as before. With
+  `RELEASE_CONFIRMATION_MODE=kafka`
+  ([ADR 0043](docs/docs/adr/0043-release-confirmation-from-workunitcreated.md),
+  gap OM-0005) each released line gets a `PENDING` row in
+  `release_confirmations`, a consumer of `wes-work-planning`'s existing
+  `WorkUnitCreated` (matched by its optional `reference` and `line_no`) sets it
+  `CONFIRMED`, and a line still `PENDING` after `RELEASE_CONFIRMATION_TIMEOUT`
+  (default `15m`) is flagged `UNCONFIRMED` by the housekeeping sweep with one
+  analytics-only `OrderReleaseUnconfirmed` event, an ERROR log
+  (`release unconfirmed`) and the counter `order.release_confirmation.unconfirmed`.
+  That is a fact, never an action: nothing is cancelled, re-released or
+  retried. The loop is available but off by default; do not enable it before
+  `wes-work-planning` ships the two fields (its ADR 0041).
 - **Consumed topics:** `warehouse.process-path-management.events`
   (`ProcessPath*`, `CPTScheduleChanged`) and `warehouse.work-planning.events`
   (`PathCapacityChanged`) feed local caches when
-  `PATH_CATALOGUE_SOURCE=kafka`; `warehouse.fulfillment.events`
+  `PATH_CATALOGUE_SOURCE=kafka`; the same `warehouse.work-planning.events`
+  topic (`WorkUnitCreated`) feeds the release-confirmation consumer when
+  `RELEASE_CONFIRMATION_MODE=kafka` (ADR 0043);
+  `warehouse.fulfillment.events`
   (`TaskCPTMissed`, `PackageManifested`) drives the re-promise consumer
   (group `order-management-repromise`) whenever `KAFKA_BROKERS` is set;
   `warehouse.warehouse-planning.events` (`CapacityPlanCreated`,
   `CapacityPlanPublished`, `CapacityShortageDetected`) feeds the
   planned-capacity read model when `PLANNED_CAPACITY_CONSUMER_GROUP` is set
-  (ADR 0031). Poison messages on the two stable-group consumers go to
-  `<topic>.dlq` (ADR 0025).
+  (ADR 0031). Poison messages on the stable-group consumers that dead-letter
+  (re-promise, planned-capacity, release-confirmation) go to `<topic>.dlq`
+  (ADR 0025, ADR 0043).
 - **Transactional outbox.** With `DATABASE_URL` set, every Kafka-bound
   event is written to `outbox_events` in the same transaction as the
   `Order` save and drained by an in-process relay
@@ -624,15 +659,20 @@ since shipped — Helm chart, MCP adapter, Docker publishing/releases,
 Kafka integration, analytics data product, and the full CI sensor set
 above — have been removed from it.)
 
-- **Kafka release-confirmation reply events from wes-work-planning.**
-  This service publishes `OrderAllocated`/`OrderPartiallyAllocated` to
-  Kafka fire-and-forget — it never learns whether wes-work-planning's
-  consumer actually processed the event or successfully enqueued its own
-  work. This is a deliberate choice (mirroring inventory-storage's own
-  ADR 0004 stance on transactional guarantees), not an oversight: a
-  confirmation-loop pattern (e.g. this service subscribing to a
-  `WorkEnqueued` reply event) is real, scoped-down future work. See
-  [ADR 0005](docs/docs/adr/0005-choreographed-release-via-kafka.md).
+- **A dedicated release-confirmation reply event from wes-work-planning,
+  and any automatic reaction to an unconfirmed release.** Still no reply
+  *event*: ADR 0043 confirms a release from wes-work-planning's existing
+  `WorkUnitCreated` when `RELEASE_CONFIRMATION_MODE=kafka` (available, off by
+  default); otherwise this service publishes
+  `OrderAllocated`/`OrderPartiallyAllocated` to Kafka fire-and-forget and never
+  learns whether wes-work-planning enqueued its work. Even when the loop is on,
+  a line that is never confirmed is only *flagged* (`OrderReleaseUnconfirmed`,
+  an ERROR log and a counter): nothing is cancelled, re-released or retried
+  automatically, because the signal has benign explanations and compensation
+  would cross ADR 0004's cancellation boundary. Automatic compensation needs
+  its own ADR. See
+  [ADR 0005](docs/docs/adr/0005-choreographed-release-via-kafka.md) and
+  [ADR 0043](docs/docs/adr/0043-release-confirmation-from-workunitcreated.md).
 - **Real carrier-rate / transit-time promise.** The promise is a CPT window
   derived from fulfillment capability (ADR 0014), with `LeadTimePolicy` as the
   tagged fallback — it ends at the building's door. There is no live carrier
@@ -722,6 +762,12 @@ GitHub Pages on every push to `main` that touches `docs/**`, publishing to
 35. [0035 — SiteSkuDemandChanged — an additive, PII-free site/SKU demand projection event](docs/docs/adr/0035-site-sku-demand-projection-event.md)
 36. [0036 — Product classification from a local copy of product-master events](docs/docs/adr/0036-product-classification-local-copy.md)
 37. [0037 — Send the order line number (lineNo) on POST /reservations](docs/docs/adr/0037-send-line-no-on-reservations.md)
+38. [0038 — The operator MFE sends an Idempotency-Key per order submission](docs/docs/adr/0038-mfe-sends-idempotency-key-per-submission.md)
+39. [0039 — The reports binary's routes are a contract: apis/openapi-reports.yaml](docs/docs/adr/0039-reports-api-openapi-contract.md)
+40. [0040 — The outbox relay stops claiming a row after `OUTBOX_MAX_ATTEMPTS` failures](docs/docs/adr/0040-outbox-relay-attempt-cap.md)
+41. [0041 — The W3C trace context crosses the outbox in `outbox_events.headers`](docs/docs/adr/0041-trace-context-crosses-the-outbox.md)
+42. [0042 — Path selection considers only paths whose intake admits customer orders](docs/docs/adr/0042-path-selection-honours-process-path-intake.md)
+43. [0043 — Confirm an order-line release from WorkUnitCreated, and flag OrderReleaseUnconfirmed](docs/docs/adr/0043-release-confirmation-from-workunitcreated.md) (amends 0005's no-confirmation-loop decision)
 
 ## License
 

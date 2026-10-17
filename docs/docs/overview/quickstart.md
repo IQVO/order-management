@@ -99,6 +99,14 @@ go run ./cmd/order
   `order-management-repromise`, the same as the deployed pod. A local
   process with `KAFKA_BROKERS` set therefore shares that group's
   partitions with the cluster while it runs.
+- The release-confirmation loop is **off by default**
+  (`RELEASE_CONFIRMATION_MODE=off`) and is not part of this quickstart. To
+  try it locally, set `RELEASE_CONFIRMATION_MODE=kafka` with your own
+  `RELEASE_CONFIRMATION_CONSUMER_GROUP` (it has no default on purpose) on top
+  of the exports above; it also needs `DATABASE_URL`. Without a
+  wes-work-planning that stamps `reference` and `line_no` on `WorkUnitCreated`
+  every released line is flagged after `RELEASE_CONFIRMATION_TIMEOUT` (see
+  the [runbook](/docs/operations/runbook)).
 - The fleet has no docker-compose broker: `docker-compose.kafka.yml` was
   removed from this repository (it bound `localhost:9092`, the same port
   as the kind cluster's broker). Use the cluster's broker.

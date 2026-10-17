@@ -88,6 +88,15 @@ type orderReleasedPayload struct {
 	OrderID string
 }
 
+type orderReleaseUnconfirmedPayload struct {
+	logHeader
+	OrderID    string
+	LineNo     int
+	PathID     string
+	WorkUnitID string
+	ReleasedAt time.Time
+}
+
 type orderCancelledPayload struct {
 	logHeader
 	OrderID             string
@@ -147,6 +156,8 @@ func logPayloadOf(event shared.DomainEvent) any {
 		return orderLineReleasedPayload{h, e.OrderID.String(), e.LineNo, e.PathID.String(), e.WorkUnitID}
 	case shared.OrderReleased:
 		return orderReleasedPayload{h, e.OrderID.String()}
+	case shared.OrderReleaseUnconfirmed:
+		return orderReleaseUnconfirmedPayload{h, e.OrderID.String(), e.LineNo, e.PathID.String(), e.WorkUnitID, e.ReleasedAt}
 	case shared.OrderCancelled:
 		return orderCancelledPayload{h, e.OrderID.String(), e.RevokedReservations}
 	case shared.OrderAllocationPartiallyFailed:

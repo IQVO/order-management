@@ -255,6 +255,16 @@ func (p *AnalyticsPublisher) marshalData(ctx context.Context, e shared.DomainEve
 			"path_id":      ev.PathID.String(),
 			"work_unit_id": ev.WorkUnitID,
 		}), true
+	case shared.OrderReleaseUnconfirmed:
+		// ADR 0043: an analytics-only fact. The path travels on the event (the
+		// confirmation row stored it), so no order lookup is needed.
+		return "OrderReleaseUnconfirmed", ev.OrderID.String(), mustMarshal(map[string]any{
+			"order_id":     ev.OrderID.String(),
+			"line_no":      ev.LineNo,
+			"path_id":      ev.PathID.String(),
+			"work_unit_id": ev.WorkUnitID,
+			"released_at":  ev.ReleasedAt.UTC().Format(time.RFC3339Nano),
+		}), true
 	case shared.OrderRepromised:
 		return "OrderRepromised", ev.OrderID.String(), mustMarshal(map[string]any{
 			"order_id":   ev.OrderID.String(),

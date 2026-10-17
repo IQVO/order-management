@@ -260,6 +260,10 @@ type allocationDeps struct {
 	Promise          order.PromisePolicy
 	DemandProjection DemandProjectionPolicy
 	UnitOfWork       ports.UnitOfWork
+	// ReleaseConfirmations, when non-nil, gets a PENDING row for every line
+	// this pass releases, written in the same unit of work as the release
+	// (ADR 0043). Nil means the confirmation loop is off.
+	ReleaseConfirmations ports.ReleaseConfirmations
 }
 
 // setPromiseDate applies deps.Promise (PromisePolicy, ADR 0014/ADR 0017)
@@ -479,10 +483,7 @@ func allocateAndRelease(
 			return relErr
 		}
 
-		if err := saveAndProjectDemand(ctx, deps, o, newlyAllocated); err != nil {
-			return err
-		}
-		return publishReleasePassEvents(ctx, deps, o, outcome, released)
+		return saveReleasePass(ctx, deps, o, newlyAllocated, outcome, released)
 	})
 	if txErr != nil {
 		return outcome, txErr
@@ -491,6 +492,28 @@ func allocateAndRelease(
 		return outcome, reportErr
 	}
 	return outcome, nil
+}
+
+// saveReleasePass is the tail of a releasing allocation pass, run inside the
+// caller's unit of work: persist the order and its demand projection, open the
+// confirmation row of every line that just moved Allocated -> Released (ADR 0043,
+// a no-op while the loop is off), then publish the pass's events. Any failure
+// rolls the whole pass back, so a release never exists without its row.
+func saveReleasePass(
+	ctx context.Context,
+	deps allocationDeps,
+	o *order.Order,
+	newlyAllocated []*order.OrderLine,
+	outcome allocationOutcome,
+	released []shared.ReleasedLine,
+) error {
+	if err := saveAndProjectDemand(ctx, deps, o, newlyAllocated); err != nil {
+		return err
+	}
+	if err := openReleaseConfirmations(ctx, deps, o, released); err != nil {
+		return err
+	}
+	return publishReleasePassEvents(ctx, deps, o, outcome, released)
 }
 
 // saveAndProjectDemand persists o and then emits the ACTIVE demand

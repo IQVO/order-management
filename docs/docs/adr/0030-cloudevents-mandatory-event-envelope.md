@@ -93,6 +93,7 @@ running a long coexistence period.
     com.warehouse.wes.order-management.order.OrderLineAllocated        (analytics)
     com.warehouse.wes.order-management.order.OrderLineBackordered      (analytics)
     com.warehouse.wes.order-management.order.OrderLineReleased         (analytics)
+    com.warehouse.wes.order-management.order.OrderReleaseUnconfirmed   (analytics, ADR 0043)
 
 `OrderAllocated` and `OrderPartiallyAllocated` are consumed by
 wes-work-planning with these exact strings.

@@ -44,6 +44,7 @@ flowchart TB
     OM -->|"warehouse.order-management.events<br/>OrderAllocated · OrderPartiallyAllocated"| WP
     PPM -->|"warehouse.process-path-management.events<br/>ProcessPath* · CPTScheduleChanged"| OM
     WP -->|"warehouse.work-planning.events<br/>PathCapacityChanged"| OM
+    WP -.->|"warehouse.work-planning.events (opt-in)<br/>WorkUnitCreated"| OM
     FE -->|"warehouse.fulfillment.events<br/>TaskCPTMissed · PackageManifested"| OM
     WPL -.->|"warehouse.warehouse-planning.events (opt-in)<br/>CapacityPlan* · CapacityShortageDetected"| OM
     BFF -.->|"HTTP GET /orders/{id}"| OM
@@ -112,6 +113,7 @@ parameters.
 | order-management | wes-work-planning | Published Language (CloudEvents, `apis/asyncapi.yaml`) | Conformist on the frozen four line fields | Kafka `warehouse.order-management.events` | live with `EVENT_PUBLISHER=kafka` | `outbound/kafka.Publisher` |
 | process-path-management | order-management | Published Language | Anti-Corruption Layer (local read model) | Kafka `warehouse.process-path-management.events` | live with `PATH_CATALOGUE_SOURCE=kafka` | `outbound/kafkacatalog`, `outbound/kafkacptschedule` |
 | wes-work-planning | order-management | Published Language | Anti-Corruption Layer (local read model) | Kafka `warehouse.work-planning.events` | live with `PATH_CATALOGUE_SOURCE=kafka` | `outbound/kafkapathcapacity` |
+| wes-work-planning | order-management | Published Language | Anti-Corruption Layer (confirmation of a release; reads only `reference` and `line_no`) | Kafka `warehouse.work-planning.events`, `WorkUnitCreated` | opt-in, off by default: `RELEASE_CONFIRMATION_MODE=kafka` + `RELEASE_CONFIRMATION_CONSUMER_GROUP` | `inbound/kafka/release_confirmation_consumer.go` (ADR 0043) |
 | fulfillment-execution | order-management | Published Language | Anti-Corruption Layer | Kafka `warehouse.fulfillment.events` | live whenever `KAFKA_BROKERS` is set | `inbound/kafka/repromise_consumer.go` |
 | warehouse-planning | order-management | Published Language | Anti-Corruption Layer (local read model) | Kafka `warehouse.warehouse-planning.events` | opt-in, `PLANNED_CAPACITY_CONSUMER_GROUP` | `inbound/kafka/planned_capacity_consumer.go` |
 | order-management | network-fulfillment | Open Host Service (`apis/openapi.yaml`) | Customer/Supplier; network-fulfillment is the ACL to the external network | REST `POST /orders`, `POST /orders/{id}/release`, `DELETE /orders/{id}` | live | ADR 0020 |
@@ -198,6 +200,14 @@ wes-work-planning's own consumer reconstructs the deterministic work-unit id
 `{orderId}-line-{lineNo}` from the payload. See
 [Domain Events](/docs/ddd/domain-events) for the frozen payload.
 
+By default nothing comes back: release is fire-and-forget. With
+`RELEASE_CONFIRMATION_MODE=kafka` ([ADR 0043](/docs/adr/0043-release-confirmation-from-workunitcreated),
+available, off by default) this service reads wes-work-planning's existing
+`WorkUnitCreated` (see the inbound table below) to confirm each released
+line, and flags one that is never confirmed with the analytics-only
+`OrderReleaseUnconfirmed`. It is not a reply event and not a call, and
+nothing is cancelled, re-released or retried on a timeout.
+
 ### ← `process-path-management`, `wes-work-planning`, `fulfillment-execution` (Kafka, inbound)
 
 | Topic | Event types consumed | Adapter | Purpose |
@@ -205,6 +215,7 @@ wes-work-planning's own consumer reconstructs the deterministic work-unit id
 | `warehouse.process-path-management.events` | `ProcessPathCreated` / `Updated` / `Deactivated` | `outbound/kafkacatalog` | Live catalogue + capability for path validation and promising ([ADR 0013](/docs/adr/0013-process-path-selection-as-a-domain-policy), [0014](/docs/adr/0014-promise-derived-from-fulfillment-capability)) |
 | `warehouse.process-path-management.events` | `CPTScheduleChanged` | `outbound/kafkacptschedule` | Site CPT schedule for the promise ([ADR 0014](/docs/adr/0014-promise-derived-from-fulfillment-capability)) |
 | `warehouse.work-planning.events` | `PathCapacityChanged` | `outbound/kafkapathcapacity` | Remaining path capacity per cutoff ([ADR 0015](/docs/adr/0015-wes-work-planning-path-capacity-changed-wired)) |
+| `warehouse.work-planning.events` | `WorkUnitCreated` (`reference`, `line_no`) | `inbound/kafka` (`ReleaseConfirmationConsumer`) | Confirms a released order line; opt-in, off by default ([ADR 0043](/docs/adr/0043-release-confirmation-from-workunitcreated)) |
 | `warehouse.fulfillment.events` | `TaskCPTMissed`, `PackageManifested` | `inbound/kafka` (`RepromiseConsumer`) | Re-promise loop, raises `OrderRepromised` ([ADR 0018](/docs/adr/0018-repromise-order-consumer-and-order-repromised)) |
 
 The first three are local caches rebuilt by full replay under a
@@ -212,7 +223,10 @@ per-process-unique consumer group, enabled only by
 `PATH_CATALOGUE_SOURCE=kafka` (default `none`, in which case the promise
 always falls back to `LeadTimePolicy`). The re-promise consumer uses a
 stable shared group (`order-management-repromise`) and runs whenever
-`KAFKA_BROKERS` is set.
+`KAFKA_BROKERS` is set. The release-confirmation consumer uses its own
+stable group (`RELEASE_CONFIRMATION_CONSUMER_GROUP`, no default) and runs
+only with `RELEASE_CONFIRMATION_MODE=kafka`; poison goes to
+`warehouse.work-planning.events.dlq`.
 
 ### ← `network-fulfillment` (inbound HTTP, ADR 0020)
 

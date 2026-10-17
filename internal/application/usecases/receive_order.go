@@ -131,6 +131,10 @@ type ReceiveOrder struct {
 	// outbox). Optional: a nil value means "no transactional backing",
 	// the in-memory / log-publisher dev configuration.
 	UnitOfWork ports.UnitOfWork
+	// ReleaseConfirmations, when non-nil, opens a PENDING release
+	// confirmation for every line this use case's release pass releases,
+	// in the same unit of work (ADR 0043). Nil means the loop is off.
+	ReleaseConfirmations ports.ReleaseConfirmations
 }
 
 func (uc *ReceiveOrder) Execute(ctx context.Context, lines []NewLine, allowPartialShipment bool) (*order.Order, error) {
@@ -202,7 +206,7 @@ func (uc *ReceiveOrder) ExecuteWithDeadline(ctx context.Context, lines []NewLine
 	// pathway (OrderAllocationPartiallyFailed) still fires when any
 	// genuine progress was made before the failure, so this is never a
 	// silent swallow — just never surfaced as a ReceiveOrder failure.
-	deps := allocationDeps{Orders: uc.Orders, Inventory: uc.Inventory, Events: uc.Events, Clock: uc.Clock, Promise: uc.Promise, DemandProjection: uc.DemandProjection, UnitOfWork: uc.UnitOfWork}
+	deps := allocationDeps{Orders: uc.Orders, Inventory: uc.Inventory, Events: uc.Events, Clock: uc.Clock, Promise: uc.Promise, DemandProjection: uc.DemandProjection, UnitOfWork: uc.UnitOfWork, ReleaseConfirmations: uc.ReleaseConfirmations}
 	if _, err := allocateAndRelease(ctx, deps, o, o.LinesWithStatus(order.LinePending), false, releaseOnAllocation); err != nil {
 		return uc.orderAfterAllocationFailure(ctx, o)
 	}

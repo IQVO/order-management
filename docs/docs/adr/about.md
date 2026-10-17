@@ -64,7 +64,7 @@ Typos, broken links and formatting are of course fair game.
 | [0002](./0002-http-consumer-of-inventory-and-wes-not-shared-code.md) | HTTP consumer of inventory-storage and wes-work-planning, not shared code | Accepted; release portion partially superseded by ADR 0005 |
 | [0003](./0003-ship-complete-default-and-fail-closed-allocation.md) | Ship-complete by default and fail-closed allocation | Accepted |
 | [0004](./0004-cancellation-boundary-at-release.md) | The cancellation boundary is release | Accepted, with a documented known gap |
-| [0005](./0005-choreographed-release-via-kafka.md) | Choreographed release via Kafka, folded allocate-then-release, and pathId goes internal-only | Accepted; envelope superseded by ADR 0030 |
+| [0005](./0005-choreographed-release-via-kafka.md) | Choreographed release via Kafka, folded allocate-then-release, and pathId goes internal-only | Accepted; envelope superseded by ADR 0030; no-confirmation-loop decision amended by ADR 0043 |
 | [0006](./0006-analytical-data-product.md) | Per-service analytical data product (report) via a separate analytics topic | Accepted; Envelope v1 superseded by ADR 0030 |
 | [0007](./0007-adopt-fleet-micro-frontend-console.md) | Adopt the fleet's micro-frontend console architecture (`order-mgmt-mfe`) | Accepted |
 | [0008](./0008-fulfillment-class-demand-shape-classifier.md) | FulfillmentClass — a demand-shape classifier, not a process-path name | Accepted |
@@ -102,6 +102,7 @@ Typos, broken links and formatting are of course fair game.
 | [0040](./0040-outbox-relay-attempt-cap.md) | The outbox relay stops claiming a row after `OUTBOX_MAX_ATTEMPTS` failures | Accepted |
 | [0041](./0041-trace-context-crosses-the-outbox.md) | The W3C trace context crosses the outbox in `outbox_events.headers` (D27 reference) | Accepted |
 | [0042](./0042-path-selection-honours-process-path-intake.md) | Path selection considers only paths whose intake admits customer orders | Accepted; amends 0021 |
+| [0043](./0043-release-confirmation-from-workunitcreated.md) | Confirm an order-line release from WorkUnitCreated, and flag OrderReleaseUnconfirmed | Accepted; amends 0005's no-confirmation-loop decision |
 
 Each of these reconstructs a decision that is actually visible in this
 repository's `CLAUDE.md` and code — none is a generic placeholder.

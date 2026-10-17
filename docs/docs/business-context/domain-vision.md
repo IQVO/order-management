@@ -78,7 +78,10 @@ After release, `wes-work-planning` has accepted work units and, downstream
 of that, physical work may already be underway — the order has left this
 context's control entirely. `CancelOrder` is therefore legal only while no
 line has reached `Released`; once any line is released, v1 does not
-attempt to recall it. This is a documented, deliberate known gap (see
+attempt to recall it. (This context only learns whether wes-work-planning
+admitted a released line when the opt-in release confirmation of
+[ADR 0043](/docs/adr/0043-release-confirmation-from-workunitcreated) is on,
+and even then it only reports an unconfirmed line; it never acts on it.) This is a documented, deliberate known gap (see
 [ADR 0004](/docs/adr/0004-cancellation-boundary-at-release)), in the same
 honesty pattern as inventory-storage's ADR-0003 "no expiry sweeper"
 section — not an oversight to silently paper over.
