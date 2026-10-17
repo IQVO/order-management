@@ -15,7 +15,8 @@ said about invariants, BR3 and BR6 is kept here, re-checked against
 
 `internal/domain` has exactly **one aggregate root**, `order.Order`, with one
 entity inside it, `order.OrderLine`. Everything else in the domain package is
-a value object, a policy or a read model — see
+a value object, a policy, a read model or the release-confirmation process
+manager (`releaseconfirmation.Confirmation`, ADR 0043) — see
 [Not aggregates](#not-aggregates-read-models-and-policies) at the end.
 
 ## Order
@@ -186,6 +187,7 @@ CloudEvents 1.0 with `type = com.warehouse.wes.order-management.order.<EventName
 | OrderRepromised | `com.warehouse.wes.order-management.order.OrderRepromised` | RepromiseOrder |
 | OrderLineReleased | `com.warehouse.wes.order-management.order.OrderLineReleased` | `allocateAndRelease` (`publishReleaseFacts`), once per line released in the pass; analytics only |
 | OrderReleased | `com.warehouse.wes.order-management.order.OrderReleased` | `allocateAndRelease` (`publishReleaseFacts`), when the pass leaves every line `Released`; analytics only |
+| OrderReleaseUnconfirmed | `com.warehouse.wes.order-management.order.OrderReleaseUnconfirmed` | `FlagUnconfirmedReleases` (the housekeeping timeout, ADR 0043), not the aggregate: once per released line that wes-work-planning never confirmed; analytics only, only with `RELEASE_CONFIRMATION_MODE=kafka` |
 
 Topic routing and payloads are on [Domain Events](./domain-events.md).
 
@@ -215,12 +217,15 @@ until its caller releases or cancels it (no sweeper, see above).
 
 ## Not aggregates: read models and policies
 
-These live in `internal/domain` (or feed it) but have no lifecycle of their
-own and enforce no cross-entity invariant, so they are **not** aggregates:
+These live in `internal/domain` (or feed it) but are **not** the `Order`
+aggregate: the read models and policies have no lifecycle of their own and
+enforce no cross-entity invariant, and the one process manager is kept
+outside the aggregate on purpose:
 
 | Type | Kind | Notes |
 | --- | --- | --- |
 | `order.PlannedCapacityWindow` | Read model (ADR 0031) | Local copy of warehouse-planning's CapacityPlan, last-writer-wins per `PlanID` (`Supersedes`), validated by `Validate` (`order.ErrInvalidPlannedCapacity`); table `planned_capacity_windows`. Only annotates order responses (`order.CapacityConstraints`). |
+| `releaseconfirmation.Confirmation` | Process manager (ADR 0043) | One row per released line, keyed by order id and line number: `PENDING` -> `CONFIRMED`, or `PENDING` -> `UNCONFIRMED` -> `CONFIRMED` (a late confirmation). Deliberately **not** on the `Order`: it records another context's behaviour, and a late or missing confirmation never changes an order's status or blocks a transition (there is no foreign key to `orders` either). Opened in the same unit of work as the release; table `release_confirmations`; used only with `RELEASE_CONFIRMATION_MODE=kafka`. |
 | `kafkacatalog.Consumer`, `kafkacptschedule.Consumer`, `kafkapathcapacity.Consumer` | In-memory read models | Full-replay caches of process-path catalogue, CPT schedule and path capacity behind `ports.ProcessPathCatalogue`, `ports.CPTScheduleCache`, `ports.PathCapacity`. |
 | `report.Row` (`funnel_rollup`, `repromise_rollup`) | Analytics projection (ADR 0006/0019) | Written only by `cmd/order-projector`. |
 | `order.PromisePolicy`, `order.LeadTimePolicy`, `order.PathSelectionPolicy` | Domain policies | Stateless; compute promises and routing for the `Order`. |

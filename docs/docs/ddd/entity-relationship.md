@@ -10,7 +10,7 @@ description: "Final Postgres schema of order-management (OLTP and analytics data
 Two databases, two migration sets, both applied by golang-migrate on boot
 (`postgres.RunMigrations`):
 
-- **OLTP** (`DATABASE_URL`, migrations `migrations/0001`–`0010`), migrated
+- **OLTP** (`DATABASE_URL`, migrations `migrations/0001`–`0012`), migrated
   by `cmd/order` and by `cmd/mcp` (through `MIGRATIONS_DATABASE_URL`,
   ADR 0029).
 - **Analytics** (`ANALYTICS_DATABASE_URL`, migrations
@@ -88,6 +88,20 @@ erDiagram
     TEXT event_id PK "CloudEvents id"
     TIMESTAMPTZ processed_at
   }
+  release_confirmations {
+    TEXT order_id PK "no FK, 0012"
+    INTEGER line_no PK "check gt 0"
+    TEXT work_unit_id "derived from the key"
+    TEXT path_id "default empty"
+    TIMESTAMPTZ released_at
+    TEXT state "PENDING, CONFIRMED or UNCONFIRMED"
+    TIMESTAMPTZ confirmed_at "nullable"
+    TIMESTAMPTZ unconfirmed_at "nullable, kept after a late confirmation"
+  }
+  release_confirmation_processed_events {
+    TEXT event_id PK "CloudEvents id, 0012"
+    TIMESTAMPTZ processed_at
+  }
   outbox_events {
     BIGSERIAL id PK
     TEXT topic
@@ -120,12 +134,15 @@ erDiagram
   orders ||--o{ order_promise_groups : "promised as"
 ```
 
-Source: `migrations/0001_init.up.sql` … `migrations/0011_product_classification_copy.up.sql`;
+Source: `migrations/0001_init.up.sql` … `migrations/0012_release_confirmations.up.sql`;
 `schema_migrations` is golang-migrate's own bookkeeping table
 (`internal/adapters/outbound/postgres/migrate.go`). Omits: secondary
 indexes (`idx_order_lines_sku`, `idx_order_lines_status`,
 `idx_outbox_events_unpublished` partial on `published_at IS NULL`,
-`idx_idempotency_keys_created_at`, `planned_capacity_windows_location_end`).
+`idx_idempotency_keys_created_at`, `planned_capacity_windows_location_end`,
+and the three partial indexes of `release_confirmations` on
+`released_at` where `PENDING`, `confirmed_at` where `CONFIRMED` and
+`unconfirmed_at` where `UNCONFIRMED`).
 `INT_ARRAY` stands for Postgres `INT[]`, `TEXT_ARRAY` for `TEXT[]`, `DOUBLE_PRECISION` for
 `DOUBLE PRECISION`.
 
@@ -144,11 +161,17 @@ deliberately unlinked:
 - `outbox_events.key` holds the `OrderId` as the Kafka key — infrastructure,
   not a relation.
 - `repromise_processed_events.event_id`,
-  `planned_capacity_processed_events.event_id` and
-  `product_classification_processed_events.event_id` hold **inbound**
+  `planned_capacity_processed_events.event_id`,
+  `product_classification_processed_events.event_id` and
+  `release_confirmation_processed_events.event_id` hold **inbound**
   CloudEvents ids from other contexts.
 - `product_classification_copy.sku` is a product-master SKU (ADR 0036): a
   local copy, never joined to `order_lines.sku` by a constraint.
+- `release_confirmations.(order_id, line_no)` names an order line but has no
+  foreign key to `orders`/`order_lines` on purpose (ADR 0043): it records
+  another context's behaviour, never an invariant of the order, and a late or
+  missing confirmation must not touch the order. Both new tables stay empty
+  while `RELEASE_CONFIRMATION_MODE=off`.
 
 ## Analytics database
 
@@ -215,6 +238,8 @@ database: every table is a projection or an idempotency ledger.
 | `planned_capacity_processed_events` | Infrastructure: inbound idempotency ledger | `ports.PlannedCapacityProcessedEvents` |
 | `product_classification_copy` | Local copy of another context's data (product-master, ADR 0036) | none — `ports.ProductClassificationCopy` / `ProductClassificationLookup` |
 | `product_classification_processed_events` | Infrastructure: inbound idempotency ledger | `ports.ProductClassificationProcessedEvents` |
+| `release_confirmations` | Process manager: whether wes-work-planning confirmed each released line (ADR 0043); deliberately outside the Order aggregate | none — `releaseconfirmation.Confirmation` / `ports.ReleaseConfirmations` |
+| `release_confirmation_processed_events` | Infrastructure: inbound idempotency ledger | `ports.ReleaseConfirmationProcessedEvents` |
 | `outbox_events` | Infrastructure: transactional outbox (ADR 0022) | `postgres.OutboxPublisher` / `OutboxRelay` |
 | `idempotency_keys` | Infrastructure: HTTP request de-duplication (ADR 0023) | `inbound/http.RequireIdempotencyKey` |
 | `schema_migrations` | Infrastructure: golang-migrate | — |

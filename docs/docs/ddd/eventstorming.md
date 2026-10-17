@@ -70,7 +70,11 @@ flowchart LR
   WP["wes-work-planning"]:::external
   OP["Operator"]:::actor
   RA["Retry Allocation"]:::command
-  H2["No release confirmation from wes-work-planning"]:::hotspot
+  H2["Release confirmation is off by default, an unconfirmed line triggers no automatic action"]:::hotspot
+  WU["Work Unit Created"]:::event
+  CR["Confirm Release (opt-in)"]:::command
+  RCP["Release confirmation: PENDING, CONFIRMED or UNCONFIRMED after a timeout"]:::policy
+  EU["Order Release Unconfirmed (analytics only)"]:::event
 
   CUS --> RO --> O1
   CAT --> PS --> O1
@@ -89,7 +93,10 @@ flowchart LR
   E5 --> WP
   E6 --> WP
   E3 --> OP --> RA --> O1
-  WP -.-> H2
+  P2 --> RCP
+  WP --> WU --> CR --> RCP
+  RCP --> EU
+  EU -.-> H2
 
   classDef actor fill:#fff59d,stroke:#b59f00,color:#1f1300,font-size:11px;
   classDef command fill:#4aa3df,stroke:#1f6f9f,color:#0b1e2d;
@@ -104,9 +111,14 @@ flowchart LR
 Source: `internal/application/usecases/receive_order.go`, `allocation.go`,
 `retry_allocation.go`, `product_classification.go`,
 `internal/adapters/inbound/kafka/product_classification_consumer.go`,
+`release_confirmation_consumer.go`, `release_confirmation.go`,
 `internal/domain/order/path_selection.go`,
 `promise_policy.go`. Omits: the reconfirm `Order Line Backordered` (lost
-reservation) and the analytics fan-out of every event.
+reservation) and the analytics fan-out of every event. The release
+confirmation branch (`Work Unit Created`, `Confirm Release`,
+`Order Release Unconfirmed`) exists only with
+`RELEASE_CONFIRMATION_MODE=kafka` ([ADR 0043](/docs/adr/0043-release-confirmation-from-workunitcreated)),
+which is off by default.
 
 ## 2. Hold, release and cancellation
 
@@ -212,15 +224,18 @@ Omits: the analytics projector (a read model built from every event, see
 | Repromise Order | Command | `usecases.RepromiseOrder` |
 | Apply Planned Capacity | Command | `usecases.ApplyPlannedCapacity` |
 | Apply Product Classification | Command | `usecases.ApplyProductClassification` (ADR 0036) |
+| Confirm Release | Command | `usecases.ConfirmRelease`, driven by `inbound/kafka/release_confirmation_consumer.go` (ADR 0043; opt-in) |
 | Order | Aggregate | `order.Order` |
 | Order Received … Order Repromised | Domain Event | `internal/domain/shared/events.go` |
 | Task CPT Missed, Package Manifested | Domain Event (upstream) | `inbound/kafka/repromise_consumer.go` |
 | Capacity Plan Created, Published, Shortage Detected | Domain Event (upstream) | `inbound/kafka/planned_capacity_consumer.go` |
 | Product Classified | Domain Event (upstream, product-master) | `inbound/kafka/product_classification_consumer.go` |
+| Work Unit Created | Domain Event (upstream, wes-work-planning) | `inbound/kafka/release_confirmation_consumer.go` (reads only `reference` and `line_no`; ADR 0043) |
 | Path selection policy | Policy | `order.PathSelectionPolicy` (ADR 0021) |
 | Promise policy | Policy | `order.PromisePolicy` (ADR 0014, 0017, 0020) |
 | Allocate every line on receipt | Policy | `ReceiveOrder` calls `allocateAndRelease` |
 | Reconfirm then release unless ship-complete is blocked | Policy | `reconfirmBeforeRelease`, `releaseAllocatedLines`, `Order.EnsureReleasable` (BR3) |
+| Release confirmation: PENDING, CONFIRMED or UNCONFIRMED after a timeout | Policy (process manager) | `releaseconfirmation.Confirmation`, `openReleaseConfirmations`, `usecases.FlagUnconfirmedReleases` (ADR 0043; opt-in) |
 | Held order must be ship-complete | Policy | `order.ValidateIntakeIntent` |
 | No cancel once any line is released | Policy | `Order.EnsureCancellable` (BR6) |
 | Re-promise on CPT missed or package manifested | Policy | `RepromiseConsumer` → `RepromiseOrder` |
@@ -230,7 +245,8 @@ Omits: the analytics projector (a read model built from every event, see
 | Order view with promiseDate | Read Model | `GET /orders/{id}` response (`orderResponse`) |
 | inventory-storage, product-master, wes-work-planning, process-path-management, fulfillment-execution, warehouse-planning, network-fulfillment | External System | outbound and inbound adapters listed on [Context Map](/docs/ecosystem/context-map) |
 | Order Line Released and Order Released raised only on the analytics topic | Event | `publishReleaseFacts` in `allocation.go`, [ADR 0034](/docs/adr/0034-raise-order-line-released-and-order-released) |
-| No release confirmation from wes-work-planning | Hotspot | README Deferred list, ADR 0005 |
+| Order Release Unconfirmed raised only on the analytics topic, by the housekeeping timeout | Event | `FlagUnconfirmedReleases`, [ADR 0043](/docs/adr/0043-release-confirmation-from-workunitcreated) |
+| Release confirmation is off by default, an unconfirmed line triggers no automatic action | Hotspot | ADR 0043, README Deferred list |
 | Orphaned hold is never swept | Hotspot | ADR 0020, README Deferred list |
 | BR3 blocking a release is a hold, answered 201/200 with a `Backordered` order (no `ship-complete-blocked` problem type) | Policy | `releaseAllocatedLines`, `Order.EnsureReleasable`, `br3_block_test.go`, ADR 0003 |
 | No known consumer of Order Repromised | Hotspot | published on `warehouse.order-management.events` (`outbound/kafka.Publisher`), but no sibling consumer is named in this repo's docs or ADR 0018 |

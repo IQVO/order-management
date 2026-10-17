@@ -7,9 +7,9 @@ description: Every event order-management publishes and consumes — full CloudE
 
 # Domain Events
 
-This context declares **eleven** past-tense domain events in
-`internal/domain/shared/events.go` and consumes **ten** CloudEvents types
-from four sibling contexts. Every Kafka message, in and out, is a
+This context declares **twelve** past-tense domain events in
+`internal/domain/shared/events.go` and consumes **twelve** CloudEvents types
+from five sibling contexts. Every Kafka message, in and out, is a
 CloudEvents 1.0 event in **structured** content mode
 ([ADR 0030](/docs/adr/0030-cloudevents-mandatory-event-envelope)), built and
 parsed only by `internal/adapters/kafka/cloudevents`:
@@ -45,7 +45,7 @@ parsed only by `internal/adapters/kafka/cloudevents`:
 Two encoders decide what goes where: `kafka.Publisher` (integration topic)
 accepts only `OrderAllocated`, `OrderPartiallyAllocated`,
 `OrderRepromised` and `SiteSkuDemandChanged`; `kafka.AnalyticsPublisher`
-(analytics topic) accepts all ten Order* events (the demand projection is
+(analytics topic) accepts all eleven Order* events (the demand projection is
 integration-only).
 
 ## Published events
@@ -62,6 +62,7 @@ integration-only).
 | OrderRepromised | `com.warehouse.wes.order-management.order.OrderRepromised` | integration + analytics | RepromiseOrder | order-projector; no integration consumer known from this repo |
 | OrderLineReleased | `com.warehouse.wes.order-management.order.OrderLineReleased` | analytics | allocation pass, once per line released in that pass | order-projector |
 | OrderReleased | `com.warehouse.wes.order-management.order.OrderReleased` | analytics | allocation pass, when that pass leaves every line `Released` | order-projector |
+| OrderReleaseUnconfirmed | `com.warehouse.wes.order-management.order.OrderReleaseUnconfirmed` | analytics | `FlagUnconfirmedReleases`, the release-confirmation timeout inside the housekeeping sweep, once per line, only while `RELEASE_CONFIRMATION_MODE=kafka` ([ADR 0043](/docs/adr/0043-release-confirmation-from-workunitcreated)) | none: the order-projector ignores the type |
 | SiteSkuDemandChanged | `com.warehouse.wes.order-management.siteskudemand.SiteSkuDemandChanged` | integration | allocation pass (intake/retry), RepromiseOrder's moved group, CancelOrder — only while `DEMAND_PROJECTION_SITE_ID` is set ([ADR 0035](/docs/adr/0035-site-sku-demand-projection-event)) | site-level planning consumers (none in this fleet yet) |
 
 Topics: integration = `warehouse.order-management.events`, analytics =
@@ -77,6 +78,16 @@ feed the funnel's `linesReleased`/`ordersReleased`. Nothing is raised when
 the release leg releases nothing (BR3-blocked ship-complete order, held
 order, a reservation lost at reconfirm), and a line is announced only in the
 pass that releases it.
+
+`OrderReleaseUnconfirmed` is the one event not raised by an allocation pass.
+It is an analytics-only **fact** that a released line was never confirmed by
+wes-work-planning's `WorkUnitCreated` within `RELEASE_CONFIRMATION_TIMEOUT`
+(default `15m`); the housekeeping sweep (ADR 0032) raises it exactly once per
+line, in the same transaction that flips the line's `release_confirmations`
+row to `UNCONFIRMED`. Nothing is cancelled, re-released or retried because of
+it, it is not retracted if a late `WorkUnitCreated` arrives, and the
+integration topic keeps its contract. It exists only while
+`RELEASE_CONFIRMATION_MODE=kafka`; the consumer ships off by default.
 
 ### Integration payloads (`warehouse.order-management.events`)
 
@@ -149,11 +160,13 @@ up through `OrderRepo`:
 | OrderRepromised | `order_id`, `cpt_id_old`, `cpt_id_new`, `reason` |
 | OrderLineReleased | `order_id`, `line_no`, `path_id`, `work_unit_id` |
 | OrderReleased | `order_id`, `path_id` |
+| OrderReleaseUnconfirmed | `order_id`, `line_no`, `path_id`, `work_unit_id` (`{order_id}-line-{line_no}`), `released_at` (when the line was released; the CloudEvents `time` is when it was flagged). `subject` and Kafka key = the order id; `dataschema` `urn:warehouse:order-management:analytics:OrderReleaseUnconfirmed:v1` |
 
 The sole consumer is `cmd/order-projector`
 (`inbound/kafka.AnalyticsConsumer`, group `order-management-analytics`,
 from the first offset), which de-duplicates on the CloudEvents `id`; see
-[Order Funnel report](/docs/analytics/order-funnel-report).
+[Order Funnel report](/docs/analytics/order-funnel-report). It ignores
+`OrderReleaseUnconfirmed`: no funnel column reads it.
 
 ## Consumed events
 
@@ -166,6 +179,7 @@ from the first offset), which de-duplicates on the CloudEvents `id`; see
 | process-path-management | `com.warehouse.wes.process-path-management.processpath.ProcessPathDeactivated` | same | `path_id` | same | remove from catalogue cache |
 | process-path-management | `com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged` | same | `site_id`, `timezone`, `cutoffs[]` (`cpt_id`, `local_time`, `days_of_week`, `ship_method`, `eligible_path_ids`) | `outbound/kafkacptschedule`, per-process group `order-management-cpt-schedule-*` | replace site CPT schedule |
 | wes-work-planning | `com.warehouse.wes.work-planning.workpool.PathCapacityChanged` | `warehouse.work-planning.events` | `path_id`, `cutoff_at`, `remaining_units`, `known` | `outbound/kafkapathcapacity`, per-process group `order-management-path-capacity-*` | remaining capacity keyed by path and cutoff |
+| wes-work-planning | `com.warehouse.wes.work-planning.workunit.WorkUnitCreated` | `warehouse.work-planning.events` | the optional `reference` (the order id) and `line_no`; `path_id` and `work_unit_id` are not read | `inbound/kafka.ReleaseConfirmationConsumer`, stable group from `RELEASE_CONFIRMATION_CONSUMER_GROUP` (only with `RELEASE_CONFIRMATION_MODE=kafka`; off by default) | ConfirmRelease: the matching `PENDING` or `UNCONFIRMED` `release_confirmations` row becomes `CONFIRMED` (ADR 0043) |
 | warehouse-planning | `com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanCreated` | `warehouse.warehouse-planning.events` | `plan_id`, `warehouse_id`, `location`, `path_id`, `window_start`, `window_end`, `assigned_demand`, `capacity_over_window`, `shortage`, `bottleneck_step` | `inbound/kafka.PlannedCapacityConsumer`, group from `PLANNED_CAPACITY_CONSUMER_GROUP` | upsert window as `DRAFT` |
 | warehouse-planning | `com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanPublished` | same | same | same | upsert window as `PUBLISHED` |
 | warehouse-planning | `com.warehouse.wes.warehouse-planning.capacityplan.CapacityShortageDetected` | same | same | same | upsert window as `PUBLISHED` |
@@ -199,6 +213,19 @@ Delivery guarantees by consumer:
   `PATH_CATALOGUE_SOURCE=kafka`, each under a fresh per-process group that
   replays from the first offset; `cmd/order` waits up to 60s for each to
   catch up before serving. Undecodable messages are logged and skipped.
+- **ReleaseConfirmationConsumer** (ADR 0043; runs only with
+  `RELEASE_CONFIRMATION_MODE=kafka`, off by default) — stable shared group
+  from `RELEASE_CONFIRMATION_CONSUMER_GROUP` (no default), idempotent on the
+  CloudEvents `id` (`release_confirmation_processed_events`) in the same
+  transaction as the state change, so a rollback un-claims the id. It acts on
+  the full type `…workunit.WorkUnitCreated` only; every other type on the
+  topic is committed past. A `WorkUnitCreated` without `reference` or a
+  positive `line_no`, or for a line this service never opened a confirmation
+  for (transfer, RELOCATE and legacy work, orders released before the loop was
+  on), is **ignored and counted**, never dead-lettered. A non-CloudEvents
+  message or an undecodable `data` goes to `warehouse.work-planning.events.dlq`
+  with `x-dlq-*` headers; a transient failure retries in process (3 attempts)
+  and is then dead-lettered. Shutdown never dead-letters a message.
 
 `order_ref` on the fulfillment events is a work-unit id
 (`{orderId}-line-{lineNo}`), not a bare order id; a value that does not
@@ -224,8 +251,9 @@ flowchart LR
   CO --> E12["SiteSkuDemandChanged (REMOVED)"]
   RP["RepromiseOrder"] --> E9["OrderRepromised"]
   RP --> E13["SiteSkuDemandChanged (ACTIVE, fresh cutoff)"]
+  FU["FlagUnconfirmedReleases<br/>(housekeeping sweep, ADR 0043)"] --> E14["OrderReleaseUnconfirmed"]
 
-  E1 & E2 & E3 & E4 & E5 & E6 & E7 & E8 & E9 & E10 --> AN["warehouse.order-management.analytics"]
+  E1 & E2 & E3 & E4 & E5 & E6 & E7 & E8 & E9 & E10 & E14 --> AN["warehouse.order-management.analytics"]
   E4 & E5 & E9 --> INT["warehouse.order-management.events"]
   E11 & E12 & E13 --> INT
   INT --> WP["wes-work-planning"]
@@ -233,7 +261,7 @@ flowchart LR
 
   classDef ev fill:#f6a04d,stroke:#9a5b1c,color:#1f1300;
   classDef topic fill:#38bdf8,stroke:#0369a1,color:#0f172a;
-  class E1,E2,E3,E4,E5,E6,E7,E8,E9,E10,E11,E12,E13 ev;
+  class E1,E2,E3,E4,E5,E6,E7,E8,E9,E10,E11,E12,E13,E14 ev;
   class AN,INT topic;
 ```
 
@@ -242,7 +270,9 @@ Source: `internal/application/usecases/*.go`,
 `analytics_publisher.go`. Omits: the outbox hop (diagram 9 on
 [Sequence Diagrams](./sequence-diagrams.md)). The `SiteSkuDemandChanged` emissions are
 conditional on `DEMAND_PROJECTION_SITE_ID`
-([ADR 0035](/docs/adr/0035-site-sku-demand-projection-event)).
+([ADR 0035](/docs/adr/0035-site-sku-demand-projection-event)), and
+`OrderReleaseUnconfirmed` on `RELEASE_CONFIRMATION_MODE=kafka`
+([ADR 0043](/docs/adr/0043-release-confirmation-from-workunitcreated)).
 
 ## Naming and payload shape
 
@@ -261,5 +291,9 @@ was a synchronous `POST /paths/{pathId}/work-units` call to
 wes-work-planning, which made release depend on that Supplier's
 availability at the exact moment of release. Release is now a published
 fact that wes-work-planning consumes on its own schedule. It is
-fire-and-forget: there is no confirmation event back (see the README's
-Deferred list).
+fire-and-forget by default: there is no reply event back. With
+`RELEASE_CONFIRMATION_MODE=kafka` ([ADR 0043](/docs/adr/0043-release-confirmation-from-workunitcreated),
+available, off by default) this service instead watches for wes-work-planning's
+own `WorkUnitCreated` and flags a line that never shows up as
+`OrderReleaseUnconfirmed`; that is a fact for analytics, never a trigger to
+cancel, re-release or retry.

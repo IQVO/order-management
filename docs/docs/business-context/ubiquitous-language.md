@@ -54,7 +54,20 @@ wes-work-planning or fulfillment-execution — see
 | **Path selection** | Choosing, per line, among the active paths whose intake contains `CUSTOMER_ORDER`, the eligible one with the shortest known `CycleTimeP95`, ties to the lower `PathId`; `pick` when no path declares `CUSTOMER_ORDER` (ADR 0021, ADR 0042). Never caller-supplied. | `order.PathSelectionPolicy` |
 | **Intake** / **demand source** | The demand sources process-path-management allows to route work onto a path (`CUSTOMER_ORDER`, `STOCK_TRANSFER`, `SLOT_RELOCATION`, `INVENTORY_CONTROL`, its ADR 0034). Order lines are the `CUSTOMER_ORDER` source; a path with another or an empty intake is never an order entry point (ADR 0042). | `shared.DemandSource`, `shared.ActivePathCandidate.Intake` |
 | **Product classification** | A SKU's handling tags (Hazmat, Fragile, TemperatureSensitive, Oversized, HighValue), owned by **product-master** and read here from a local copy of its `ProductClassified` events (ADR 0036). Used only as a routing hint (fail-open: an unknown SKU has no tags). | `ports.ProductClassificationLookup`, `product_classification_copy` |
-| **Work unit id** | `{orderId}-line-{lineNo}`, derived identically here and in wes-work-planning; never transmitted. | `usecases.WorkUnitID`, `ParseWorkUnitID` |
+| **Work unit id** | `{orderId}-line-{lineNo}`, derived identically here and in wes-work-planning; never sent to wes-work-planning. It is stored on the `release_confirmations` row and carried by the analytics-only `OrderLineReleased` and `OrderReleaseUnconfirmed` facts. | `usecases.WorkUnitID`, `ParseWorkUnitID` |
+
+## Release confirmation terms (ADR 0043)
+
+Available, off by default (`RELEASE_CONFIRMATION_MODE=off`). These terms apply only while the loop is on. The state lives in a process manager, never on the `Order` aggregate.
+
+| Term | Definition | Code |
+| --- | --- | --- |
+| **Release confirmation** | Knowing that wes-work-planning admitted a released order line, learned from its `WorkUnitCreated` event (matched by its optional `reference` = the order id and `line_no`). Not a reply event and not a call. | `releaseconfirmation.Confirmation`, `usecases.ConfirmRelease`, table `release_confirmations` |
+| **Pending** | A released line whose `WorkUnitCreated` has not been seen yet. Opened in the same unit of work as the release. | `releaseconfirmation.StatePending` |
+| **Confirmed** | The line's `WorkUnitCreated` arrived. Idempotent: a second one changes nothing. | `releaseconfirmation.StateConfirmed` |
+| **Unconfirmed** | A `Pending` line older than the confirmation timeout. Flagged exactly once, with the analytics-only fact `OrderReleaseUnconfirmed`. A signal, not proof: a late confirmation can still clear it. | `releaseconfirmation.StateUnconfirmed`, `usecases.FlagUnconfirmedReleases` |
+| **Confirmation timeout** | How long a line may stay `Pending` (`RELEASE_CONFIRMATION_TIMEOUT`, default 15 minutes). An operational parameter, not a business rule: no promise, status or SLA depends on it. | `usecases.FlagUnconfirmedReleases.Timeout` |
+| **Late confirmation** | A `WorkUnitCreated` for an `Unconfirmed` line: it becomes `Confirmed` and the problem is cleared (the fact already published is not retracted). | `releaseconfirmation.ConfirmedLate` |
 
 ## Planned capacity terms (ADR 0031)
 
@@ -77,6 +90,7 @@ wes-work-planning or fulfillment-execution — see
 | --- | --- | --- |
 | **Reservation** | *Not modelled* — only a `reservationId` reference is held | inventory-storage: the aggregate itself, with `ACTIVE`/`CONFIRMED`/`REVOKED`/`EXPIRED` |
 | **Release** | Marking allocated lines `Released` and announcing them on Kafka | wes-work-planning: accepting and scheduling a `WorkUnit` |
+| **Confirmed** | A release confirmation state: wes-work-planning's `WorkUnitCreated` was seen for the line (ADR 0043) | inventory-storage: `CONFIRMED` is a `Reservation` status, unrelated to release |
 | **Status** | Order-level, always derived from line statuses | inventory-storage's `Reservation.Status` is a different state machine on a different aggregate |
 | **Capacity** | Path capacity (`PathCapacityChanged`, remaining units per cutoff) feeds the promise; planned capacity (warehouse-planning) only annotates | warehouse-planning: the plan itself, with demand and bottleneck steps |
 | **Order reference** | This context's real `OrderId` | `demandRef` on inventory-storage's `Reservation`; `order_ref` on fulfillment-execution's tasks (a work-unit id, not a bare order id) |

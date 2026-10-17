@@ -39,12 +39,22 @@ sequenceDiagram
   OM-)WP: evt: OrderAllocated with released lines
   OM-)PJ: evt: OrderReceived, OrderLineAllocated, OrderAllocated
   Note over WP: rebuilds work unit id orderId-line-n
+  opt RELEASE_CONFIRMATION_MODE=kafka, off by default (ADR 0043)
+    alt wes-work-planning enqueues the work
+      WP-)OM: evt: WorkUnitCreated with reference and line_no
+      Note over OM: the released line becomes CONFIRMED
+    else no WorkUnitCreated within RELEASE_CONFIRMATION_TIMEOUT
+      Note over OM: the line is flagged UNCONFIRMED and OrderReleaseUnconfirmed is raised on the analytics topic only. Nothing is cancelled, re-released or retried
+    end
+  end
 ```
 
 Source: `internal/application/usecases/receive_order.go`, `allocation.go`,
 `internal/adapters/outbound/inventorystorage/client.go`,
 `inbound/kafka/product_classification_consumer.go`,
-`outbound/productclassificationcopy/`, `outbound/kafka/publisher.go`.
+`outbound/productclassificationcopy/`, `outbound/kafka/publisher.go`,
+`inbound/kafka/release_confirmation_consumer.go`,
+`usecases/release_confirmation.go`.
 Omits: the backordered branch (`OrderLineBackordered`, then
 `OrderPartiallyAllocated` for a partial-shipment order, nothing to
 wes-work-planning for a ship-complete one), the

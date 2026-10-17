@@ -52,12 +52,16 @@ Sources live in `cmd/order/` unless stated otherwise.
 | Variable | Default | Required? | Meaning | Source |
 | --- | --- | --- | --- | --- |
 | `EVENT_PUBLISHER` | `log` | no | `log` writes each domain event as an INFO line (`domain event published`). `kafka` publishes to `warehouse.order-management.events` (integration) and `warehouse.order-management.analytics`. With `DATABASE_URL` set, `kafka` goes through the `outbox_events` table and the in-process relay (ADR 0022). Without it, events go straight to the broker. | `main.go`, `adapters.go` |
-| `KAFKA_BROKERS` | `localhost:9092` for the publishers; unset for everything else | depends | Comma-separated broker list. The publishers fall back to `localhost:9092`. Each consumer has its own rule: the re-promise consumer starts only when this is set; the planned-capacity consumer needs it too; `PATH_CATALOGUE_SOURCE=kafka` and `PRODUCT_CLASSIFICATION_MODE=kafka` are **boot errors** without it. | `kafka.go`, `wiring.go`, `planned_capacity.go`, `product_classification.go` |
+| `KAFKA_BROKERS` | `localhost:9092` for the publishers; unset for everything else | depends | Comma-separated broker list. The publishers fall back to `localhost:9092`. Each consumer has its own rule: the re-promise consumer starts only when this is set; the planned-capacity consumer needs it too; `PATH_CATALOGUE_SOURCE=kafka`, `PRODUCT_CLASSIFICATION_MODE=kafka` and `RELEASE_CONFIRMATION_MODE=kafka` are **boot errors** without it. | `kafka.go`, `wiring.go`, `planned_capacity.go`, `product_classification.go`, `release_confirmation.go` |
 | `OUTBOX_RELAY_INTERVAL` | `1s` | no | How long the outbox relay sleeps after a pass that found less than a full batch (100 rows). `0` or invalid means `1s`. | `kafka.go` |
 | `OUTBOX_MAX_ATTEMPTS` | `20` | no | Failed sends after which the outbox relay stops claiming a row (ADR 0040). The row stays in `outbox_events` with `attempts` and `last_error`, is logged once at ERROR, and later rows overtake it. `0` means unlimited (one poison row then blocks every later event). A negative or non-numeric value logs `ignoring invalid integer env var` and uses `20`. Re-arm a row with `UPDATE outbox_events SET attempts = 0 WHERE id = ...`. | `kafka.go`, `config.go` (`nonNegativeIntEnv`) |
-| `HOUSEKEEPING_INTERVAL` | `1h` | no | Period of the housekeeping sweeper (ADR 0032). `0` disables the sweeper. Only used when `DATABASE_URL` is set. | `housekeeping.go` |
+| `HOUSEKEEPING_INTERVAL` | `1h` | no | Period of the housekeeping sweeper (ADR 0032). `0` disables the sweeper. Only used when `DATABASE_URL` is set. It also paces the release-confirmation timeout (ADR 0043): a line is flagged on the first pass after `RELEASE_CONFIRMATION_TIMEOUT`, so at the default `1h` that is up to 1h15m after release. Set about `5m` when `RELEASE_CONFIRMATION_MODE=kafka`; `0` means no line is ever flagged. | `housekeeping.go` |
 | `IDEMPOTENCY_KEY_TTL` | `24h` | no | Age after which `idempotency_keys` rows are deleted. `0` keeps them forever. | `housekeeping.go` |
 | `OUTBOX_RETENTION` | `168h` | no | Age after which **published** `outbox_events` rows are deleted. Unpublished rows are never swept. `0` keeps them forever. | `housekeeping.go` |
+| `RELEASE_CONFIRMATION_MODE` | `off` | no | `off` or `kafka` (case-insensitive; anything else is a **boot error**). `kafka` opens a `PENDING` row in `release_confirmations` for every line released from then on, runs a consumer of wes-work-planning's `WorkUnitCreated` on `warehouse.work-planning.events` that sets it `CONFIRMED`, and arms the timeout sweep (ADR 0043). **Available, off by default:** `off` writes no rows, starts no consumer and runs no sweep. | `release_confirmation.go` |
+| `RELEASE_CONFIRMATION_CONSUMER_GROUP` | unset, no default on purpose | yes, when mode is `kafka` (**boot error** otherwise) | Stable consumer group of the release-confirmation consumer. A locally run process must not join a live group, so the binary names none. `kafka` mode also needs `KAFKA_BROKERS`, `DATABASE_URL` and `EVENT_PUBLISHER=kafka` (without it nothing reaches wes-work-planning, so no confirmation could arrive); each missing one is a boot error that names it. | `release_confirmation.go` |
+| `RELEASE_CONFIRMATION_TIMEOUT` | `15m` | no | A `PENDING` line released longer ago than this becomes `UNCONFIRMED` in the housekeeping sweep and raises the analytics-only `OrderReleaseUnconfirmed`. `0` disables the sweep (confirmations still work). An unparsable or negative value logs `ignoring invalid duration env var` and uses `15m`. An operational parameter, not a business rule. | `release_confirmation.go` |
+| `RELEASE_CONFIRMATION_RETENTION` | `168h` | no | Age after which `CONFIRMED` `release_confirmations` rows are deleted, by `confirmed_at`. `0` keeps them. `PENDING` and `UNCONFIRMED` rows are never deleted. | `housekeeping.go` |
 | `DEMAND_PROJECTION_SITE_ID` | unset | no | Turns on the `SiteSkuDemandChanged` projection (ADR 0035): every allocated, re-allocated, re-promised or cancelled line emits one event for this static site, with `assignment_version` `static-site-v1`. Unset means the event is never emitted. | `config.go` |
 
 ### Downstream dependencies and promise policy
@@ -129,11 +133,11 @@ Sources live in `cmd/order/` unless stated otherwise.
 
 `charts/order-management` renders a subset of the variables from dedicated
 values. Everything else (`PATH_CATALOGUE_SOURCE`, `DEFAULT_SITE_ID`,
-`PROMISE_*`, `CORS_ALLOWED_ORIGINS`, `LOG_LEVEL`) goes through `extraEnv`
-(or `mcp.extraEnv`).
+`PROMISE_*`, `CORS_ALLOWED_ORIGINS` and `LOG_LEVEL`) goes through
+`extraEnv` (or `mcp.extraEnv`).
 
-The `config.*`, `kafka.*`, `productClassification.*`, `plannedCapacity.*`,
-`demandProjection.*` and `inventoryStorage.*` values are rendered into the
+The `config.*`, `kafka.*`, `productClassification.*`, `releaseConfirmation.*`,
+`plannedCapacity.*`, `demandProjection.*` and `inventoryStorage.*` values are rendered into the
 chart ConfigMap (`templates/configmap.yaml`), and the api Deployment mounts
 that ConfigMap with `envFrom: configMapRef` (gap fix D14). Explicit `env`
 entries and `extraEnv` win over the ConfigMap for the same key. The
@@ -167,6 +171,18 @@ rolls the api pods through the `checksum/config` annotation.
 - The chart never renders `ANALYTICS_DATABASE_URL` for the MCP container.
   Unless it is added through `mcp.extraEnv`, `get_promise_health` in a chart
   deployment always reports zeros.
+- The release-confirmation loop (ADR 0043) is off in the chart unless
+  `releaseConfirmation.mode` is `kafka`; with the mode empty nothing is
+  rendered. With `kafka` the ConfigMap carries `RELEASE_CONFIRMATION_MODE`,
+  `RELEASE_CONFIRMATION_CONSUMER_GROUP` (default
+  `order-management-release-confirmation`, override with
+  `releaseConfirmation.consumerGroup`), `RELEASE_CONFIRMATION_TIMEOUT`
+  (`releaseConfirmation.timeout`, default `15m`, `0` disables the sweep) and
+  `RELEASE_CONFIRMATION_RETENTION` (`releaseConfirmation.retention`, default
+  `168h`, `0` keeps rows), and `KAFKA_BROKERS` is rendered. The mode still needs
+  `config.eventPublisher=kafka` and a database, and the process fails boot
+  naming the missing variable. The sweep rides `config.housekeepingInterval`
+  (default `1h`); set it to about `5m` when the loop is on.
 - `KAFKA_BROKERS` is not rendered when only `extraEnv` sets
   `PATH_CATALOGUE_SOURCE=kafka` with `config.eventPublisher=log`. That
   combination fails boot with `PATH_CATALOGUE_SOURCE=kafka requires
