@@ -1,5 +1,7 @@
 # Order Management
 
+<!-- harness-template: v4 -->
+
 Generic/Supporting bounded context: order intake, per-line stock allocation,
 a capability-derived delivery promise, and choreographed release — the
 upstream Open Host Service for the `warehouse-systems` fleet. Owns the
