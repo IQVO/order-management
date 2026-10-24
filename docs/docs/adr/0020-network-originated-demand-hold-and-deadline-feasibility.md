@@ -11,7 +11,7 @@ description: "ADR 0020 — order-management's half of the network-fulfillment bo
 ## Status
 
 Accepted (2026-09-23). Companion to `network-fulfillment` ADR 0001 (the bounded
-context that speaks a major e-commerce retailer's Selling Partner API and owns the
+context that speaks a major e-commerce retailer's vendor platform API and owns the
 acknowledgement clock). Neither is meaningful without the other: this
 record adds three narrow capabilities to this service that have no
 caller until that context exists, and that context cannot honour a
@@ -108,7 +108,7 @@ The pull is to model the network relationship here, since this is where
 orders live. That would be wrong on the fleet's own established
 grounds:
 
-- A major e-commerce retailer's Selling Partner API is a **Conformist** upstream: this fleet
+- A major e-commerce retailer's vendor platform API is a **Conformist** upstream: this fleet
   has exactly zero influence over its contract. Its vocabulary
   (`purchaseOrderNumber`, `itemSequenceNumber`, `buyerProductIdentifier`,
   `acknowledgementStatus` codes, `sellingParty`/`shipFromParty`) is not
