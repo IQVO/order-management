@@ -10,7 +10,7 @@ upstream Open Host Service for the `warehouse-systems` fleet. Owns the
 not affiliated with any real-world company.
 
 Design source of truth: `/Users/claudioed/warehouse-systems/.hermes/plans/2026-08-25_023800-order-management.md`
-and the fleet DDD docs `/Users/claudioed/docs/amazon-fulfillment-ddd.md` and
+and the fleet DDD docs `/Users/claudioed/docs/fulfillment-reference-ddd.md` and
 `/Users/claudioed/warehouse-systems-ddd.md`. Honor their ubiquitous language
 and strategic classifications.
 

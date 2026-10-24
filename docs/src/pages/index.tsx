@@ -23,7 +23,7 @@ function StudyDisclaimer() {
       following real industry-standard patterns and terminology (WMS/WES/WCS,
       chaotic storage, CloudEvents, RFC 7807, hexagonal architecture). Not a
       production system. Not affiliated with, endorsed by, or representative
-      of Amazon or any other company.
+      of the reference operator or any other company.
     </div>
   );
 }
