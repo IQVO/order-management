@@ -24,6 +24,7 @@ import (
 	"github.com/claudioed/order-management/internal/adapters/outbound/postgres"
 	"github.com/claudioed/order-management/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/order-management/internal/bootretry"
+	"github.com/claudioed/order-management/internal/consumerdeath"
 )
 
 // telemetryFlushTimeout bounds the final export attempt on shutdown,
@@ -137,22 +138,40 @@ func run() error {
 	}()
 
 	consumerCtx, cancelConsumer := context.WithCancel(context.Background())
+	deaths := consumerdeath.New()
 	go func() {
 		logger.Info("analytics consumer starting", "topic", outboundkafka.AnalyticsTopic, "group", inboundkafka.AnalyticsConsumerGroup, "brokers", kafkaBrokers)
-		if err := consumer.Run(consumerCtx); err != nil {
-			logger.Error("analytics consumer stopped", "error", err)
-		}
+		deaths.Watch(consumerCtx, "analytics consumer", logger, consumer.Run)
 	}()
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
+	if err := waitForStop(stop, deaths); err != nil {
+		cancelConsumer()
+		return err
+	}
 
 	cancelConsumer()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(ctx)
+}
+
+// waitForStop blocks until a termination signal arrives (nil: shut down
+// gracefully) or the analytics consumer dies on its own (its error: the
+// process must exit non-zero so the pod restarts, ADR 0045). A death that
+// lands together with a signal is part of the shutdown, not a crash.
+func waitForStop(stop <-chan os.Signal, deaths *consumerdeath.Deaths) error {
+	select {
+	case <-stop:
+		return nil
+	case err := <-deaths.C():
+		if len(stop) > 0 {
+			return nil
+		}
+		return err
+	}
 }
 
 // newLogger builds the process-wide structured logger. LOG_LEVEL maps

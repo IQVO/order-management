@@ -82,7 +82,7 @@ func TestBuildProductClassification_PermissiveStartsNothing(t *testing.T) {
 	if _, ok := pc.lookup.(productclassificationcopy.PermissiveLookup); !ok {
 		t.Fatalf("lookup = %T, want PermissiveLookup", pc.lookup)
 	}
-	stop := pc.startConsumer(quietLogger())
+	stop := pc.startConsumer(quietLogger(), nil)
 	if stop == nil {
 		t.Fatal("startConsumer must always return a stop function")
 	}
@@ -109,5 +109,5 @@ func TestBuildProductClassification_KafkaWithoutDatabaseUsesTheMemoryCopy(t *tes
 	}
 	// The consumer starts against an unreachable broker and still stops
 	// promptly on shutdown.
-	pc.startConsumer(quietLogger())()
+	pc.startConsumer(quietLogger(), nil)()
 }

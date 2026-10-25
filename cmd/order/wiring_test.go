@@ -78,7 +78,7 @@ func TestBuildRepoAdapters_NoDatabaseURLUsesMemoryImmediately(t *testing.T) {
 // on, asserting on elapsed time.
 func TestWireProcessPathCatalogue_RetriesKafkaNotJustOnce(t *testing.T) {
 	start := time.Now()
-	_, _, _, cleanup, err := wireProcessPathCatalogue(context.Background(), "kafka", "127.0.0.1:1", quietLogger())
+	_, _, _, cleanup, err := wireProcessPathCatalogue(context.Background(), "kafka", "127.0.0.1:1", quietLogger(), nil)
 	elapsed := time.Since(start)
 	if cleanup != nil {
 		cleanup()
@@ -97,7 +97,7 @@ func TestWireProcessPathCatalogue_RetriesKafkaNotJustOnce(t *testing.T) {
 // dial, no backoff, immediate return with the UnknownPathCapacity default.
 func TestWireProcessPathCatalogue_NoneSourceIsImmediate(t *testing.T) {
 	start := time.Now()
-	catalogue, cptSchedule, capacity, cleanup, err := wireProcessPathCatalogue(context.Background(), "none", "", quietLogger())
+	catalogue, cptSchedule, capacity, cleanup, err := wireProcessPathCatalogue(context.Background(), "none", "", quietLogger(), nil)
 	if cleanup != nil {
 		cleanup()
 	}
