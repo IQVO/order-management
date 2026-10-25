@@ -22,12 +22,14 @@ func savedOrder(t *testing.T, repo *memory.OrderRepo) *order.Order {
 	t.Helper()
 	res := "res-1"
 	shipBy := time.Date(2026, 10, 12, 18, 0, 0, 0, time.UTC)
+	site := shared.FulfillmentSiteID("WH2")
 	o := order.Rehydrate(order.OrderSnapshot{
 		ID:                   "ord-copy",
 		Lines:                []*order.OrderLine{order.RehydrateOrderLine(1, "SKU-1", 2, shared.DefaultPathId, true, order.LineAllocated, &res)},
 		AllowPartialShipment: true,
 		HeldAtIntake:         true,
 		RequiredShipBy:       &shipBy,
+		FulfillmentSiteID:    &site,
 		Version:              3,
 	})
 	o.SetPromiseGroups([]order.PromiseGroup{{LineNos: []int{1}, Promise: order.Promise{CptId: "cpt-1", CutoffAt: shipBy, Basis: order.BasisCapability}}})
@@ -75,6 +77,9 @@ func assertOrderScalars(t *testing.T, got, saved *order.Order) {
 	}
 	if rsb := got.RequiredShipBy(); rsb == nil || !rsb.Equal(*saved.RequiredShipBy()) {
 		t.Fatalf("RequiredShipBy = %v", rsb)
+	}
+	if site := got.FulfillmentSiteID(); site == nil || *site != "WH2" {
+		t.Fatalf("FulfillmentSiteID = %v, want WH2", site)
 	}
 }
 

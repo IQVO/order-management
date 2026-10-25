@@ -71,6 +71,7 @@ func cloneOrder(o *order.Order) *order.Order {
 		PromiseGroups:        o.PromiseGroups(),
 		HeldAtIntake:         !o.ReleaseOnAllocation(),
 		RequiredShipBy:       copyTime(o.RequiredShipBy()),
+		FulfillmentSiteID:    o.FulfillmentSiteID(),
 		Version:              o.Version(),
 	})
 }

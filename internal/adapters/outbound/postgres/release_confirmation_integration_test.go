@@ -19,7 +19,12 @@ import (
 	"github.com/claudioed/order-management/internal/domain/shared"
 )
 
-var rcNow = time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
+// rcNow is "now" for these tests. It must track the REAL clock: the sweeper's
+// 7-day CONFIRMED-row retention is measured against wall-clock time, so a
+// hard-coded date silently turned this suite red once it aged past the
+// retention window (develop CI went red on 2026-10-24). Whole seconds, UTC,
+// so Postgres round-trips are exact.
+var rcNow = time.Now().UTC().Truncate(time.Second)
 
 func openPending(t *testing.T, repo *postgres.ReleaseConfirmationRepo, orderID shared.OrderId, lineNo int, releasedAt time.Time) releaseconfirmation.Confirmation {
 	t.Helper()

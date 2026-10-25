@@ -103,6 +103,7 @@ Typos, broken links and formatting are of course fair game.
 | [0041](./0041-trace-context-crosses-the-outbox.md) | The W3C trace context crosses the outbox in `outbox_events.headers` (D27 reference) | Accepted |
 | [0042](./0042-path-selection-honours-process-path-intake.md) | Path selection considers only paths whose intake admits customer orders | Accepted; amends 0021 |
 | [0043](./0043-release-confirmation-from-workunitcreated.md) | Confirm an order-line release from WorkUnitCreated, and flag OrderReleaseUnconfirmed | Accepted; amends 0005's no-confirmation-loop decision |
+| [0044](./0044-caller-assigned-fulfillment-site-on-the-order.md) | An order may carry an optional, caller-assigned fulfillment site | Accepted; amends 0035 §4 and lifts 0031's deferral |
 
 Each of these reconstructs a decision that is actually visible in this
 repository's `CLAUDE.md` and code — none is a generic placeholder.

@@ -12,6 +12,10 @@ description: "ADR 0035 — publish one PII-free SiteSkuDemandChanged integration
 ## Status
 
 Accepted — implemented by the change that introduces this record.
+**§4 amended by [ADR 0044](/docs/adr/0044-caller-assigned-fulfillment-site-on-the-order):**
+an order MAY now carry a caller-assigned fulfillment site, which wins over the static
+site below and projects with `assignment_version` `order-site-v1`; this static seam
+(`static-site-v1`) stays, unchanged, for orders without one.
 
 ## Context
 

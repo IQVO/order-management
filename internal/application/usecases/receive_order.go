@@ -157,6 +157,16 @@ func (uc *ReceiveOrder) ExecuteHeld(ctx context.Context, lines []NewLine, allowP
 // with no promise at all rather than an optimistic one, which is the
 // signal a caller holding a fill-or-kill commitment needs.
 func (uc *ReceiveOrder) ExecuteWithDeadline(ctx context.Context, lines []NewLine, allowPartialShipment, releaseOnAllocation bool, requiredShipBy *time.Time) (*order.Order, error) {
+	return uc.ExecuteWithSite(ctx, lines, allowPartialShipment, releaseOnAllocation, requiredShipBy, nil)
+}
+
+// ExecuteWithSite is ExecuteWithDeadline plus ADR 0044's OPTIONAL,
+// caller-assigned fulfillment site. A nil site is the ordinary case and
+// behaves exactly as before. A non-nil site is validated by its value
+// object, stored on the order at intake and never changed afterwards; it
+// is carried, never inferred or looked up, and only the site/SKU demand
+// projection reads it (the frozen allocation events do not).
+func (uc *ReceiveOrder) ExecuteWithSite(ctx context.Context, lines []NewLine, allowPartialShipment, releaseOnAllocation bool, requiredShipBy *time.Time, site *shared.FulfillmentSiteID) (*order.Order, error) {
 	// ADR 0020 §4: reject the contradictory combination BEFORE minting an
 	// id or persisting anything — a rejected intake must leave no trace.
 	if err := order.ValidateIntakeIntent(allowPartialShipment, releaseOnAllocation); err != nil {
@@ -179,11 +189,9 @@ func (uc *ReceiveOrder) ExecuteWithDeadline(ctx context.Context, lines []NewLine
 		uc.recordRejected(ctx)
 		return nil, err
 	}
-	if !releaseOnAllocation {
-		o.Hold()
-	}
-	if requiredShipBy != nil {
-		o.SetRequiredShipBy(*requiredShipBy)
+	if err := applyIntakeAttributes(o, releaseOnAllocation, requiredShipBy, site); err != nil {
+		uc.recordRejected(ctx)
+		return nil, err
 	}
 
 	if err := atomically(ctx, uc.UnitOfWork, func(ctx context.Context) error {
@@ -211,6 +219,22 @@ func (uc *ReceiveOrder) ExecuteWithDeadline(ctx context.Context, lines []NewLine
 		return uc.orderAfterAllocationFailure(ctx, o)
 	}
 	return o, nil
+}
+
+// applyIntakeAttributes attaches the optional intake attributes (hold,
+// deadline, caller-assigned fulfillment site) to a freshly constructed
+// order, before it is ever persisted.
+func applyIntakeAttributes(o *order.Order, releaseOnAllocation bool, requiredShipBy *time.Time, site *shared.FulfillmentSiteID) error {
+	if !releaseOnAllocation {
+		o.Hold()
+	}
+	if requiredShipBy != nil {
+		o.SetRequiredShipBy(*requiredShipBy)
+	}
+	if site != nil {
+		return o.AssignFulfillmentSite(*site)
+	}
+	return nil
 }
 
 // buildDomainLines validates each requested line and resolves its
