@@ -83,7 +83,7 @@ func TestPlannedCapacityAttach_WiresTheServer(t *testing.T) {
 func TestPlannedCapacityStartConsumer_NoBrokersIsAHarmlessNoOp(t *testing.T) {
 	t.Setenv(plannedCapacityGroupEnv, "om-planned-capacity-test")
 	t.Setenv("KAFKA_BROKERS", "")
-	stop := buildPlannedCapacity(nil, quietLogger()).startConsumer(quietLogger())
+	stop := buildPlannedCapacity(nil, quietLogger()).startConsumer(quietLogger(), nil)
 	if stop == nil {
 		t.Fatal("startConsumer must always return a stop function")
 	}

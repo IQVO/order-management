@@ -13,6 +13,7 @@ import (
 	"github.com/claudioed/order-management/internal/adapters/outbound/pathcapacity"
 	"github.com/claudioed/order-management/internal/application/ports"
 	"github.com/claudioed/order-management/internal/bootretry"
+	"github.com/claudioed/order-management/internal/consumerdeath"
 )
 
 // wireProcessPathCatalogue selects the process-path catalogue source
@@ -38,7 +39,7 @@ import (
 // budget is exhausted this still returns an error and the caller still
 // refuses to boot, exactly as before — it only stops treating a sidecar
 // warm-up as a permanent failure.
-func wireProcessPathCatalogue(ctx context.Context, catalogueSource, kafkaBrokers string, logger *slog.Logger) (
+func wireProcessPathCatalogue(ctx context.Context, catalogueSource, kafkaBrokers string, logger *slog.Logger, deaths *consumerdeath.Deaths) (
 	ports.ProcessPathCatalogue, ports.CPTScheduleCache, ports.PathCapacity, func(), error,
 ) {
 	noop := func() {}
@@ -62,19 +63,19 @@ func wireProcessPathCatalogue(ctx context.Context, catalogueSource, kafkaBrokers
 	consumerCtx, cancel := context.WithCancel(context.Background())
 	cleanup := func() { cancel() }
 
-	kafkaCatalogue, err := startCatalogueConsumer(ctx, consumerCtx, brokerList, logger)
+	kafkaCatalogue, err := startCatalogueConsumer(ctx, consumerCtx, brokerList, logger, deaths)
 	if err != nil {
 		cleanup()
 		return nil, nil, nil, noop, fmt.Errorf("failed to start the Kafka-sourced process-path catalogue: %w", err)
 	}
 
-	cptScheduleConsumer, err := startCPTScheduleConsumer(ctx, consumerCtx, brokerList, logger)
+	cptScheduleConsumer, err := startCPTScheduleConsumer(ctx, consumerCtx, brokerList, logger, deaths)
 	if err != nil {
 		cleanup()
 		return nil, nil, nil, noop, fmt.Errorf("failed to start the Kafka-sourced CPT schedule cache: %w", err)
 	}
 
-	pathCapacityConsumer, err := startPathCapacityConsumer(ctx, consumerCtx, brokerList, logger)
+	pathCapacityConsumer, err := startPathCapacityConsumer(ctx, consumerCtx, brokerList, logger, deaths)
 	if err != nil {
 		cleanup()
 		return nil, nil, nil, noop, fmt.Errorf("failed to start the Kafka-sourced path capacity cache: %w", err)
@@ -106,7 +107,7 @@ func wireProcessPathCatalogue(ctx context.Context, catalogueSource, kafkaBrokers
 // wireProcessPathCatalogue's doc comment for why), then starts its Run
 // loop on consumerCtx so the caller's WaitReady calls are answered by a
 // consumer that is already draining the topic.
-func startCatalogueConsumer(ctx, consumerCtx context.Context, brokerList []string, logger *slog.Logger) (*kafkacatalog.Consumer, error) {
+func startCatalogueConsumer(ctx, consumerCtx context.Context, brokerList []string, logger *slog.Logger, deaths *consumerdeath.Deaths) (*kafkacatalog.Consumer, error) {
 	var kafkaCatalogue *kafkacatalog.Consumer
 	if err := bootretry.Retry(ctx, logger, "start process-path catalogue consumer", func() error {
 		var err error
@@ -118,9 +119,7 @@ func startCatalogueConsumer(ctx, consumerCtx context.Context, brokerList []strin
 	logger.Info("process-path catalogue source configured", "source", "kafka", "topic", kafkacatalog.Topic)
 	go func() {
 		logger.Info("process-path catalogue consumer running", "topic", kafkacatalog.Topic)
-		if err := kafkaCatalogue.Run(consumerCtx); err != nil {
-			logger.Error("process-path catalogue consumer stopped", "error", err)
-		}
+		deaths.Watch(consumerCtx, "process-path catalogue consumer", logger, kafkaCatalogue.Run)
 	}()
 	return kafkaCatalogue, nil
 }
@@ -129,7 +128,7 @@ func startCatalogueConsumer(ctx, consumerCtx context.Context, brokerList []strin
 // constructor with exponential backoff, then starts its Run loop on
 // consumerCtx — the same boot sequence as the catalogue consumer, on the
 // cache ADR-0014 step A added.
-func startCPTScheduleConsumer(ctx, consumerCtx context.Context, brokerList []string, logger *slog.Logger) (*kafkacptschedule.Consumer, error) {
+func startCPTScheduleConsumer(ctx, consumerCtx context.Context, brokerList []string, logger *slog.Logger, deaths *consumerdeath.Deaths) (*kafkacptschedule.Consumer, error) {
 	var cptScheduleConsumer *kafkacptschedule.Consumer
 	if err := bootretry.Retry(ctx, logger, "start CPT schedule cache consumer", func() error {
 		var err error
@@ -141,9 +140,7 @@ func startCPTScheduleConsumer(ctx, consumerCtx context.Context, brokerList []str
 	logger.Info("CPT schedule cache source configured", "source", "kafka", "topic", kafkacptschedule.Topic)
 	go func() {
 		logger.Info("CPT schedule consumer running", "topic", kafkacptschedule.Topic)
-		if err := cptScheduleConsumer.Run(consumerCtx); err != nil {
-			logger.Error("CPT schedule consumer stopped", "error", err)
-		}
+		deaths.Watch(consumerCtx, "CPT schedule consumer", logger, cptScheduleConsumer.Run)
 	}()
 	return cptScheduleConsumer, nil
 }
@@ -152,7 +149,7 @@ func startCPTScheduleConsumer(ctx, consumerCtx context.Context, brokerList []str
 // cache's constructor with exponential backoff, then starts its Run loop
 // on consumerCtx — the same boot sequence as the catalogue consumer, on
 // the cache ADR-0015 added.
-func startPathCapacityConsumer(ctx, consumerCtx context.Context, brokerList []string, logger *slog.Logger) (*kafkapathcapacity.Consumer, error) {
+func startPathCapacityConsumer(ctx, consumerCtx context.Context, brokerList []string, logger *slog.Logger, deaths *consumerdeath.Deaths) (*kafkapathcapacity.Consumer, error) {
 	var pathCapacityConsumer *kafkapathcapacity.Consumer
 	if err := bootretry.Retry(ctx, logger, "start path capacity cache consumer", func() error {
 		var err error
@@ -164,9 +161,7 @@ func startPathCapacityConsumer(ctx, consumerCtx context.Context, brokerList []st
 	logger.Info("path capacity cache source configured", "source", "kafka", "topic", kafkapathcapacity.Topic)
 	go func() {
 		logger.Info("path capacity consumer running", "topic", kafkapathcapacity.Topic)
-		if err := pathCapacityConsumer.Run(consumerCtx); err != nil {
-			logger.Error("path capacity consumer stopped", "error", err)
-		}
+		deaths.Watch(consumerCtx, "path capacity consumer", logger, pathCapacityConsumer.Run)
 	}()
 	return pathCapacityConsumer, nil
 }

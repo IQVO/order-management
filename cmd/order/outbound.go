@@ -9,6 +9,7 @@ import (
 	"github.com/claudioed/order-management/internal/adapters/outbound/inventorystorage"
 	"github.com/claudioed/order-management/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/order-management/internal/application/ports"
+	"github.com/claudioed/order-management/internal/consumerdeath"
 	"github.com/claudioed/order-management/internal/domain/order"
 	"github.com/claudioed/order-management/internal/resilience"
 )
@@ -65,8 +66,8 @@ func wireInventoryClient(logger *slog.Logger) ports.InventoryReservationClient {
 // sidecars; holdApplicationUntilProxyStarts is a no-op for them), and a
 // single attempt turns that transient condition into CrashLoopBackOff.
 // See wiring.go's doc comment for the full detail.
-func wireCatalogue(ctx context.Context, logger *slog.Logger) (ports.ProcessPathCatalogue, ports.CPTScheduleCache, ports.PathCapacity, func(), error) {
-	return wireProcessPathCatalogue(ctx, getenv("PATH_CATALOGUE_SOURCE", "none"), os.Getenv("KAFKA_BROKERS"), logger)
+func wireCatalogue(ctx context.Context, logger *slog.Logger, deaths *consumerdeath.Deaths) (ports.ProcessPathCatalogue, ports.CPTScheduleCache, ports.PathCapacity, func(), error) {
+	return wireProcessPathCatalogue(ctx, getenv("PATH_CATALOGUE_SOURCE", "none"), os.Getenv("KAFKA_BROKERS"), logger, deaths)
 }
 
 // buildPromisePolicy assembles the ADR-0014 promise policy: the primary

@@ -150,6 +150,7 @@ const sidebars: SidebarsConfig = {
         'adr/0042-path-selection-honours-process-path-intake',
         'adr/0043-release-confirmation-from-workunitcreated',
         'adr/0044-caller-assigned-fulfillment-site-on-the-order',
+        'adr/0045-a-dead-consumer-takes-the-process-down',
       ],
     },
   ],

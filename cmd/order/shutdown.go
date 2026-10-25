@@ -13,6 +13,7 @@ import (
 	inboundhttp "github.com/claudioed/order-management/internal/adapters/inbound/http"
 	inboundkafka "github.com/claudioed/order-management/internal/adapters/inbound/kafka"
 	"github.com/claudioed/order-management/internal/adapters/outbound/postgres"
+	"github.com/claudioed/order-management/internal/consumerdeath"
 )
 
 // serveAndShutdown runs the HTTP server, the RepromiseOrder consumer and
@@ -33,6 +34,7 @@ func serveAndShutdown(
 	cancelRepromiseConsumer context.CancelFunc,
 	readiness *inboundhttp.Readiness,
 	relay *postgres.OutboxRelay,
+	deaths *consumerdeath.Deaths,
 ) error {
 	errCh := make(chan error, 3)
 	startHTTPServer(logger, httpAddr, httpServer, errCh)
@@ -43,7 +45,7 @@ func serveAndShutdown(
 				logger.Error("error closing repromise consumer", "error", err)
 			}
 		}()
-		startRepromiseConsumer(logger, repromiseConsumer, repromiseConsumerCtx, repromiseConsumerDone, errCh)
+		startRepromiseConsumer(logger, repromiseConsumer, repromiseConsumerCtx, repromiseConsumerDone, deaths)
 	} else {
 		close(repromiseConsumerDone)
 	}
@@ -66,6 +68,12 @@ func serveAndShutdown(
 	select {
 	case err := <-errCh:
 		return err
+	case err := <-deaths.C():
+		// A death that lands together with SIGINT/SIGTERM is part of the
+		// shutdown, not a crash: drain gracefully (network-fulfillment PR #119).
+		if ctx.Err() == nil {
+			return err
+		}
 	case <-ctx.Done():
 	}
 
@@ -86,14 +94,13 @@ func startHTTPServer(logger *slog.Logger, httpAddr string, httpServer *http.Serv
 }
 
 // startRepromiseConsumer runs the consumer loop in a goroutine and closes
-// done once Run has returned (including its in-flight offset commit).
-func startRepromiseConsumer(logger *slog.Logger, consumer *inboundkafka.RepromiseConsumer, ctx context.Context, done chan<- struct{}, errCh chan<- error) {
+// done once Run has returned (including its in-flight offset commit). A stop
+// that was not asked for is reported on deaths (ADR 0045).
+func startRepromiseConsumer(logger *slog.Logger, consumer *inboundkafka.RepromiseConsumer, ctx context.Context, done chan<- struct{}, deaths *consumerdeath.Deaths) {
 	go func() {
 		defer close(done)
 		logger.Info("repromise consumer running", "topic", inboundkafka.FulfillmentEventsTopic)
-		if err := consumer.Run(ctx); err != nil {
-			errCh <- err
-		}
+		deaths.Watch(ctx, "repromise consumer", logger, consumer.Run)
 	}()
 }
 
