@@ -15,6 +15,11 @@ var (
 	// string. Every OrderLine must say what is being ordered.
 	ErrEmptySKU = errors.New("sku must not be empty")
 
+	// ErrInvalidFulfillmentSiteID is returned when a caller-assigned
+	// fulfillment site is empty or is not an uppercase-letters-and-digits
+	// site code (ADR 0044). A caller-facing input error (RFC 7807 400).
+	ErrInvalidFulfillmentSiteID = errors.New("fulfillment site id must be a non-empty site code of uppercase letters and digits")
+
 	// ErrEmptyPathID is returned when a PathId is constructed from an
 	// empty string. Callers that omit a path get DefaultPathId instead of
 	// this error — see NewPathIdOrDefault.

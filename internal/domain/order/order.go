@@ -45,6 +45,11 @@ var (
 	// line is allocated.
 	ErrShipCompleteBlocked = errors.New("ship-complete order cannot be released while any line is unallocated")
 
+	// ErrFulfillmentSiteAlreadyAssigned enforces ADR 0044's immutability:
+	// the caller-assigned fulfillment site is set once, at intake, and
+	// never changes (a re-promise, release or cancel cannot reassign it).
+	ErrFulfillmentSiteAlreadyAssigned = errors.New("order already has a fulfillment site")
+
 	// ErrHeldOrderMustBeShipComplete enforces ADR 0020 §4 at intake: an
 	// order held before release (releaseOnAllocation=false) may not also
 	// allow partial shipment. A caller that holds an order is making one
@@ -92,6 +97,13 @@ type Order struct {
 	// that happens to be the zero instant", which would otherwise make
 	// every ordinary order look infeasible.
 	requiredShipBy *time.Time
+
+	// fulfillmentSite is the OPTIONAL, caller-assigned site this order is
+	// to be fulfilled from (ADR 0044). It is set at most once, at intake,
+	// by AssignFulfillmentSite, and is immutable afterwards. Nil is the
+	// overwhelming majority of orders and means "the caller named no
+	// site": nothing here ever infers one.
+	fulfillmentSite *shared.FulfillmentSiteID
 
 	// version is inert optimistic-concurrency-control metadata (see the
 	// version-column ADR). It is carried by the aggregate purely so a
@@ -147,6 +159,9 @@ func New(id shared.OrderId, lines []*OrderLine, allowPartialShipment bool) (*Ord
 //     un-held, which is what they are.
 //   - RequiredShipBy (ADR 0020 §2) is nil for the overwhelming majority
 //     of orders.
+//   - FulfillmentSiteID (ADR 0044) is nil for every order whose caller
+//     named no site, including every row written before migration 0013
+//     (the nullable column reads back NULL).
 //   - Version is the optimistic-concurrency version the row was loaded at.
 //     The zero value means "never persisted" and rehydrates as 1, the
 //     same starting version New assigns; every persisted row is >= 1
@@ -163,6 +178,7 @@ type OrderSnapshot struct {
 	PromiseGroups        []PromiseGroup
 	HeldAtIntake         bool
 	RequiredShipBy       *time.Time
+	FulfillmentSiteID    *shared.FulfillmentSiteID
 	Version              int
 }
 
@@ -180,11 +196,20 @@ func Rehydrate(s OrderSnapshot) *Order {
 	return &Order{
 		id: s.ID, lines: s.Lines, allowPartialShipment: s.AllowPartialShipment,
 		promiseDate: s.PromiseDate, promiseCptId: s.PromiseCptID, promiseBasis: s.PromiseBasis,
-		promiseGroups:  s.PromiseGroups,
-		heldAtIntake:   s.HeldAtIntake,
-		requiredShipBy: s.RequiredShipBy,
-		version:        version,
+		promiseGroups:   s.PromiseGroups,
+		heldAtIntake:    s.HeldAtIntake,
+		requiredShipBy:  s.RequiredShipBy,
+		fulfillmentSite: copySite(s.FulfillmentSiteID),
+		version:         version,
 	}
+}
+
+func copySite(s *shared.FulfillmentSiteID) *shared.FulfillmentSiteID {
+	if s == nil {
+		return nil
+	}
+	c := *s
+	return &c
 }
 
 func (o *Order) ID() shared.OrderId         { return o.id }
@@ -231,6 +256,23 @@ func (o *Order) RequiredShipBy() *time.Time { return o.requiredShipBy }
 // rehydrating a persisted order passes OrderSnapshot.RequiredShipBy
 // instead.
 func (o *Order) SetRequiredShipBy(t time.Time) { o.requiredShipBy = &t }
+
+// FulfillmentSiteID returns the caller-assigned fulfillment site (ADR
+// 0044), or nil when the caller named none. The value is a copy.
+func (o *Order) FulfillmentSiteID() *shared.FulfillmentSiteID { return copySite(o.fulfillmentSite) }
+
+// AssignFulfillmentSite attaches the caller's fulfillment site to a
+// freshly-constructed order at intake (ADR 0044). The site is immutable:
+// assigning a second time returns ErrFulfillmentSiteAlreadyAssigned and
+// leaves the first untouched. No other operation on the aggregate
+// (allocate, release, re-promise, cancel) touches it.
+func (o *Order) AssignFulfillmentSite(site shared.FulfillmentSiteID) error {
+	if o.fulfillmentSite != nil {
+		return ErrFulfillmentSiteAlreadyAssigned
+	}
+	o.fulfillmentSite = &site
+	return nil
+}
 
 // Lines returns the order's lines. The slice is a copy, but the
 // *OrderLine values are the aggregate's own entities: they are read-only

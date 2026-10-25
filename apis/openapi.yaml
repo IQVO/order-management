@@ -176,14 +176,26 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/ReceiveOrderRequest"
-            example:
-              allowPartialShipment: false
-              lines:
-                - sku: SKU-1
-                  quantity: 2
-                - sku: SKU-2
-                  quantity: 1
-                  giftWrap: true
+            examples:
+              ordinary:
+                summary: An ordinary order — no site named
+                value:
+                  allowPartialShipment: false
+                  lines:
+                    - sku: SKU-1
+                      quantity: 2
+                    - sku: SKU-2
+                      quantity: 1
+                      giftWrap: true
+              withFulfillmentSite:
+                summary: A network-originated hold with a caller-assigned fulfillment site
+                value:
+                  releaseOnAllocation: false
+                  requiredShipBy: "2026-09-25T08:00:00Z"
+                  fulfillmentSiteId: WH1
+                  lines:
+                    - sku: SKU-1
+                      quantity: 2
       responses:
         "201":
           description: >
@@ -224,7 +236,22 @@ paths:
                     status: Released
                     reservationId: res-a1b2c3d4-0000-0000-0000-000000000010
         "400":
-          $ref: "#/components/responses/BadRequest"
+          description: >
+            The request body is malformed or invalid — an empty or missing
+            SKU, a body with no lines, an explicit `null` on a non-nullable
+            field, or a `fulfillmentSiteId` that is not a site code of
+            uppercase letters and digits (problem type
+            `invalid-fulfillment-site-id`, ADR 0044).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.order-management.warehouse-systems.dev/invalid-fulfillment-site-id
+                title: Fulfillment site id must be a site code of uppercase letters and digits
+                status: 400
+                detail: 'fulfillment site id must be a non-empty site code of uppercase letters and digits: "wh1" must contain only uppercase letters and digits'
+                instance: /orders
         "422":
           description: A line quantity is not greater than zero.
           content:
@@ -677,6 +704,32 @@ components:
           description: The requested lines. An order must have at least one.
           items:
             $ref: "#/components/schemas/ReceiveOrderLineRequest"
+        fulfillmentSiteId:
+          type: string
+          minLength: 1
+          pattern: "^[A-Z0-9]+$"
+          description: >
+            OPTIONAL. The site this order is to be fulfilled from, ASSIGNED
+            BY THE CALLER (customer-ordering or network-fulfillment) — this
+            service never infers, defaults or looks one up (ADR 0044). A
+            site code in facility-layout's shape: uppercase letters and
+            digits only. It applies to ordinary orders and to a
+            network-originated hold (`releaseOnAllocation: false`, ADR 0020)
+            alike.
+
+
+            When present it is stored on the order, immutable for its
+            lifetime (re-promise, release and cancel never change it), and is
+            the site of every `SiteSkuDemandChanged` event for the order's
+            lines (`assignment_version` `order-site-v1`, ADR 0044). When
+            absent the order behaves exactly as before: demand projects to
+            the deployment's static site, if one is configured
+            (`static-site-v1`, ADR 0035). The frozen
+            `OrderAllocated` / `OrderPartiallyAllocated` / `OrderRepromised`
+            events never carry it. A malformed value is rejected with `400`
+            (problem type `invalid-fulfillment-site-id`); an explicit `null`
+            is rejected too.
+          example: WH1
         requiredShipBy:
           type: string
           format: date-time
@@ -980,6 +1033,14 @@ components:
             or absent when it has none (the overwhelming majority). See the
             same field on ReceiveOrderRequest.
           example: "2026-09-25T08:00:00Z"
+        fulfillmentSiteId:
+          type: string
+          description: >
+            The caller-assigned fulfillment site this order was received
+            with (ADR 0044), or absent when the caller named none (the
+            overwhelming majority). Immutable. See the same field on
+            ReceiveOrderRequest.
+          example: WH1
         releaseOnAllocation:
           type: boolean
           description: >

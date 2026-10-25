@@ -20,6 +20,7 @@ func statusFor(err error) int {
 		errors.Is(err, shared.ErrEmptySKU),
 		errors.Is(err, shared.ErrEmptyPathID),
 		errors.Is(err, shared.ErrUnknownProcessPath),
+		errors.Is(err, shared.ErrInvalidFulfillmentSiteID),
 		errors.Is(err, order.ErrNoLines),
 		errors.Is(err, order.ErrLineNotFound):
 		return http.StatusBadRequest
@@ -84,6 +85,7 @@ var problemCatalog = []struct {
 	{shared.ErrEmptyOrderID, problemInfo{"empty-order-id", "Order id must not be empty"}},
 	{shared.ErrEmptySKU, problemInfo{"empty-sku", "SKU must not be empty"}},
 	{shared.ErrEmptyPathID, problemInfo{"empty-path-id", "Path id must not be empty"}},
+	{shared.ErrInvalidFulfillmentSiteID, problemInfo{"invalid-fulfillment-site-id", "Fulfillment site id must be a site code of uppercase letters and digits"}},
 	{shared.ErrUnknownProcessPath, problemInfo{"unknown-process-path", "Resolved process path is not active in the process-path catalogue"}},
 	{shared.ErrLineIneligibleForResolvedPath, problemInfo{"line-ineligible-for-resolved-path", "Line's attributes are not eligible for its resolved process path"}},
 	{order.ErrNoLines, problemInfo{"order-without-lines", "An order must have at least one line"}},
