@@ -10,7 +10,11 @@ description: "ADR 0031 — order-management consumes warehouse-planning's Capaci
 
 ## Status
 
-Accepted — implemented by the change that introduces this record. Builds on
+Accepted — implemented by the change that introduces this record. The "a fulfillment
+site on the order" deferral is lifted by
+[ADR 0044](./0044-caller-assigned-fulfillment-site-on-the-order.md) (the order may carry
+a caller-assigned site); the capacity annotation here still matches on
+`PLANNED_CAPACITY_SITE_ID` and is unchanged. Builds on
 [ADR 0014](./0014-promise-derived-from-fulfillment-capability.md) (the promise
 is a CPT window), [ADR 0015](./0015-wes-work-planning-path-capacity-changed-wired.md)
 (the existing Kafka-fed capacity input), [ADR 0017](./0017-per-shipment-group-promising.md)

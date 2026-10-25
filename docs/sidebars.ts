@@ -149,6 +149,7 @@ const sidebars: SidebarsConfig = {
         'adr/0041-trace-context-crosses-the-outbox',
         'adr/0042-path-selection-honours-process-path-intake',
         'adr/0043-release-confirmation-from-workunitcreated',
+        'adr/0044-caller-assigned-fulfillment-site-on-the-order',
       ],
     },
   ],
