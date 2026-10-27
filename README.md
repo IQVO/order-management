@@ -1,12 +1,5 @@
 # Order Management
 
-> **⚠️ Study project.** This repository is an educational exercise in
-> Domain-Driven Design applied to warehouse management/execution systems. It
-> follows real industry-standard patterns and terminology (WMS/WES/WCS,
-> chaotic storage, CloudEvents, RFC 7807, hexagonal architecture) but is
-> **not a production system** and is **not affiliated with, endorsed by, or
-> representative of any real-world company**.
-
 Order intake, allocation, promise-date calculation, and release — the
 missing upstream Open Host Service for the `warehouse-systems` fleet
 (`inventory-storage`, `wes-work-planning`, `fulfillment-execution`,
@@ -16,6 +9,13 @@ This context owns **Order** and **OrderLine** as first-class, validated
 aggregates — closing a gap where "an order" was previously just an
 unowned, unvalidated string (`OrderRef` / `DemandRef` / `Reference`)
 threaded independently through three other services.
+
+## Disclaimer
+
+This project is a domain-driven design study. It is not associated with,
+endorsed by or affiliated with any company, and it uses no company's code,
+data, logos or trademarks. All names, figures and examples are illustrative
+or synthetic.
 
 ## Documentation
 
@@ -397,6 +397,19 @@ analytics report store). There is no write tool and, since
 [ADR 0012](docs/docs/adr/0012-remove-rest-mcp-bearer-auth.md), no
 authentication.
 
+## Observability
+
+Traces and metrics are exported over OTLP/gRPC to the Collector named by
+`OTEL_EXPORTER_OTLP_ENDPOINT` (a Collector is expected but never required: the
+exporters are non-blocking, so with nothing listening the service still
+starts, serves and shuts down normally). One server span per HTTP request via
+otelchi — span names are the chi route pattern, never the raw path — plus the
+OTel HTTP server metrics and the Go runtime metrics. Business metrics:
+`order.orders.received` (orders accepted into the context) and the
+`order.release_confirmation.*` counters over the release-confirmation stream.
+Logs are structured `log/slog` JSON on stdout; relevant OTel env vars:
+`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `SERVICE_VERSION`,
+`ENVIRONMENT`, `LOG_LEVEL`.
 ## API
 
 Five order endpoints, an opt-in planned-capacity read, and liveness/readiness
@@ -601,6 +614,17 @@ they never ran in CI. `TestEveryIntegrationPackageRunsInCI`
 build if any `//go:build integration` package is ever again left out of the
 CI job.
 
+## Helm chart
+
+`charts/order-management` deploys the OLTP service with optional components behind
+values flags: the analytics projector and reports reader (`analytics.enabled`), the read-only MCP server (`mcp.enabled`) and the operator micro-frontend (`frontend.enabled`). Mandatory values are the Postgres secret and the Kafka
+broker list; the deployed consumer-group ids and mode flags come from
+`warehouse-infra`'s helm-values.
+
+The chart is linted in CI (`helm-lint`, `chart-tests`) and its invariants are
+asserted by the tests in `charts/order-management/tests/` — `render_test.sh`,
+`test_service_selectors.py` (every Service selects exactly one Deployment) and
+`test_kong_config.py`.
 ## Operator micro-frontend (`web/`)
 
 `web/` is `order_mgmt_mfe`, this context's Module Federation remote. It talks
