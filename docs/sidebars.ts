@@ -151,6 +151,7 @@ const sidebars: SidebarsConfig = {
         'adr/0043-release-confirmation-from-workunitcreated',
         'adr/0044-caller-assigned-fulfillment-site-on-the-order',
         'adr/0045-a-dead-consumer-takes-the-process-down',
+        'adr/0046-a2a-inbound-adapter',
       ],
     },
   ],

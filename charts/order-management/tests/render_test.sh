@@ -66,11 +66,73 @@ grep -A3 'envFrom:' <<<"$rc_api" | grep -q 'configMapRef:' || fail "api Deployme
 
 # The other workloads read their own explicit env and must NOT inherit the
 # api's HTTP_ADDR from the ConfigMap.
-for template in reports-deployment.yaml projector-deployment.yaml mcp-deployment.yaml; do
-  if helm template "$release" "$chart_dir" --set analytics.enabled=true --set mcp.enabled=true \
-    --set analytics.database.projectorUrl=postgres://projector --show-only "templates/$template" | grep -q 'configMapRef:'; then
+for template in reports-deployment.yaml projector-deployment.yaml mcp-deployment.yaml a2a-deployment.yaml; do
+  if helm template "$release" "$chart_dir" --set analytics.enabled=true --set mcp.enabled=true --set a2a.enabled=true \
+    --set database.url=postgres://app --set analytics.database.projectorUrl=postgres://projector --show-only "templates/$template" | grep -q 'configMapRef:'; then
     fail "$template must not mount the api ConfigMap"
   fi
 done
+
+# --- A2A agent (ADR-0046) ----------------------------------------------------
+# cmd/a2a is a READ-ONLY, Postgres-only deployable: it needs the OLTP and the
+# analytics DSNs and nothing about Kafka.
+repo_dir="$(cd "$chart_dir/../.." && pwd)"
+
+# env_value <rendered manifest> <NAME>: the literal `value:` of a container env
+# entry whose `name:` line is immediately followed by it.
+env_value() {
+  awk -v n="$2" '$1=="-" && $2=="name:" && $3==n { getline; sub(/^[[:space:]]*value:[[:space:]]*/, ""); gsub(/"/, ""); print; found=1; exit } END { exit found ? 0 : 1 }' <<<"$1"
+}
+
+a2a_args=(--set a2a.enabled=true --set database.existingSecret=order-management-db
+  --set analytics.enabled=true --set analytics.database.existingSecret=order-management-analytics-db)
+a2a_dep="$(helm template "$release" "$chart_dir" "${a2a_args[@]}" --show-only templates/a2a-deployment.yaml)"
+
+# Off by default: no a2a resource renders unless asked for.
+if helm template "$release" "$chart_dir" | grep -q 'component: a2a'; then fail "an a2a resource rendered with default values"; fi
+
+# The agent has no in-memory and no empty-analytics mode: enabling it without
+# the databases fails the render with a message instead of a crash-looping pod.
+no_db="$(helm template "$release" "$chart_dir" --set a2a.enabled=true --set analytics.enabled=true 2>&1 || true)"
+grep -q 'a2a.enabled=true requires database.url or database.existingSecret' <<<"$no_db" || fail "a2a without a database must fail the render with a named reason: $(head -n 3 <<<"$no_db")"
+no_analytics="$(helm template "$release" "$chart_dir" --set a2a.enabled=true --set database.url=postgres://app 2>&1 || true)"
+grep -q 'a2a.enabled=true requires analytics.enabled=true' <<<"$no_analytics" || fail "a2a without analytics must fail the render with a named reason: $(head -n 3 <<<"$no_analytics")"
+
+grep -q 'command: \["/app/a2a"\]' <<<"$a2a_dep" || fail "the a2a Deployment must run /app/a2a"
+[[ "$(env_value "$a2a_dep" A2A_ADDR || true)" == ":8093" ]] || fail "the a2a agent must listen on :8093 (8090 is MCP, 8091 the projector admin, 8092 the reports API)"
+[[ "$(helm template "$release" "$chart_dir" "${a2a_args[@]}" --set mcp.enabled=true --set frontend.enabled=true | grep -c 'containerPort: 8093')" == "1" ]] \
+  || fail "port 8093 must be used by exactly one container (the a2a agent)"
+grep -A4 'name: DATABASE_URL$' <<<"$a2a_dep" | grep -q 'secretKeyRef:' || fail "the a2a DATABASE_URL must come from a Secret"
+grep -A6 'name: ANALYTICS_DATABASE_URL$' <<<"$a2a_dep" | grep -q 'name: order-management-analytics-db' || fail "the a2a ANALYTICS_DATABASE_URL must come from the analytics Secret"
+grep -A6 'name: ANALYTICS_DATABASE_URL$' <<<"$a2a_dep" | grep -q 'key: ANALYTICS_READER_DATABASE_URL' || fail "the a2a ANALYTICS_DATABASE_URL must use the READ-ONLY reader key"
+[[ "$(grep -c 'path: /healthz' <<<"$a2a_dep")" == "3" ]] || fail "the a2a startup, liveness and readiness probes must all hit GET /healthz"
+
+# READ-ONLY: it publishes nothing, so no Kafka/publisher configuration at all.
+for var in KAFKA_BROKERS EVENT_PUBLISHER; do
+  if grep -q "name: $var\$" <<<"$a2a_dep"; then fail "the read-only a2a Deployment must not render $var"; fi
+done
+
+# The Agent Card must advertise a dialable absolute URL: it defaults to the
+# release's in-cluster Service DNS (namespace-derived, so pattern-match) and
+# stays overridable.
+a2a_url="$(env_value "$a2a_dep" A2A_AGENT_URL || true)" # a missing var must reach the fail message below, not abort under set -e
+[[ "$a2a_url" =~ ^http://[a-z0-9.-]+-a2a\.[a-z0-9-]+\.svc\.cluster\.local:8093/$ ]] || fail "A2A_AGENT_URL default is not the in-cluster Service DNS: $a2a_url"
+a2a_override="$(helm template "$release" "$chart_dir" "${a2a_args[@]}" --set a2a.agentUrl=http://gw.example/api/a2a/order-management/ --show-only templates/a2a-deployment.yaml)"
+[[ "$(env_value "$a2a_override" A2A_AGENT_URL || true)" == "http://gw.example/api/a2a/order-management/" ]] || fail "a2a.agentUrl does not override A2A_AGENT_URL"
+
+# Every variable cmd/a2a's boot config names as REQUIRED is rendered, derived
+# from the Go source so a new mandatory variable fails until the chart has it.
+a2a_vars="$(grep -hoE '[A-Z][A-Z0-9_]{2,} is required' "$repo_dir"/cmd/a2a/main.go | sed -E 's/ is required//' | sort -u || true)"
+[[ -n "$a2a_vars" ]] || fail "found no mandatory variables for cmd/a2a; the scan is looking in the wrong place"
+for var in $a2a_vars; do
+  grep -q "name: $var\$" <<<"$a2a_dep" || fail "the a2a Deployment does not render $var, which cmd/a2a requires"
+done
+
+# The route (off unless enabled) rewrites the gateway prefix to / so the
+# well-known agent card stays reachable under the same prefix.
+a2a_route="$(helm template "$release" "$chart_dir" "${a2a_args[@]}" --set a2a.route.enabled=true \
+  --set a2a.route.parentRefs[0].name=gw --set a2a.route.parentRefs[0].namespace=kong --show-only templates/a2a-route.yaml)"
+grep -q 'value: /api/a2a/order-management$' <<<"$a2a_route" || fail "the a2a route must serve /api/a2a/order-management"
+grep -q 'replacePrefixMatch: /$' <<<"$a2a_route" || fail "the a2a route must rewrite its prefix to /"
 
 echo "order-management chart render assertions passed"
