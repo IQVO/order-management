@@ -1,12 +1,5 @@
 # Order Management
 
-> **⚠️ Study project.** This repository is an educational exercise in
-> Domain-Driven Design applied to warehouse management/execution systems. It
-> follows real industry-standard patterns and terminology (WMS/WES/WCS,
-> chaotic storage, CloudEvents, RFC 7807, hexagonal architecture) but is
-> **not a production system** and is **not affiliated with, endorsed by, or
-> representative of any real-world company**.
-
 Order intake, allocation, promise-date calculation, and release — the
 missing upstream Open Host Service for the `warehouse-systems` fleet
 (`inventory-storage`, `wes-work-planning`, `fulfillment-execution`,
@@ -16,6 +9,13 @@ This context owns **Order** and **OrderLine** as first-class, validated
 aggregates — closing a gap where "an order" was previously just an
 unowned, unvalidated string (`OrderRef` / `DemandRef` / `Reference`)
 threaded independently through three other services.
+
+## Disclaimer
+
+This project is a domain-driven design study. It is not associated with,
+endorsed by or affiliated with any company, and it uses no company's code,
+data, logos or trademarks. All names, figures and examples are illustrative
+or synthetic.
 
 ## Documentation
 
@@ -31,6 +31,7 @@ push to `main`). The pages, as Markdown in this repository:
 | Ecosystem | [Integration contracts](docs/docs/ecosystem/integration.md) · [Context map](docs/docs/ecosystem/context-map.md) |
 | Domain-Driven Design | [Subdomain classification](docs/docs/ddd/subdomain-classification.md) · [Use cases](docs/docs/ddd/use-cases.md) · [Domain events](docs/docs/ddd/domain-events.md) · [DDD artifacts](docs/docs/ddd/ddd-artifacts.md) |
 | AI ecosystem | [MCP tools](docs/docs/mcp/tools.md) · [MCP governance charter](docs/docs/mcp/governance-charter.md) |
+| A2A | [A2A inbound adapter (ADR 0046)](docs/docs/adr/0046-a2a-inbound-adapter.md) |
 | Analytics | [Order Funnel & Allocation Health](docs/docs/analytics/order-funnel-report.md) |
 | API | [API reference overview](docs/docs/api-reference/overview.md) (generated from `apis/openapi.yaml`) |
 | Decisions | [ADR index](docs/docs/adr/about.md) |
@@ -71,6 +72,7 @@ the fleet. See
 ```
 cmd/order/                        OLTP service composition root
 cmd/mcp/                          read-only MCP server (ADR 0010)
+cmd/a2a/                          read-only A2A agent (JSON-RPC over HTTP, Agent Card at /.well-known/agent-card.json; ADR 0046)
 cmd/order-projector/              analytics writer (ADR 0006)
 cmd/order-reports/                analytics read API (ADR 0006)
 internal/
@@ -120,6 +122,7 @@ internal/
                                   off by default),
                                   analytics consumer (cmd/order-projector)
     inbound/mcp/                  MCP tools
+    inbound/a2a/                  A2A skills: order_status, promise_health (both reads; ADR 0046)
     kafka/cloudevents/            the only CloudEvents 1.0 New/Decode helper
     outbound/inventorystorage/    POST /reservations, DELETE /reservations/{id}
     outbound/productclassificationcopy/ local copy of product-master
@@ -244,12 +247,14 @@ Release no longer calls any Supplier synchronously — see
 | `DEMAND_PROJECTION_SITE_ID` | *(unset)* | Static demand-site scope for the additive, PII-free `SiteSkuDemandChanged` integration event (keyed `<order_id>/line/<line_no>`, assignment_version `static-site-v1`); unset ⇒ the projection is off for orders without a caller-assigned `fulfillmentSiteId` (ADR 0035); an order that carries one projects to its own site, `order-site-v1` (ADR 0044). |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:5181` | Console / MFE origins (ADR 0007). |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OTLP/gRPC endpoint for metrics and traces (ADR 0009); there is no `/metrics` scrape route. |
-| `OTEL_SERVICE_NAME` | `order-management` | Service name on telemetry (per binary: `order-management-mcp`, `order-projector`, `order-reports`). |
+| `OTEL_SERVICE_NAME` | `order-management` | Service name on telemetry (per binary: `order-management-mcp`, `order-management-a2a`, `order-projector`, `order-reports`). |
 | `SERVICE_VERSION`, `ENVIRONMENT` | `dev`, `local` | OpenTelemetry resource attributes. |
-| `ANALYTICS_DATABASE_URL` | *(unset)* | Analytical Postgres DSN. **Required** by `cmd/order-projector` (writer) and `cmd/order-reports` (read-only reader); optional for `cmd/mcp` (`get_promise_health` reports empty KPIs without it); never read by the OLTP binary. |
+| `ANALYTICS_DATABASE_URL` | *(unset)* | Analytical Postgres DSN. **Required** by `cmd/order-projector` (writer) and `cmd/order-reports` (read-only reader) and `cmd/a2a` (read-only DSN; `promise_health` has no empty-store mode); optional for `cmd/mcp` (`get_promise_health` reports empty KPIs without it); never read by the OLTP binary. |
 | `ANALYTICS_MIGRATIONS_PATH` | `migrations/analytics` | Analytical golang-migrate source directory (writer only). |
 | `ADMIN_ADDR` | `:8091` | `cmd/order-projector` admin/health listen address. |
 | `MCP_ADDR` | `:8090` | `cmd/mcp` listen address. |
+| `A2A_ADDR` | `:8093` | `cmd/a2a` listen address. |
+| `A2A_AGENT_URL` | *(unset)* | **Required** by `cmd/a2a`: the absolute http(s) URL of its JSON-RPC endpoint, advertised on the Agent Card (the chart defaults it to the in-cluster Service DNS). |
 | `PROMISE_DEFAULT_LEAD_TIME` | `48h` | Lead-time fallback promise for any unlisted path. |
 | `PROMISE_PATH_LEAD_TIMES` | *(unset)* | Per-path overrides, e.g. `pick=24h,singles=6h`. |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` (or `warning`) \| `error`, case-insensitive. |
@@ -397,6 +402,45 @@ analytics report store). There is no write tool and, since
 [ADR 0012](docs/docs/adr/0012-remove-rest-mcp-bearer-auth.md), no
 authentication.
 
+## A2A agent
+
+`cmd/a2a` ([ADR 0046](docs/docs/adr/0046-a2a-inbound-adapter.md)) is the
+Agent2Agent twin of the MCP server: the same `GetOrder` use case and analytics
+report store behind two goal-shaped skills, served as JSON-RPC over HTTP on
+`A2A_ADDR` (default `:8093`) at both `/` and `/a2a`, with the Agent Card at
+`/.well-known/agent-card.json` and `GET /healthz` for probes. It is
+**read-only**, because the MCP surface offers no write (ADR 0010): placing an
+order stays `POST /orders` alone (ADR 0005). Unauthenticated, like REST and MCP
+(ADR 0012).
+
+Skills are called as a `SendMessage` data part `{"skill": "<id>", "arguments": {...}}`:
+
+- `order_status`: `{orderId}` returns the order's status, promise date and lines.
+- `promise_health`: `{from, to[, pathId]}` (RFC3339) returns the promise KPIs of
+  the Order Funnel data product for the window.
+
+Domain rejections come back in-band as an RFC 7807 `problem` with the REST
+adapter's classification (`404 order-not-found`, `400 empty-order-id`, `500`);
+unknown argument names are refused. Unlike `cmd/mcp` it has no in-memory or
+empty-analytics mode: `DATABASE_URL`, `ANALYTICS_DATABASE_URL` and
+`A2A_AGENT_URL` are mandatory. In Kubernetes the Helm chart deploys it as
+`<release>-a2a` (port 8093) when `a2a.enabled=true` (default `false`; requires
+`analytics.enabled=true`), with no Kafka configuration since it publishes
+nothing. A2A carries delegation only; facts still leave as CloudEvents on Kafka.
+
+## Observability
+
+Traces and metrics are exported over OTLP/gRPC to the Collector named by
+`OTEL_EXPORTER_OTLP_ENDPOINT` (a Collector is expected but never required: the
+exporters are non-blocking, so with nothing listening the service still
+starts, serves and shuts down normally). One server span per HTTP request via
+otelchi — span names are the chi route pattern, never the raw path — plus the
+OTel HTTP server metrics and the Go runtime metrics. Business metrics:
+`order.orders.received` (orders accepted into the context) and the
+`order.release_confirmation.*` counters over the release-confirmation stream.
+Logs are structured `log/slog` JSON on stdout; relevant OTel env vars:
+`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `SERVICE_VERSION`,
+`ENVIRONMENT`, `LOG_LEVEL`.
 ## API
 
 Five order endpoints, an opt-in planned-capacity read, and liveness/readiness
@@ -601,6 +645,17 @@ they never ran in CI. `TestEveryIntegrationPackageRunsInCI`
 build if any `//go:build integration` package is ever again left out of the
 CI job.
 
+## Helm chart
+
+`charts/order-management` deploys the OLTP service with optional components behind
+values flags: the analytics projector and reports reader (`analytics.enabled`), the read-only MCP server (`mcp.enabled`) and the operator micro-frontend (`frontend.enabled`). Mandatory values are the Postgres secret and the Kafka
+broker list; the deployed consumer-group ids and mode flags come from
+`warehouse-infra`'s helm-values.
+
+The chart is linted in CI (`helm-lint`, `chart-tests`) and its invariants are
+asserted by the tests in `charts/order-management/tests/` — `render_test.sh`,
+`test_service_selectors.py` (every Service selects exactly one Deployment) and
+`test_kong_config.py`.
 ## Operator micro-frontend (`web/`)
 
 `web/` is `order_mgmt_mfe`, this context's Module Federation remote. It talks
@@ -648,7 +703,7 @@ python3 charts/order-management/tests/test_service_selectors.py
 ```
 
 which proves every Service selects exactly one Deployment — the OLTP Service
-must never select the frontend, analytics or MCP pods.
+must never select the frontend, analytics, MCP or A2A pods.
 
 ## Deferred
 
@@ -768,6 +823,7 @@ GitHub Pages on every push to `main` that touches `docs/**`, publishing to
 41. [0041 — The W3C trace context crosses the outbox in `outbox_events.headers`](docs/docs/adr/0041-trace-context-crosses-the-outbox.md)
 42. [0042 — Path selection considers only paths whose intake admits customer orders](docs/docs/adr/0042-path-selection-honours-process-path-intake.md)
 43. [0043 — Confirm an order-line release from WorkUnitCreated, and flag OrderReleaseUnconfirmed](docs/docs/adr/0043-release-confirmation-from-workunitcreated.md) (amends 0005's no-confirmation-loop decision)
+46. [0046 — A2A inbound adapter (read-only third driving adapter)](docs/docs/adr/0046-a2a-inbound-adapter.md)
 
 ## License
 

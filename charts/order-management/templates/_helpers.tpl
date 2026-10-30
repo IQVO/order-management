@@ -82,6 +82,13 @@ Fully qualified name of the MCP server deployment/service (ADR-0010).
 {{- end }}
 
 {{/*
+Fully qualified name of the A2A agent Deployment/Service (<release>-a2a, ADR-0046).
+*/}}
+{{- define "order-management.a2aFullname" -}}
+{{- include "order-management.fullname" . }}-a2a
+{{- end }}
+
+{{/*
 Fully qualified name of the frontend (order_mgmt_mfe) deployment/service.
 
 The remote is served by its own nginx pod and reached through warehouse-infra's
