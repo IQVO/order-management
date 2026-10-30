@@ -3,8 +3,8 @@
 
 Why this exists: before the frontend workload was added, every Service in this
 chart selected on the base selector labels alone (name + instance). Those labels
-are identical on the OLTP, analytics projector, analytics reports and MCP pods,
-so the OLTP Service's EndpointSlice genuinely contained all four -- verified
+are identical on the OLTP, analytics projector, analytics reports, MCP and A2A pods,
+so the OLTP Service's EndpointSlice genuinely contained all of them -- verified
 live in the kind cluster, where a Kong request for the OLTP /healthz was
 answered by the analytics reports pod.
 
@@ -30,6 +30,11 @@ ENABLE_EVERYTHING = [
     "--set", "frontend.enabled=true",
     "--set", "analytics.enabled=true",
     "--set", "mcp.enabled=true",
+    # The A2A agent (ADR-0046) refuses to render without a database and the
+    # analytics data product (it has no in-memory or empty-analytics mode).
+    "--set", "a2a.enabled=true",
+    "--set", "database.url=postgres://app@example.invalid:5432/orders",
+    "--set", "analytics.database.projectorUrl=postgres://projector@example.invalid:5432/analytics",
 ]
 
 
@@ -120,6 +125,7 @@ def main() -> int:
         "order-management-frontend": "frontend",
         "order-management-reports": "analytics-reports",
         "order-management-mcp": "mcp",
+        "order-management-a2a": "a2a",
     }
     for name, component in expected.items():
         if name not in services:
