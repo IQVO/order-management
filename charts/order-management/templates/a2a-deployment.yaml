@@ -1,0 +1,147 @@
+{{- if .Values.a2a.enabled }}
+{{- /*
+The A2A agent (cmd/a2a, ADR-0046) refuses to boot without DATABASE_URL and
+ANALYTICS_DATABASE_URL: it has no in-memory mode and no empty-analytics mode (an
+empty store would answer all-zero promise KPIs as if they were facts). Fail the
+render with a message instead of shipping a pod that crash-loops.
+*/ -}}
+{{- if not (or .Values.database.url .Values.database.existingSecret) }}
+{{- fail "a2a.enabled=true requires database.url or database.existingSecret: cmd/a2a refuses to boot without DATABASE_URL" }}
+{{- end }}
+{{- if not .Values.analytics.enabled }}
+{{- fail "a2a.enabled=true requires analytics.enabled=true: cmd/a2a refuses to boot without ANALYTICS_DATABASE_URL (promise_health reads the analytics data product)" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "order-management.a2aFullname" . }}
+  labels:
+    {{- include "order-management.labels" . | nindent 4 }}
+    app.kubernetes.io/component: a2a
+spec:
+  replicas: {{ .Values.a2a.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "order-management.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: a2a
+  template:
+    metadata:
+      labels:
+        {{- include "order-management.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: a2a
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "order-management.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: a2a
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/app/a2a"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.a2a.service.targetPort }}
+              protocol: TCP
+          env:
+            - name: A2A_ADDR
+              value: {{ .Values.a2a.httpAddr | quote }}
+            # The Agent Card must advertise a URL agent clients can dial
+            # (ADR-0046): default to this release's in-cluster Service DNS;
+            # a2a.agentUrl overrides it (e.g. with the Kong path).
+            - name: A2A_AGENT_URL
+              value: {{ .Values.a2a.agentUrl | default (printf "http://%s.%s.svc.cluster.local:%d/" (include "order-management.a2aFullname" .) .Release.Namespace (int .Values.a2a.service.port)) | quote }}
+            # cmd/a2a runs the same GetOrder read use case over the same OLTP
+            # database as cmd/order, and (like cmd/mcp) applies migrations on
+            # start -- idempotent, so every binary may point at the same
+            # directory. MIGRATIONS_PATH/LOG_LEVEL are left to the binary's own
+            # env-driven defaults ("migrations" / "info"), as cmd/order's and
+            # cmd/mcp's templates do.
+            #
+            # READ-ONLY agent (ADR-0046): there is deliberately no KAFKA_BROKERS
+            # and no EVENT_PUBLISHER -- it publishes nothing, the relay and every
+            # outbox row stay with the api Deployment.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "order-management.databaseSecretName" . }}
+                  key: {{ .Values.database.existingSecretKey }}
+            {{- if .Values.database.migrationsExistingSecretKey }}
+            # See values.yaml's database.migrationsExistingSecretKey comment
+            # and ADR-0029: cmd/a2a also runs migrations on start, so it needs
+            # the same direct-connection split.
+            - name: MIGRATIONS_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "order-management.databaseSecretName" . }}
+                  key: {{ .Values.database.migrationsExistingSecretKey }}
+                  optional: true
+            {{- end }}
+            # promise_health reads the analytics data product over the SAME
+            # read-only DSN cmd/order-reports uses (ANALYTICS_READER_DATABASE_URL
+            # key of the analytics Secret). Unlike cmd/mcp, whose chart never
+            # renders it, this is mandatory.
+            - name: ANALYTICS_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "order-management.analyticsSecretName" . }}
+                  key: ANALYTICS_READER_DATABASE_URL
+            {{- if .Values.otel.enabled }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.otel.endpoint | quote }}
+            - name: OTEL_SERVICE_NAME
+              value: "order-management-a2a"
+            - name: SERVICE_VERSION
+              value: {{ .Values.image.tag | default .Chart.AppVersion | quote }}
+            {{- end }}
+            {{- range .Values.a2a.extraEnv }}
+            - {{ toYaml . | nindent 14 | trim }}
+            {{- end }}
+          # cmd/a2a serves GET /healthz (no auth, no state), so the probes are
+          # real HTTP checks rather than the raw-socket interim cmd/mcp needs.
+          #
+          # startupProbe mirrors the shared boot-time-dial-retry fix
+          # (Postgres migrations+ping retry through internal/bootretry -- 5
+          # attempts, 15s of backoff -- instead of crash-looping on the
+          # first-dial reset Istio's native sidecars cause): give kubelet a
+          # longer, separate probe budget during boot so it doesn't SIGTERM the
+          # pod mid-backoff, matching the primary deployment's startupProbe
+          # (periodSeconds: 2, failureThreshold: 30 -> a 60s budget).
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.a2a.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
