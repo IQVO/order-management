@@ -18,10 +18,10 @@ import (
 
 func deadlinePolicy(windows ...order.CPTWindow) order.PromisePolicy {
 	return order.PromisePolicy{
-		Schedule:   &deadlineSchedule{windows: windows},
-		Capability: &deadlineCapability{cycleTimes: map[shared.PathId]time.Duration{"singles": time.Hour}},
-		Fallback:   order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:     "site-1",
+		Schedule:      &deadlineSchedule{windows: windows},
+		Capability:    &deadlineCapability{cycleTimes: map[shared.PathId]time.Duration{"singles": time.Hour}},
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 }
 

@@ -270,8 +270,9 @@ plannedCapacity:
   # default in the binary, so a locally run process cannot join this group.
   consumerGroup: ""
   # PLANNED_CAPACITY_SITE_ID: the warehouse-planning `location` (site/building
-  # code, e.g. SIM1) an order's promise is matched against. Empty falls back
-  # to the binary's DEFAULT_SITE_ID, i.e. the site the promise is computed for.
+  # code, e.g. SIM1) an order WITHOUT a fulfillmentSiteId is matched against;
+  # an order that carries one is matched on its own site (ADR 0047). Empty
+  # falls back to the binary's DEFAULT_SITE_ID.
   siteId: ""
 
 # Site/SKU demand projection (ADR 0035). When siteId is set, every order

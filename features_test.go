@@ -186,7 +186,7 @@ func (w *world) reset() {
 		// Planned capacity (ADR 0031) is wired for every scenario: with no
 		// window published it is invisible, which is exactly what the
 		// pre-existing scenarios (untouched) keep proving.
-		CapacityConstraints: &usecases.OrderCapacityConstraints{Windows: w.planned, Clock: clock, SiteID: "SIM1"},
+		CapacityConstraints: &usecases.OrderCapacityConstraints{Windows: w.planned, Clock: clock, DefaultSiteID: "SIM1"},
 		PlannedCapacity:     &usecases.GetPlannedCapacity{Windows: w.planned, Clock: clock},
 	}
 

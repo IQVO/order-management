@@ -35,7 +35,10 @@ paths:
 - **Promise** — computed at allocation time by `order.PromisePolicy`
   (ADR-0014): a CPT window derived from process-path capability
   (cycle time, eligibility, site CPT schedule) and wes-work-planning path
-  capacity, `PromiseBasis=Capability`. When those caches are cold or
+  capacity, `PromiseBasis=Capability`. The CPT schedule read is the
+  order's own site: its caller-assigned `fulfillmentSiteId` (ADR-0044),
+  else `DEFAULT_SITE_ID` (ADR-0047, `order.PromiseSiteFor`); re-promise
+  keeps it because the site is immutable. When those caches are cold or
   `PATH_CATALOGUE_SOURCE=none`, it falls back to `LeadTimePolicy`
   (configurable per-path lead time, `PromiseBasis=LeadTime`). With
   `AllowPartialShipment=true` lines are promised per shipment group
@@ -48,7 +51,8 @@ paths:
   `location` = site code, `[start, end)`, `shortage`, `status`
   DRAFT|PUBLISHED), fed only by its CloudEvents, last-writer-wins per plan id.
   A PUBLISHED shortage overlapping an order's `[now, promise cutoff)` at the
-  configured site ANNOTATES the order (`capacityConstraint`, derived at read
+  order's site (its `fulfillmentSiteId`, else `PLANNED_CAPACITY_SITE_ID`;
+  ADR-0047) ANNOTATES the order (`capacityConstraint`, derived at read
   time). It never moves the promise, rejects an order, or touches allocation.
 - **Hold** (ADR-0020) — `releaseOnAllocation=false` at intake: the order
   allocates and stops ("allocated, not released" — deliberately NOT a new

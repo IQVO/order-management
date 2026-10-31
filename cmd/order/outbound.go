@@ -84,7 +84,9 @@ func buildPromisePolicy(catalogue ports.ProcessPathCatalogue, cptSchedule ports.
 		Capability: catalogue,
 		Capacity:   capacity,
 		Fallback:   leadTime,
-		SiteId:     getenv("DEFAULT_SITE_ID", DefaultSiteId),
+		// The fallback only: an order carrying a fulfillmentSiteId is
+		// promised against its own site (ADR 0047).
+		DefaultSiteId: getenv("DEFAULT_SITE_ID", DefaultSiteId),
 	}
 }
 

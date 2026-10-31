@@ -164,8 +164,9 @@ func (uc *ReceiveOrder) ExecuteWithDeadline(ctx context.Context, lines []NewLine
 // caller-assigned fulfillment site. A nil site is the ordinary case and
 // behaves exactly as before. A non-nil site is validated by its value
 // object, stored on the order at intake and never changed afterwards; it
-// is carried, never inferred or looked up, and only the site/SKU demand
-// projection reads it (the frozen allocation events do not).
+// is carried, never inferred or looked up. The promise (ADR 0047: CPT
+// window, every re-promise) and the site/SKU demand projection (ADR 0044)
+// read it; the frozen allocation events do not carry it.
 func (uc *ReceiveOrder) ExecuteWithSite(ctx context.Context, lines []NewLine, allowPartialShipment, releaseOnAllocation bool, requiredShipBy *time.Time, site *shared.FulfillmentSiteID) (*order.Order, error) {
 	// ADR 0020 §4: reject the contradictory combination BEFORE minting an
 	// id or persisting anything — a rejected intake must leave no trace.

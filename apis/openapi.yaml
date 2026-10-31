@@ -721,9 +721,16 @@ components:
             When present it is stored on the order, immutable for its
             lifetime (re-promise, release and cancel never change it), and is
             the site of every `SiteSkuDemandChanged` event for the order's
-            lines (`assignment_version` `order-site-v1`, ADR 0044). When
-            absent the order behaves exactly as before: demand projects to
-            the deployment's static site, if one is configured
+            lines (`assignment_version` `order-site-v1`, ADR 0044). It is
+            also the site the order is PROMISED against (ADR 0047): the CPT
+            window comes from that site's CPT schedule, at intake and on
+            every re-promise, and the `capacityConstraint` annotation matches
+            that site. A site with no CPT schedule known to this service is
+            promised on the `LeadTime` basis, never on another site's
+            windows. When absent the order behaves exactly as before: it is
+            promised against the deployment's default site
+            (`DEFAULT_SITE_ID`) and demand projects to the deployment's
+            static site, if one is configured
             (`static-site-v1`, ADR 0035). The frozen
             `OrderAllocated` / `OrderPartiallyAllocated` / `OrderRepromised`
             events never carry it. A malformed value is rejected with `400`
@@ -895,7 +902,9 @@ components:
       required: [constrained, site, windows]
       description: >
         Present on an Order ONLY when its promise overlaps a PUBLISHED
-        warehouse-planning shortage window at the configured site (ADR 0031).
+        warehouse-planning shortage window at the order's site (ADR 0031,
+        ADR 0047): its `fulfillmentSiteId` when it carries one, else the
+        configured site.
         The order's work window is `[now, promise cutoff)`; a window
         overlaps it when both half-open intervals share at least one instant
         (a window starting exactly at the cutoff does not). It is a derived,
@@ -912,8 +921,9 @@ components:
           type: string
           description: >
             The planning `location` the order was matched against — the
-            single configured site (`PLANNED_CAPACITY_SITE_ID`, defaulting to
-            `DEFAULT_SITE_ID`); orders do not carry a site of their own.
+            order's own `fulfillmentSiteId` when it carries one (ADR 0047),
+            else the configured site (`PLANNED_CAPACITY_SITE_ID`, defaulting
+            to `DEFAULT_SITE_ID`).
           example: SIM1
         windows:
           type: array

@@ -73,11 +73,11 @@ Sources live in `cmd/order/` unless stated otherwise.
 | `PRODUCT_CLASSIFICATION_MODE` | `permissive` | no | `kafka` keeps a local copy of product-master's `ProductClassified` events (ADR 0036) for path eligibility. `permissive` treats every SKU as unclassified. `http` was removed and is a **boot error**, and so is any other unknown value. | `product_classification.go` |
 | `PRODUCT_CLASSIFICATION_CONSUMER_GROUP` | unset, no default on purpose | yes, when mode is `kafka` (**boot error** otherwise) | Stable consumer group of the classification consumer on `warehouse.product-master.events`. The fleet deployment uses `order-management-product-classification`. | `product_classification.go` |
 | `PATH_CATALOGUE_SOURCE` | `none` | no | `kafka` starts three replay caches (process-path catalogue, CPT schedule, path capacity) and blocks boot until each has replayed, up to 60 s each. Any other value skips path validation and uses only the lead-time promise. | `outbound.go`, `wiring.go` |
-| `DEFAULT_SITE_ID` | `site-1` | no | Site whose CPT schedule the promise reads. Also the fallback of `PLANNED_CAPACITY_SITE_ID`. | `main.go`, `outbound.go` |
+| `DEFAULT_SITE_ID` | `site-1` | no | Site whose CPT schedule the promise reads for an order without a `fulfillmentSiteId`; an order that carries one is promised at its own site (ADR 0047). Also the fallback of `PLANNED_CAPACITY_SITE_ID`. | `main.go`, `outbound.go` |
 | `PROMISE_DEFAULT_LEAD_TIME` | `48h` | no | Lead-time fallback promise for any path without an override. `0` or invalid means `48h`. | `outbound.go` |
 | `PROMISE_PATH_LEAD_TIMES` | unset | no | Per-path overrides, `pathId=duration` pairs separated by commas, for example `pick=24h,singles=6h`. A malformed pair is skipped with a WARN. | `outbound.go`, `config.go` (`perPathLeadTimes`) |
 | `PLANNED_CAPACITY_CONSUMER_GROUP` | unset, no default on purpose | no | The on/off switch of the warehouse-planning integration (ADR 0031). Set: consume `warehouse.warehouse-planning.events` into the planned-capacity read model, register `GET /planned-capacity` and annotate order responses with `capacityConstraint`. Unset: none of that exists. The fleet uses `order-management-planned-capacity`. | `planned_capacity.go` |
-| `PLANNED_CAPACITY_SITE_ID` | value of `DEFAULT_SITE_ID` | no | The warehouse-planning `location` an order's promise is matched against (the fleet sets `SIM1`). | `planned_capacity.go` |
+| `PLANNED_CAPACITY_SITE_ID` | value of `DEFAULT_SITE_ID` | no | The warehouse-planning `location` an order without a `fulfillmentSiteId` is matched against (the fleet sets `SIM1`); an order that carries one is matched on its own site (ADR 0047). | `planned_capacity.go` |
 
 ### Telemetry
 

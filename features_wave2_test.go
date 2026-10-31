@@ -156,10 +156,10 @@ func (w *world) cptWindows(path string, minutes int, table *godog.Table) error {
 		windows = append(windows, order.CPTWindow{CptId: r["cptId"], CutoffAt: cutoff, EligiblePathIds: []string{path}})
 	}
 	policy := order.PromisePolicy{
-		Schedule:   fakeSchedule{windows: windows},
-		Capability: fakeCapability{cycle: time.Duration(minutes) * time.Minute},
-		Fallback:   order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:     "SIM1",
+		Schedule:      fakeSchedule{windows: windows},
+		Capability:    fakeCapability{cycle: time.Duration(minutes) * time.Minute},
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "SIM1",
 	}
 	w.receive.Promise, w.retry.Promise, w.release.Promise = policy, policy, policy
 	return nil

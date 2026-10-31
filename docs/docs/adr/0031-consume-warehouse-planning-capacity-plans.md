@@ -14,7 +14,10 @@ Accepted — implemented by the change that introduces this record. The "a fulfi
 site on the order" deferral is lifted by
 [ADR 0044](./0044-caller-assigned-fulfillment-site-on-the-order.md) (the order may carry
 a caller-assigned site); the capacity annotation here still matches on
-`PLANNED_CAPACITY_SITE_ID` and is unchanged. Builds on
+`PLANNED_CAPACITY_SITE_ID` and is unchanged. **§5 amended by
+[ADR 0047](./0047-promise-at-the-orders-own-fulfillment-site.md):** the annotation now
+matches the order's own `fulfillmentSiteId` when it carries one, with
+`PLANNED_CAPACITY_SITE_ID` as the fallback; it stays advisory. Builds on
 [ADR 0014](./0014-promise-derived-from-fulfillment-capability.md) (the promise
 is a CPT window), [ADR 0015](./0015-wes-work-planning-path-capacity-changed-wired.md)
 (the existing Kafka-fed capacity input), [ADR 0017](./0017-per-shipment-group-promising.md)

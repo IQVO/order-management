@@ -97,9 +97,9 @@ func TestPromisePolicy_CapabilityBasisSuccess(t *testing.T) {
 		Schedule: &fakeSchedule{windowsBySite: map[string][]order.CPTWindow{
 			"site-1": {{CptId: "sp1-1800", CutoffAt: cutoff, EligiblePathIds: []string{"pick"}}},
 		}},
-		Capability: &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 2 * time.Hour}},
-		Fallback:   order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:     "site-1",
+		Capability:    &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 2 * time.Hour}},
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 
 	got, ok := policy.Promise(now, o)
@@ -122,10 +122,10 @@ func TestPromisePolicy_FallsBackWhenNoScheduleForSite(t *testing.T) {
 	o := newAllocatedOrder(t, pq("pick", 1))
 
 	policy := order.PromisePolicy{
-		Schedule:   &fakeSchedule{windowsBySite: map[string][]order.CPTWindow{}}, // no site-1 entry
-		Capability: &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 2 * time.Hour}},
-		Fallback:   order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:     "site-1",
+		Schedule:      &fakeSchedule{windowsBySite: map[string][]order.CPTWindow{}}, // no site-1 entry
+		Capability:    &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 2 * time.Hour}},
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 
 	got, ok := policy.Promise(now, o)
@@ -153,9 +153,9 @@ func TestPromisePolicy_FallsBackWhenCycleTimeUnknownForPath(t *testing.T) {
 			"site-1": {{CptId: "sp1-1800", CutoffAt: now.Add(6 * time.Hour), EligiblePathIds: []string{"pick"}}},
 		}},
 		// "pick" is not in cycleTimes -> unknown.
-		Capability: &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{}},
-		Fallback:   order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:     "site-1",
+		Capability:    &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{}},
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 
 	got, ok := policy.Promise(now, o)
@@ -177,9 +177,9 @@ func TestPromisePolicy_FallsBackWhenNoWindowFitsInHorizon(t *testing.T) {
 		Schedule: &fakeSchedule{windowsBySite: map[string][]order.CPTWindow{
 			"site-1": {{CptId: "sp1-1800", CutoffAt: now.Add(1 * time.Hour), EligiblePathIds: []string{"pick"}}},
 		}},
-		Capability: &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 3 * time.Hour}},
-		Fallback:   order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:     "site-1",
+		Capability:    &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 3 * time.Hour}},
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 
 	got, ok := policy.Promise(now, o)
@@ -200,9 +200,9 @@ func TestPromisePolicy_FallsBackWhenPathNotEligibleForWindow(t *testing.T) {
 			// The window is only eligible for "singles", not "pick".
 			"site-1": {{CptId: "sp1-1800", CutoffAt: now.Add(6 * time.Hour), EligiblePathIds: []string{"singles"}}},
 		}},
-		Capability: &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 1 * time.Hour}},
-		Fallback:   order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:     "site-1",
+		Capability:    &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 1 * time.Hour}},
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 
 	got, ok := policy.Promise(now, o)
@@ -234,8 +234,8 @@ func TestPromisePolicy_MultipleLinesDifferentPaths_SameWindowGoverns(t *testing.
 			"pick":    3 * time.Hour,
 			"singles": 1 * time.Hour,
 		}},
-		Fallback: order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:   "site-1",
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 
 	got, ok := policy.Promise(now, o)
@@ -267,8 +267,8 @@ func TestPromisePolicy_MultipleLines_OneNeverFits_FallsBack(t *testing.T) {
 			"pick":     1 * time.Hour,
 			"oversize": 1 * time.Hour,
 		}},
-		Fallback: order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:   "site-1",
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 
 	got, ok := policy.Promise(now, o)
@@ -291,8 +291,8 @@ func TestPromisePolicy_CapacityUnknown_DoesNotBlockCapabilityBasis(t *testing.T)
 		Capability: &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 1 * time.Hour}},
 		// No Capacity port wired at all (nil) -- condition (c) always
 		// passes per ADR 0014, since today capacity is always unknown.
-		Fallback: order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:   "site-1",
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 
 	got, ok := policy.Promise(now, o)
@@ -326,8 +326,8 @@ func TestPromisePolicy_CapacityKnownAndInsufficient_FallsBackFromThatWindow(t *t
 				capacityKey("pick", "late"):  100,
 			},
 		},
-		Fallback: order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:   "site-1",
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 
 	got, ok := policy.Promise(now, o)
@@ -362,8 +362,8 @@ func TestPromisePolicy_CapacityExactlyCoversQuantity_StillUsesThatWindow(t *test
 				capacityKey("pick", "exact"): 50, // exactly the line quantity
 			},
 		},
-		Fallback: order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:   "site-1",
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 
 	got, ok := policy.Promise(now, o)
@@ -439,11 +439,11 @@ func TestPromisePolicy_HorizonBoundsNextCutoffsQuery(t *testing.T) {
 				"site-1": {{CptId: "sp1-1800", CutoffAt: now.Add(6 * time.Hour), EligiblePathIds: []string{"pick"}}},
 			}}}
 			policy := order.PromisePolicy{
-				Schedule:   schedule,
-				Capability: &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 1 * time.Hour}},
-				Fallback:   order.NewLeadTimePolicy(24*time.Hour, nil),
-				SiteId:     "site-1",
-				Horizon:    tt.horizon,
+				Schedule:      schedule,
+				Capability:    &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 1 * time.Hour}},
+				Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+				DefaultSiteId: "site-1",
+				Horizon:       tt.horizon,
 			}
 
 			if _, ok := policy.Promise(now, o); !ok {
@@ -473,10 +473,10 @@ func TestPromisePolicy_HorizonChangesTheAnswer(t *testing.T) {
 		{CptId: "fits", CutoffAt: now.Add(8 * time.Hour), EligiblePathIds: []string{"pick"}},
 	}
 	base := order.PromisePolicy{
-		Schedule:   &fakeSchedule{windowsBySite: map[string][]order.CPTWindow{"site-1": windows}},
-		Capability: &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 3 * time.Hour}},
-		Fallback:   order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:     "site-1",
+		Schedule:      &fakeSchedule{windowsBySite: map[string][]order.CPTWindow{"site-1": windows}},
+		Capability:    &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 3 * time.Hour}},
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 
 	short := base

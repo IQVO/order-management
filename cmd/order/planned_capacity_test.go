@@ -72,7 +72,7 @@ func TestPlannedCapacityAttach_WiresTheServer(t *testing.T) {
 
 	server := &inboundhttp.Server{}
 	pc.attach(server, memory.NewFixedClock(time.Date(2026, 10, 4, 21, 15, 30, 0, time.UTC)))
-	if server.CapacityConstraints == nil || server.CapacityConstraints.SiteID != "SIM1" {
+	if server.CapacityConstraints == nil || server.CapacityConstraints.DefaultSiteID != "SIM1" {
 		t.Fatalf("CapacityConstraints = %+v, want site SIM1", server.CapacityConstraints)
 	}
 	if server.PlannedCapacity == nil {
