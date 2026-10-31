@@ -262,7 +262,7 @@ func (s *Server) orderResponse(ctx context.Context, o *order.Order) orderRespons
 			Shortage: w.Shortage, BottleneckStep: w.BottleneckStep,
 		}
 	}
-	resp.CapacityConstraint = &capacityConstraintResponse{Constrained: true, Site: s.CapacityConstraints.SiteID, Windows: brief}
+	resp.CapacityConstraint = &capacityConstraintResponse{Constrained: true, Site: s.CapacityConstraints.SiteFor(o), Windows: brief}
 	return resp
 }
 

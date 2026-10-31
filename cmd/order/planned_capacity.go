@@ -27,9 +27,9 @@ const (
 	// behaves exactly as before. There is deliberately NO default group, so
 	// a locally run process can never join a live cluster's group by accident.
 	plannedCapacityGroupEnv = "PLANNED_CAPACITY_CONSUMER_GROUP"
-	// plannedCapacitySiteEnv names the planning `location` an order's promise
-	// is matched against. Unset falls back to DEFAULT_SITE_ID, i.e. the site
-	// the promise itself is computed for.
+	// plannedCapacitySiteEnv names the planning `location` an order WITHOUT
+	// a fulfillmentSiteId is matched against; an order that carries one is
+	// matched on its own site (ADR 0047). Unset falls back to DEFAULT_SITE_ID.
 	plannedCapacitySiteEnv = "PLANNED_CAPACITY_SITE_ID"
 )
 
@@ -77,7 +77,7 @@ func buildPlannedCapacity(pool *pgxpool.Pool, logger *slog.Logger) *plannedCapac
 // attach exposes the read model on the inbound HTTP server: the
 // order-response annotation and GET /planned-capacity.
 func (pc *plannedCapacity) attach(server *inboundhttp.Server, clock ports.Clock) {
-	server.CapacityConstraints = &usecases.OrderCapacityConstraints{Windows: pc.windows, Clock: clock, SiteID: pc.siteID}
+	server.CapacityConstraints = &usecases.OrderCapacityConstraints{Windows: pc.windows, Clock: clock, DefaultSiteID: pc.siteID}
 	server.PlannedCapacity = &usecases.GetPlannedCapacity{Windows: pc.windows, Clock: clock}
 }
 

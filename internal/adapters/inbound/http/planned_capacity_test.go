@@ -59,7 +59,7 @@ func newPlannedCapacityEnv(t *testing.T, repo ports.PlannedCapacityRepo) *testEn
 		CancelOrder:         &usecases.CancelOrder{Orders: orders, Inventory: inventory, Events: publisher, Clock: clock},
 		GetOrder:            &usecases.GetOrder{Orders: orders},
 		ReleaseHeld:         &usecases.ReleaseHeldOrder{Orders: orders, Inventory: inventory, Events: publisher, Clock: clock, Promise: promise},
-		CapacityConstraints: &usecases.OrderCapacityConstraints{Windows: repo, Clock: clock, SiteID: "SIM1"},
+		CapacityConstraints: &usecases.OrderCapacityConstraints{Windows: repo, Clock: clock, DefaultSiteID: "SIM1"},
 		PlannedCapacity:     &usecases.GetPlannedCapacity{Windows: repo, Clock: clock},
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

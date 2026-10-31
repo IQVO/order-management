@@ -29,11 +29,10 @@ import (
 	"github.com/claudioed/order-management/internal/consumerdeath"
 )
 
-// DefaultSiteId is used when DEFAULT_SITE_ID is unset. ADR 0014 step A
-// does not yet model which site an order ships from (a known
-// simplification for this phase — see order.PromisePolicy's doc
-// comment); every promise in this phase is computed against one
-// configured site.
+// DefaultSiteId is used when DEFAULT_SITE_ID is unset. DEFAULT_SITE_ID is
+// the site an order is promised against when it carries no caller-assigned
+// fulfillmentSiteId (ADR 0044); an order that carries one is promised
+// against its own site (ADR 0047, see order.PromiseSiteFor).
 const DefaultSiteId = "site-1"
 
 func main() {

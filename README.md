@@ -228,7 +228,7 @@ Release no longer calls any Supplier synchronously — see
 | `DATABASE_URL` | *(unset)* | Postgres DSN. Unset ⇒ in-memory adapters (and no `Idempotency-Key` middleware, no outbox, no sweeper). |
 | `MIGRATIONS_DATABASE_URL` | `DATABASE_URL` | Direct (non-PgBouncer) DSN used only by the migration step (ADR 0029). |
 | `MIGRATIONS_PATH` | `migrations` | golang-migrate source directory. |
-| `DEFAULT_SITE_ID` | `site-1` | Site whose CPT schedule the promise uses (ADR 0014). |
+| `DEFAULT_SITE_ID` | `site-1` | Site whose CPT schedule the promise uses for an order without a `fulfillmentSiteId` (ADR 0014); an order that carries one is promised at its own site (ADR 0047). |
 | `INVENTORY_STORAGE_MODE` | `permissive` | `http` or `permissive`. |
 | `INVENTORY_STORAGE_BASE_URL` | *(unset)* | Required when mode is `http` (reservations only). |
 | `PRODUCT_CLASSIFICATION_MODE` | `permissive` | `kafka` or `permissive` — where path-selection eligibility gets a SKU's handling tags (ADR 0016/0036). `kafka` keeps a local copy of product-master's `ProductClassified` events; `permissive` treats every SKU as unclassified. Both fail open for an unknown SKU. `http` was removed and **fails boot** (ADR 0036). |
@@ -245,7 +245,7 @@ Release no longer calls any Supplier synchronously — see
 | `RELEASE_CONFIRMATION_TIMEOUT` | `15m` | A `PENDING` line older than this becomes `UNCONFIRMED` in the housekeeping sweep and raises the analytics-only `OrderReleaseUnconfirmed`; `0` disables the sweep (ADR 0043). |
 | `RELEASE_CONFIRMATION_RETENTION` | `168h` | Age (by `confirmed_at`) after which `CONFIRMED` rows are swept; `0` keeps them. `PENDING` and `UNCONFIRMED` rows are never swept (ADR 0043). |
 | `PLANNED_CAPACITY_CONSUMER_GROUP` | *(unset)* | Stable consumer group for warehouse-planning's capacity plans; unset ⇒ the feature is off and `GET /planned-capacity` is not registered (ADR 0031). |
-| `PLANNED_CAPACITY_SITE_ID` | `DEFAULT_SITE_ID` | Site whose planned-capacity windows annotate orders (ADR 0031). |
+| `PLANNED_CAPACITY_SITE_ID` | `DEFAULT_SITE_ID` | Site whose planned-capacity windows annotate an order without a `fulfillmentSiteId` (ADR 0031); an order that carries one is matched on its own site (ADR 0047). |
 | `DEMAND_PROJECTION_SITE_ID` | *(unset)* | Static demand-site scope for the additive, PII-free `SiteSkuDemandChanged` integration event (keyed `<order_id>/line/<line_no>`, assignment_version `static-site-v1`); unset ⇒ the projection is off for orders without a caller-assigned `fulfillmentSiteId` (ADR 0035); an order that carries one projects to its own site, `order-site-v1` (ADR 0044). |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:5181` | Console / MFE origins (ADR 0007). |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OTLP/gRPC endpoint for metrics and traces (ADR 0009); there is no `/metrics` scrape route. |
@@ -826,6 +826,7 @@ GitHub Pages on every push to `main` that touches `docs/**`, publishing to
 42. [0042 — Path selection considers only paths whose intake admits customer orders](docs/docs/adr/0042-path-selection-honours-process-path-intake.md)
 43. [0043 — Confirm an order-line release from WorkUnitCreated, and flag OrderReleaseUnconfirmed](docs/docs/adr/0043-release-confirmation-from-workunitcreated.md) (amends 0005's no-confirmation-loop decision)
 46. [0046 — A2A inbound adapter (read-only third driving adapter)](docs/docs/adr/0046-a2a-inbound-adapter.md)
+47. [0047 — An order is promised against its own fulfillment site](docs/docs/adr/0047-promise-at-the-orders-own-fulfillment-site.md) (amends 0044, 0014 step A and 0031 §5)
 
 ## License
 

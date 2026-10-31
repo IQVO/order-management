@@ -152,6 +152,7 @@ const sidebars: SidebarsConfig = {
         'adr/0044-caller-assigned-fulfillment-site-on-the-order',
         'adr/0045-a-dead-consumer-takes-the-process-down',
         'adr/0046-a2a-inbound-adapter',
+        'adr/0047-promise-at-the-orders-own-fulfillment-site',
       ],
     },
   ],

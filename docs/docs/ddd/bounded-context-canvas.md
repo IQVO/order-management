@@ -244,9 +244,11 @@ Top terms:
   this context keeps a version-guarded local copy of its
   `ProductClassified` events and never calls it. The copy is eventually
   consistent, so a SKU it has not seen yet fails open (ADR 0036).
-- One site per deployment: the promise uses `DEFAULT_SITE_ID`, and the
-  planned-capacity annotation uses `PLANNED_CAPACITY_SITE_ID` (defaulting to
-  the same value).
+- One deployment serves many sites by the order's own `fulfillmentSiteId`
+  (ADR 0047): the promise reads that site's CPT schedule and the
+  planned-capacity annotation matches it. An order without one uses
+  `DEFAULT_SITE_ID` (promise) and `PLANNED_CAPACITY_SITE_ID` (annotation,
+  defaulting to the same value). Path capacity and cycle time stay per path.
 - wes-work-planning accepts every released line. There is no dedicated reply
   event; by default nothing confirms it, and with
   `RELEASE_CONFIRMATION_MODE=kafka` (ADR 0043, off by default) its

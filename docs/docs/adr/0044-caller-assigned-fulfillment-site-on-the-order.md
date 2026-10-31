@@ -16,6 +16,11 @@ Accepted — implemented by the change that introduces this record. **Amends**
 `SiteSkuDemandChanged`) and lifts the deferral recorded in
 [ADR 0031](/docs/adr/0031-consume-warehouse-planning-capacity-plans) ("a fulfillment
 site on the order"). The owner took the decision; this record writes it down.
+**Amended by [ADR 0047](./0047-promise-at-the-orders-own-fulfillment-site.md):** the
+site is no longer read by the demand projection only — the CPT promise (intake and
+every re-promise) and the planned-capacity annotation use it too, falling back to
+`DEFAULT_SITE_ID` / `PLANNED_CAPACITY_SITE_ID`. The "assigned, never inferred" rule
+below is unchanged.
 
 ## Context
 

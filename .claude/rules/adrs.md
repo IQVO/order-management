@@ -387,6 +387,19 @@ Other ADR-adjacent facts worth knowing without opening every file:
   sent before this deploy and retried after it gets a 422, bounded by that
   key's lifetime; recover by retrying the allocation (next attempt number).
 
+- **0047 — ACCEPTED: an order is promised against its own fulfillment site.**
+  Amends 0044, 0014 step A and 0031 §5. `order.PromiseSiteFor(o, default)` =
+  the order's caller-assigned `fulfillmentSiteId` (0044), else the default.
+  `PromisePolicy.DefaultSiteId` (was `SiteId`; wired from `DEFAULT_SITE_ID`) is
+  the fallback only; `Promise`/`PromiseGroups`/`FeasibleBy` resolve the site
+  from the order on every call, so intake, retry, held release and every
+  re-promise read that site's CPT schedule. `OrderCapacityConstraints` matches
+  the same site (`DefaultSiteID` = `PLANNED_CAPACITY_SITE_ID`), and
+  `capacityConstraint.site` names it. Path capacity (`(pathId, cutoffAt)`)
+  and cycle time stay site-less: their upstream events carry no site. A site
+  with no schedule falls back to LeadTime, never to another site's windows.
+  Frozen events, env vars and chart values unchanged.
+
 - Gateway API `HTTPRoute` chart template exists (`charts/order-management`
   `values.yaml` `gatewayApi:` block, `enabled: false` by default) —
   it is not itself the subject of a numbered ADR in this list; check the

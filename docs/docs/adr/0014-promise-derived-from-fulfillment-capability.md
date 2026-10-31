@@ -10,7 +10,10 @@ description: "ADR 0014 — replace now+leadTime with a PromisePolicy that select
 
 ## Status
 
-Accepted. Companion to process-path-management ADR 0010 (fulfillment
+Accepted. **Step A's single configured site is amended by
+[ADR 0047](./0047-promise-at-the-orders-own-fulfillment-site.md):** an order carrying a
+caller-assigned `fulfillmentSiteId` (ADR 0044) is promised against that site's CPT
+schedule; `DEFAULT_SITE_ID` is the fallback for an order without one. Companion to process-path-management ADR 0010 (fulfillment
 capability contract), accepted together, which supplies the data this
 decision consumes. Depends on a future wes-work-planning ADR for
 remaining capacity per CPT; this ADR is written so it degrades

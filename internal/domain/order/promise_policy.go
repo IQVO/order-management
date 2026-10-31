@@ -60,19 +60,40 @@ type CapacitySource interface {
 // trigger, never a panic) except Fallback, which should always be a real
 // LeadTimePolicy.
 //
-// SiteId is a known simplification for this phase: order-management does
-// not yet model which site an order ships from (ADR 0014 leaves that to
-// a future phase). Every promise in this phase is computed against one
-// configured site — see cmd/order/main.go's DEFAULT_SITE_ID wiring.
+// The site whose CPT schedule a promise is computed against is resolved
+// PER ORDER, on every call (ADR 0047): the order's own caller-assigned
+// FulfillmentSiteID (ADR 0044) when it carries one, else DefaultSiteId —
+// the deployment's DEFAULT_SITE_ID, i.e. exactly the single site every
+// promise used before ADR 0047. The policy never infers, looks up or
+// stores a site of its own: see PromiseSiteFor.
 type PromisePolicy struct {
 	Schedule   ScheduleSource
 	Capability CapabilitySource
 	Capacity   CapacitySource
 	Fallback   LeadTimePolicy
-	SiteId     string
+	// DefaultSiteId is the site promised against for an order that
+	// carries no FulfillmentSiteID (cmd/order's DEFAULT_SITE_ID).
+	DefaultSiteId string
 	// Horizon bounds how many upcoming CPT windows are queried per
 	// Promise call. Zero means DefaultCPTHorizon.
 	Horizon int
+}
+
+// PromiseSiteFor returns the site o is promised against (ADR 0047): its
+// caller-assigned FulfillmentSiteID when set, else defaultSite. It is the
+// one place this rule lives; the promise policy and the planned-capacity
+// annotation both go through it so an order's promise and its capacity
+// annotation can never disagree on the site.
+func PromiseSiteFor(o *Order, defaultSite string) string {
+	if s := o.FulfillmentSiteID(); s != nil {
+		return s.String()
+	}
+	return defaultSite
+}
+
+// siteFor is PromiseSiteFor over this policy's DefaultSiteId.
+func (p PromisePolicy) siteFor(o *Order) string {
+	return PromiseSiteFor(o, p.DefaultSiteId)
 }
 
 func (p PromisePolicy) horizon() int {
@@ -105,7 +126,7 @@ func (p PromisePolicy) Promise(now time.Time, o *Order) (Promise, bool) {
 		return p.fallback(now, o)
 	}
 
-	windows, known := p.Schedule.NextCutoffs(p.SiteId, now, p.horizon())
+	windows, known := p.Schedule.NextCutoffs(p.siteFor(o), now, p.horizon())
 	if !known || len(windows) == 0 {
 		return p.fallback(now, o)
 	}
@@ -166,7 +187,7 @@ func (p PromisePolicy) FeasibleBy(now time.Time, o *Order, deadline time.Time) (
 		return Promise{}, false
 	}
 
-	windows, known := p.Schedule.NextCutoffs(p.SiteId, now, p.horizon())
+	windows, known := p.Schedule.NextCutoffs(p.siteFor(o), now, p.horizon())
 	if !known || len(windows) == 0 {
 		return Promise{}, false
 	}
@@ -284,7 +305,7 @@ func (p PromisePolicy) promiseForLines(now time.Time, o *Order, lines []*OrderLi
 		return p.fallbackForLines(now, o, lines)
 	}
 
-	windows, known := p.Schedule.NextCutoffs(p.SiteId, now, p.horizon())
+	windows, known := p.Schedule.NextCutoffs(p.siteFor(o), now, p.horizon())
 	if !known || len(windows) == 0 {
 		return p.fallbackForLines(now, o, lines)
 	}
