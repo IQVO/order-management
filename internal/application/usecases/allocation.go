@@ -754,3 +754,4 @@ func reconfirmBeforeRelease(ctx context.Context, deps allocationDeps, o *order.O
 	}
 	return true, publishOrderAllocationOutcome(ctx, deps.Events, deps.Clock, o, *outcome, nil)
 }
+// red-proof: touching an oversized file must fail the file-length job
