@@ -5,5 +5,8 @@
   "description": "Pinned devDependency for the api-lint CI job (Spectral) so `npm ci` is used instead of an unpinned global `npm install -g`.",
   "devDependencies": {
     "@stoplight/spectral-cli": "6.16.3"
+  },
+  "overrides": {
+    "fast-uri": "^3.1.9"
   }
 }
