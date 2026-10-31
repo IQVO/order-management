@@ -18,10 +18,10 @@ import (
 // feasibleByPolicy builds a policy with one site and one window set.
 func feasibleByPolicy(windows []order.CPTWindow, cycleTimes map[shared.PathId]time.Duration) order.PromisePolicy {
 	return order.PromisePolicy{
-		Schedule:   &fakeSchedule{windowsBySite: map[string][]order.CPTWindow{"site-1": windows}},
-		Capability: &fakeCapability{cycleTimes: cycleTimes},
-		Fallback:   order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:     "site-1",
+		Schedule:      &fakeSchedule{windowsBySite: map[string][]order.CPTWindow{"site-1": windows}},
+		Capability:    &fakeCapability{cycleTimes: cycleTimes},
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 }
 
@@ -228,9 +228,9 @@ func TestFeasibleBy_NilSchedule_IsNotFeasible_NeverFallsBack(t *testing.T) {
 	o := newAllocatedOrder(t, pq("pick", 2))
 
 	policy := order.PromisePolicy{
-		Capability: &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 2 * time.Hour}},
-		Fallback:   order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:     "site-1",
+		Capability:    &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 2 * time.Hour}},
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 
 	// Deadline is 48h out — a LeadTimePolicy fallback would comfortably
@@ -248,8 +248,8 @@ func TestFeasibleBy_NilCapability_IsNotFeasible_NeverFallsBack(t *testing.T) {
 		Schedule: &fakeSchedule{windowsBySite: map[string][]order.CPTWindow{
 			"site-1": {{CptId: "sp1-1800", CutoffAt: now.Add(6 * time.Hour), EligiblePathIds: []string{"pick"}}},
 		}},
-		Fallback: order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:   "site-1",
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 
 	if _, ok := policy.FeasibleBy(now, o, now.Add(48*time.Hour)); ok {
@@ -264,10 +264,10 @@ func TestFeasibleBy_ColdCache_IsNotFeasible_NeverFallsBack(t *testing.T) {
 	// No entry for site-1 — the documented cold-start case that "will
 	// look like a bug the first time someone sees it".
 	policy := order.PromisePolicy{
-		Schedule:   &fakeSchedule{windowsBySite: map[string][]order.CPTWindow{}},
-		Capability: &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 2 * time.Hour}},
-		Fallback:   order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:     "site-1",
+		Schedule:      &fakeSchedule{windowsBySite: map[string][]order.CPTWindow{}},
+		Capability:    &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 2 * time.Hour}},
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 
 	if _, ok := policy.FeasibleBy(now, o, now.Add(48*time.Hour)); ok {

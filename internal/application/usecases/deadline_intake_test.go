@@ -45,10 +45,10 @@ func deadlineFixture(t *testing.T, windows []order.CPTWindow) *fixture {
 	t.Helper()
 	f := newFixture()
 	f.promise = order.PromisePolicy{
-		Schedule:   &deadlineSchedule{windows: windows},
-		Capability: &deadlineCapability{cycleTimes: map[shared.PathId]time.Duration{"singles": time.Hour}},
-		Fallback:   order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:     "site-1",
+		Schedule:      &deadlineSchedule{windows: windows},
+		Capability:    &deadlineCapability{cycleTimes: map[shared.PathId]time.Duration{"singles": time.Hour}},
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 	return f
 }

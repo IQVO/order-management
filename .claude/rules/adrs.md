@@ -173,7 +173,7 @@ paths:
 20. **0020 — ACCEPTED: network-originated demand — release-on-allocation,
     deadline feasibility, and the `Network` promise basis.** Companion to
     `network-fulfillment` ADR 0001 (the bounded context that speaks
-    a major e-commerce retailer's Selling Partner API and owns the 24h acknowledgement clock);
+    a major e-commerce retailer's vendor platform API and owns the 24h acknowledgement clock);
     neither is meaningful alone. Three additive capabilities here: (a) an
     optional `releaseOnAllocation` intake flag, DEFAULT `true` so every
     existing caller is byte-identical — `false` stops the ADR-0005 folded
@@ -386,6 +386,19 @@ Other ADR-adjacent facts worth knowing without opening every file:
   body for idempotency, so a retry of the same (order, line, attempt) key first
   sent before this deploy and retried after it gets a 422, bounded by that
   key's lifetime; recover by retrying the allocation (next attempt number).
+
+- **0047 — ACCEPTED: an order is promised against its own fulfillment site.**
+  Amends 0044, 0014 step A and 0031 §5. `order.PromiseSiteFor(o, default)` =
+  the order's caller-assigned `fulfillmentSiteId` (0044), else the default.
+  `PromisePolicy.DefaultSiteId` (was `SiteId`; wired from `DEFAULT_SITE_ID`) is
+  the fallback only; `Promise`/`PromiseGroups`/`FeasibleBy` resolve the site
+  from the order on every call, so intake, retry, held release and every
+  re-promise read that site's CPT schedule. `OrderCapacityConstraints` matches
+  the same site (`DefaultSiteID` = `PLANNED_CAPACITY_SITE_ID`), and
+  `capacityConstraint.site` names it. Path capacity (`(pathId, cutoffAt)`)
+  and cycle time stay site-less: their upstream events carry no site. A site
+  with no schedule falls back to LeadTime, never to another site's windows.
+  Frozen events, env vars and chart values unchanged.
 
 - Gateway API `HTTPRoute` chart template exists (`charts/order-management`
   `values.yaml` `gatewayApi:` block, `enabled: false` by default) —

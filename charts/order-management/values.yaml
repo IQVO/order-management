@@ -270,8 +270,9 @@ plannedCapacity:
   # default in the binary, so a locally run process cannot join this group.
   consumerGroup: ""
   # PLANNED_CAPACITY_SITE_ID: the warehouse-planning `location` (site/building
-  # code, e.g. SIM1) an order's promise is matched against. Empty falls back
-  # to the binary's DEFAULT_SITE_ID, i.e. the site the promise is computed for.
+  # code, e.g. SIM1) an order WITHOUT a fulfillmentSiteId is matched against;
+  # an order that carries one is matched on its own site (ADR 0047). Empty
+  # falls back to the binary's DEFAULT_SITE_ID.
   siteId: ""
 
 # Site/SKU demand projection (ADR 0035). When siteId is set, every order
@@ -520,6 +521,51 @@ mcp:
   route:
     enabled: false
     path: "/api/mcp/order-management"
+    parentRefs:
+      - name: ""
+        namespace: ""
+        sectionName: "http"
+  extraEnv: []
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+# --- A2A agent (ADR-0046) ---
+# The Agent2Agent agent (cmd/a2a): a third driving adapter over the same GetOrder
+# read use case and analytics report store as the MCP server. READ-ONLY by the
+# A2A write gate (order-management's MCP surface offers no write): skills
+# order_status and promise_health. A2A carries delegation only; facts still leave
+# as CloudEvents on Kafka from the api Deployment, which is why this agent has no
+# KAFKA_BROKERS / EVENT_PUBLISHER. Off by default; warehouse-infra turns it on.
+#
+# Requires database.url|existingSecret AND analytics.enabled=true: cmd/a2a has no
+# in-memory mode and no empty-analytics mode, and the render fails otherwise.
+a2a:
+  enabled: false
+  replicaCount: 1
+  # A2A_ADDR the binary listens on; keep in sync with service.targetPort.
+  # (8090 is MCP, 8091 the projector admin port, 8092 the reports API.)
+  httpAddr: ":8093"
+  # Absolute URL advertised on the Agent Card. Empty defaults to this release's
+  # in-cluster Service DNS (http://<release>-a2a.<ns>.svc.cluster.local:8093/);
+  # warehouse-infra can override it with the Kong path when the agent must be
+  # reachable off-cluster.
+  agentUrl: ""
+  service:
+    type: ClusterIP
+    port: 8093
+    targetPort: 8093
+  # Kong exposure of the A2A agent (a2a-route.yaml): host path /api/a2a/<context>
+  # rewritten to / (JSON-RPC root; the well-known agent card stays reachable
+  # under the same prefix). Off by default; warehouse-infra turns it on with the
+  # real parentRefs and path.
+  route:
+    enabled: false
+    path: "/api/a2a/order-management"
     parentRefs:
       - name: ""
         namespace: ""

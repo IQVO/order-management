@@ -155,6 +155,7 @@ type world struct {
 	receive *usecases.ReceiveOrder
 	retry   *usecases.RetryAllocation
 	release *usecases.ReleaseHeldOrder
+	cancel  *usecases.CancelOrder
 }
 
 func (w *world) reset() {
@@ -174,17 +175,18 @@ func (w *world) reset() {
 	w.receive = &usecases.ReceiveOrder{Orders: orders, Events: w.publisher, Clock: clock, Inventory: w.inventory, Promise: promise}
 	w.retry = &usecases.RetryAllocation{Orders: orders, Inventory: w.inventory, Events: w.publisher, Clock: clock, Promise: promise}
 	w.release = &usecases.ReleaseHeldOrder{Orders: orders, Inventory: w.inventory, Events: w.publisher, Clock: clock, Promise: promise}
+	w.cancel = &usecases.CancelOrder{Orders: orders, Inventory: w.inventory, Events: w.publisher, Clock: clock}
 
 	server := &inboundhttp.Server{
 		ReceiveOrder:    w.receive,
 		RetryAllocation: w.retry,
 		ReleaseHeld:     w.release,
-		CancelOrder:     &usecases.CancelOrder{Orders: orders, Inventory: w.inventory, Events: w.publisher, Clock: clock},
+		CancelOrder:     w.cancel,
 		GetOrder:        &usecases.GetOrder{Orders: orders},
 		// Planned capacity (ADR 0031) is wired for every scenario: with no
 		// window published it is invisible, which is exactly what the
 		// pre-existing scenarios (untouched) keep proving.
-		CapacityConstraints: &usecases.OrderCapacityConstraints{Windows: w.planned, Clock: clock, SiteID: "SIM1"},
+		CapacityConstraints: &usecases.OrderCapacityConstraints{Windows: w.planned, Clock: clock, DefaultSiteID: "SIM1"},
 		PlannedCapacity:     &usecases.GetPlannedCapacity{Windows: w.planned, Clock: clock},
 	}
 
@@ -668,6 +670,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 
 	registerPlannedCapacitySteps(sc, w)
 	registerWave2Steps(sc, w)
+	registerFulfillmentSiteSteps(sc, w)
 }
 
 // TestFeatures runs the Gherkin acceptance suite under features/.

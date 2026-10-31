@@ -19,6 +19,7 @@ import (
 	"github.com/claudioed/order-management/internal/adapters/outbound/telemetry"
 	"github.com/claudioed/order-management/internal/application/ports"
 	"github.com/claudioed/order-management/internal/application/usecases"
+	"github.com/claudioed/order-management/internal/consumerdeath"
 )
 
 // Environment variables of the release-confirmation loop (ADR 0043).
@@ -178,7 +179,7 @@ func buildFlagUnconfirmed(pool *pgxpool.Pool, logger *slog.Logger) func(context.
 // in kafka mode and returns a stop function that cancels it and waits
 // (bounded) for the loop to return, so the in-flight message's offset commit
 // is not abandoned. With the loop off it starts nothing and returns a no-op.
-func startReleaseConfirmationConsumer(cfg releaseConfirmationConfig, pool *pgxpool.Pool, clock ports.Clock, logger *slog.Logger) (stop func()) {
+func startReleaseConfirmationConsumer(cfg releaseConfirmationConfig, pool *pgxpool.Pool, clock ports.Clock, logger *slog.Logger, deaths *consumerdeath.Deaths) (stop func()) {
 	if !cfg.enabled() || pool == nil {
 		return func() {}
 	}
@@ -198,9 +199,7 @@ func startReleaseConfirmationConsumer(cfg releaseConfirmationConfig, pool *pgxpo
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if err := consumer.Run(ctx); err != nil {
-			logger.Error("release confirmation consumer stopped", "error", err)
-		}
+		deaths.Watch(ctx, "release confirmation consumer", logger, consumer.Run)
 	}()
 	return func() {
 		cancel()

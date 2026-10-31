@@ -16,6 +16,7 @@ import (
 	"github.com/claudioed/order-management/internal/adapters/outbound/productclassificationcopy"
 	"github.com/claudioed/order-management/internal/application/ports"
 	"github.com/claudioed/order-management/internal/application/usecases"
+	"github.com/claudioed/order-management/internal/consumerdeath"
 )
 
 // Environment variables of the product-classification local copy (ADR 0036).
@@ -138,7 +139,7 @@ func buildProductClassification(cfg classificationConfig, pool *pgxpool.Pool, lo
 // stop function that cancels it and waits (bounded) for the loop to return,
 // so the in-flight message's offset commit is not abandoned. In permissive
 // mode it starts nothing and returns a no-op.
-func (pc *productClassification) startConsumer(logger *slog.Logger) (stop func()) {
+func (pc *productClassification) startConsumer(logger *slog.Logger, deaths *consumerdeath.Deaths) (stop func()) {
 	if pc.cfg.mode != classificationModeKafka {
 		return func() {}
 	}
@@ -151,9 +152,7 @@ func (pc *productClassification) startConsumer(logger *slog.Logger) (stop func()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if err := consumer.Run(ctx); err != nil {
-			logger.Error("product classification consumer stopped", "error", err)
-		}
+		deaths.Watch(ctx, "product classification consumer", logger, consumer.Run)
 	}()
 	return func() {
 		cancel()

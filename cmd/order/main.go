@@ -26,13 +26,13 @@ import (
 	inboundhttp "github.com/claudioed/order-management/internal/adapters/inbound/http"
 	"github.com/claudioed/order-management/internal/adapters/outbound/memory"
 	"github.com/claudioed/order-management/internal/adapters/outbound/telemetry"
+	"github.com/claudioed/order-management/internal/consumerdeath"
 )
 
-// DefaultSiteId is used when DEFAULT_SITE_ID is unset. ADR 0014 step A
-// does not yet model which site an order ships from (a known
-// simplification for this phase — see order.PromisePolicy's doc
-// comment); every promise in this phase is computed against one
-// configured site.
+// DefaultSiteId is used when DEFAULT_SITE_ID is unset. DEFAULT_SITE_ID is
+// the site an order is promised against when it carries no caller-assigned
+// fulfillmentSiteId (ADR 0044); an order that carries one is promised
+// against its own site (ADR 0047, see order.PromiseSiteFor).
 const DefaultSiteId = "site-1"
 
 func main() {
@@ -47,6 +47,10 @@ func run() error {
 	slog.SetDefault(logger)
 
 	ctx := context.Background()
+
+	// ADR 0045: every Kafka consumer goroutine reports an unexpected stop
+	// here; serveAndShutdown ends the process on the first.
+	deaths := consumerdeath.New()
 
 	serviceName, shutdownTelemetry, err := setupServiceTelemetry(ctx, logger)
 	if err != nil {
@@ -90,7 +94,7 @@ func run() error {
 	inventory := wireInventoryClient(logger)
 	classification := buildProductClassification(classificationCfg, dbPool, logger)
 
-	catalogue, cptSchedule, capacity, closeCatalogue, err := wireCatalogue(ctx, logger)
+	catalogue, cptSchedule, capacity, closeCatalogue, err := wireCatalogue(ctx, logger, deaths)
 	if err != nil {
 		return err
 	}
@@ -104,18 +108,18 @@ func run() error {
 	// ADR 0036: in kafka mode the local classification copy's consumer
 	// runs for the process lifetime; its stop runs after the HTTP drain
 	// (serveAndShutdown returns first) and before the pool closes.
-	defer classification.startConsumer(logger)()
+	defer classification.startConsumer(logger, deaths)()
 
 	// ADR 0043: with RELEASE_CONFIRMATION_MODE=kafka the consumer of
 	// wes-work-planning's WorkUnitCreated runs for the process lifetime; off
 	// (the default) starts nothing.
-	defer startReleaseConfirmationConsumer(releaseConfirmationCfg, dbPool, clock, logger)()
+	defer startReleaseConfirmationConsumer(releaseConfirmationCfg, dbPool, clock, logger, deaths)()
 
 	// ADR 0031 planned capacity: a nil value (consumer-group env unset)
 	// leaves everything below exactly as before.
 	if pc := buildPlannedCapacity(dbPool, logger); pc != nil {
 		pc.attach(server, clock)
-		defer pc.startConsumer(logger)()
+		defer pc.startConsumer(logger, deaths)()
 	}
 
 	repromiseConsumerCtx, cancelRepromiseConsumer := context.WithCancel(context.Background())
@@ -125,7 +129,7 @@ func run() error {
 
 	httpServer := buildHTTPServer(server, serviceName, logger)
 
-	return serveAndShutdown(logger, httpAddr, httpServer, repromiseConsumer, repromiseConsumerCtx, cancelRepromiseConsumer, readiness, relay)
+	return serveAndShutdown(logger, httpAddr, httpServer, repromiseConsumer, repromiseConsumerCtx, cancelRepromiseConsumer, readiness, relay, deaths)
 }
 
 // setupServiceTelemetry wires OTel before any adapter is built, so every

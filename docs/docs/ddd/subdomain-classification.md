@@ -10,7 +10,7 @@ description: Why Order Management is a Generic-leaning-Supporting subdomain, wit
 
 `CLAUDE.md`'s own title states the classification directly: *"Order
 Management (Generic/Supporting Bounded Context — order intake, allocation,
-release)."* `amazon-fulfillment-ddd.md`'s subdomain table places the
+release)."* `fulfillment-reference-ddd.md`'s subdomain table places the
 matching capability, **Order Management / ERP interface**, in the
 **Generic** bucket — "upstream order intake; commodity integration
 surface":

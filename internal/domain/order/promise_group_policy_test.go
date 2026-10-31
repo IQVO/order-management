@@ -43,8 +43,8 @@ func TestPromiseGroups_ShipComplete_IsOneGroupIdenticalToPromise(t *testing.T) {
 			"pick":    1 * time.Hour,
 			"singles": 1 * time.Hour,
 		}},
-		Fallback: order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:   "site-1",
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 
 	wantPromise, ok := policy.Promise(now, o)
@@ -141,8 +141,8 @@ func TestPromiseGroups_PartialShipment_AllLinesShareOneCutoff(t *testing.T) {
 			"pick":    1 * time.Hour,
 			"singles": 1 * time.Hour,
 		}},
-		Fallback: order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:   "site-1",
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 
 	groups, ok := policy.PromiseGroups(now, o)
@@ -181,8 +181,8 @@ func TestPromiseGroups_PartialShipment_SplitsAcrossTwoRealCutoffs(t *testing.T) 
 			"pick":   1 * time.Hour,
 			"multis": 5 * time.Hour,
 		}},
-		Fallback: order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:   "site-1",
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 
 	groups, ok := policy.PromiseGroups(now, o)
@@ -229,7 +229,7 @@ func TestPromiseGroups_PartialShipment_MixedBasis(t *testing.T) {
 		Fallback: order.NewLeadTimePolicy(48*time.Hour, map[shared.PathId]time.Duration{
 			"oversize": 72 * time.Hour,
 		}),
-		SiteId: "site-1",
+		DefaultSiteId: "site-1",
 	}
 
 	groups, ok := policy.PromiseGroups(now, o)
@@ -335,10 +335,10 @@ func TestPromiseGroups_PartialShipment_ScheduleUnknown_FallsBackPerLine(t *testi
 	policy := order.PromisePolicy{
 		// No entry for "site-1": the schedule adapter is wired but has
 		// nothing to say — the cold-cache case at startup.
-		Schedule:   &fakeSchedule{windowsBySite: map[string][]order.CPTWindow{}},
-		Capability: &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 1 * time.Hour}},
-		Fallback:   order.NewLeadTimePolicy(12*time.Hour, nil),
-		SiteId:     "site-1",
+		Schedule:      &fakeSchedule{windowsBySite: map[string][]order.CPTWindow{}},
+		Capability:    &fakeCapability{cycleTimes: map[shared.PathId]time.Duration{"pick": 1 * time.Hour}},
+		Fallback:      order.NewLeadTimePolicy(12*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 
 	groups, ok := policy.PromiseGroups(now, o)

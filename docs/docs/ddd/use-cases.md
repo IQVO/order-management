@@ -229,8 +229,9 @@ PUBLISHED plan). No order changes and no event is raised.
 windows for one site that end after `from` (default now).
 `OrderCapacityConstraints` is called while building every order response:
 an order with a promise gets a `capacityConstraint` annotation listing the
-published shortage windows its promise overlaps, for the single configured
-site (`PLANNED_CAPACITY_SITE_ID`, defaulting to `DEFAULT_SITE_ID`). Neither
+published shortage windows its promise overlaps, at the order's own
+`fulfillmentSiteId` or, for an order without one, the configured site
+(`PLANNED_CAPACITY_SITE_ID`, defaulting to `DEFAULT_SITE_ID`; ADR 0047). Neither
 changes a promise.
 
 ## 10. ApplyProductClassification (Kafka-driven, opt-in)

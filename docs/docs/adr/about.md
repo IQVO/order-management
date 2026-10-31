@@ -103,6 +103,10 @@ Typos, broken links and formatting are of course fair game.
 | [0041](./0041-trace-context-crosses-the-outbox.md) | The W3C trace context crosses the outbox in `outbox_events.headers` (D27 reference) | Accepted |
 | [0042](./0042-path-selection-honours-process-path-intake.md) | Path selection considers only paths whose intake admits customer orders | Accepted; amends 0021 |
 | [0043](./0043-release-confirmation-from-workunitcreated.md) | Confirm an order-line release from WorkUnitCreated, and flag OrderReleaseUnconfirmed | Accepted; amends 0005's no-confirmation-loop decision |
+| [0044](./0044-caller-assigned-fulfillment-site-on-the-order.md) | An order may carry an optional, caller-assigned fulfillment site | Accepted; amends 0035 §4 and lifts 0031's deferral |
+| [0045](./0045-a-dead-consumer-takes-the-process-down.md) | A Kafka consumer that stops on its own takes the process down | Accepted |
+| [0046](./0046-a2a-inbound-adapter.md) | A2A inbound adapter (third driving adapter, read-only) | Accepted |
+| [0047](./0047-promise-at-the-orders-own-fulfillment-site.md) | An order is promised against its own fulfillment site | Accepted; amends 0044, 0014 step A and 0031 §5 |
 
 Each of these reconstructs a decision that is actually visible in this
 repository's `CLAUDE.md` and code — none is a generic placeholder.

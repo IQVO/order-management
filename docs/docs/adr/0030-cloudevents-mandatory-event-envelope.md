@@ -100,7 +100,8 @@ wes-work-planning with these exact strings.
 `SiteSkuDemandChanged` (ADR 0035) is the one type raised outside the
 `order` entity: its `subject`/Kafka key is the line-scoped
 `<order_id>/line/<line_no>`, not the bare order id, and it is emitted
-only while `DEMAND_PROJECTION_SITE_ID` is configured.
+only for an order that carries a fulfillment site (ADR 0044) or while
+`DEMAND_PROJECTION_SITE_ID` is configured.
 
 ### Types this service consumes (exact, fleet cross-service table)
 

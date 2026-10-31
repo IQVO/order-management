@@ -63,7 +63,7 @@ integration-only).
 | OrderLineReleased | `com.warehouse.wes.order-management.order.OrderLineReleased` | analytics | allocation pass, once per line released in that pass | order-projector |
 | OrderReleased | `com.warehouse.wes.order-management.order.OrderReleased` | analytics | allocation pass, when that pass leaves every line `Released` | order-projector |
 | OrderReleaseUnconfirmed | `com.warehouse.wes.order-management.order.OrderReleaseUnconfirmed` | analytics | `FlagUnconfirmedReleases`, the release-confirmation timeout inside the housekeeping sweep, once per line, only while `RELEASE_CONFIRMATION_MODE=kafka` ([ADR 0043](/docs/adr/0043-release-confirmation-from-workunitcreated)) | none: the order-projector ignores the type |
-| SiteSkuDemandChanged | `com.warehouse.wes.order-management.siteskudemand.SiteSkuDemandChanged` | integration | allocation pass (intake/retry), RepromiseOrder's moved group, CancelOrder — only while `DEMAND_PROJECTION_SITE_ID` is set ([ADR 0035](/docs/adr/0035-site-sku-demand-projection-event)) | site-level planning consumers (none in this fleet yet) |
+| SiteSkuDemandChanged | `com.warehouse.wes.order-management.siteskudemand.SiteSkuDemandChanged` | integration | allocation pass (intake/retry), RepromiseOrder's moved group, CancelOrder — for an order carrying a caller-assigned site ([ADR 0044](/docs/adr/0044-caller-assigned-fulfillment-site-on-the-order)) or while `DEMAND_PROJECTION_SITE_ID` is set ([ADR 0035](/docs/adr/0035-site-sku-demand-projection-event)) | site-level planning consumers (none in this fleet yet) |
 
 Topics: integration = `warehouse.order-management.events`, analytics =
 `warehouse.order-management.analytics`. "Allocation pass" is the shared
@@ -132,11 +132,11 @@ have exactly the fields above.
 `demanded_units`, `due_at` (RFC 3339 — the line's own promise-group
 cutoff where one is recorded, else the order-level promise date),
 `state` (`ACTIVE` or `REMOVED`), and `assignment_version`
-(`static-site-v1`). PII-free by construction; `subject`/Kafka key =
+(`order-site-v1` when the order carries a caller-assigned fulfillment site, [ADR 0044](/docs/adr/0044-caller-assigned-fulfillment-site-on-the-order); else `static-site-v1`). PII-free by construction; `subject`/Kafka key =
 `<source_order_id>/line/<line_no>`. Emitted in the same
 order-save/outbox transaction as the allocation, re-promise, or
-cancellation that produced the line state, and only while
-`DEMAND_PROJECTION_SITE_ID` is configured.
+cancellation that produced the line state, and only for an order that
+carries a fulfillment site or while `DEMAND_PROJECTION_SITE_ID` is configured.
 
 wes-work-planning never receives a work-unit id: it rebuilds
 `{order_id}-line-{line_no}` itself, and this repo's `usecases.WorkUnitID`

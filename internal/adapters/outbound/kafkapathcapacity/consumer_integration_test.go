@@ -197,9 +197,9 @@ func TestPromisePolicy_EndToEnd_RealCapacityConsumer(t *testing.T) {
 		Capability: fakeCapabilityFor(map[shared.PathId]time.Duration{
 			"pick": 1 * time.Hour,
 		}),
-		Capacity: consumer, // the REAL Kafka-fed adapter, satisfying order.CapacitySource directly
-		Fallback: order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:   "site-1",
+		Capacity:      consumer, // the REAL Kafka-fed adapter, satisfying order.CapacitySource directly
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 
 	// 50 units requested: the early window only has 10 remaining
@@ -220,11 +220,11 @@ func TestPromisePolicy_EndToEnd_RealCapacityConsumer(t *testing.T) {
 	// capacity correctly does NOT constrain an unobserved window.
 	neverObservedWindow := order.CPTWindow{CptId: "never-observed", CutoffAt: now.Add(2 * time.Hour), EligiblePathIds: []string{"pick"}}
 	policy2 := order.PromisePolicy{
-		Schedule:   fakeScheduleFor(neverObservedWindow),
-		Capability: fakeCapabilityFor(map[shared.PathId]time.Duration{"pick": 1 * time.Hour}),
-		Capacity:   consumer,
-		Fallback:   order.NewLeadTimePolicy(24*time.Hour, nil),
-		SiteId:     "site-1",
+		Schedule:      fakeScheduleFor(neverObservedWindow),
+		Capability:    fakeCapabilityFor(map[shared.PathId]time.Duration{"pick": 1 * time.Hour}),
+		Capacity:      consumer,
+		Fallback:      order.NewLeadTimePolicy(24*time.Hour, nil),
+		DefaultSiteId: "site-1",
 	}
 	o2 := newAllocatedOrderForCapacityTest(t, "pick", 999999) // absurd quantity -- would fail if capacity were mistakenly "known"
 	got2, ok2 := policy2.Promise(now, o2)

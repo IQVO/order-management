@@ -153,7 +153,12 @@ func (s *Server) handleReceiveOrder(w http.ResponseWriter, r *http.Request) {
 	if req.ReleaseOnAllocation != nil {
 		releaseOnAllocation = *req.ReleaseOnAllocation
 	}
-	o, err := s.ReceiveOrder.ExecuteWithDeadline(r.Context(), lines, req.AllowPartialShipment, releaseOnAllocation, req.RequiredShipBy)
+	site, err := fulfillmentSiteFromRequest(req.FulfillmentSiteID)
+	if err != nil {
+		writeError(w, r, err)
+		return
+	}
+	o, err := s.ReceiveOrder.ExecuteWithSite(r.Context(), lines, req.AllowPartialShipment, releaseOnAllocation, req.RequiredShipBy, site)
 	if err != nil {
 		writeError(w, r, err)
 		return
@@ -161,6 +166,20 @@ func (s *Server) handleReceiveOrder(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Location", "/orders/"+o.ID().String())
 	writeJSON(w, http.StatusCreated, s.orderResponse(r.Context(), o))
+}
+
+// fulfillmentSiteFromRequest validates the optional caller-assigned site
+// (ADR 0044). Absent => nil (unchanged behaviour); present but malformed
+// => shared.ErrInvalidFulfillmentSiteID, a 400.
+func fulfillmentSiteFromRequest(raw *string) (*shared.FulfillmentSiteID, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	site, err := shared.NewFulfillmentSiteID(*raw)
+	if err != nil {
+		return nil, err
+	}
+	return &site, nil
 }
 
 func (s *Server) handleGetOrder(w http.ResponseWriter, r *http.Request) {
@@ -243,7 +262,7 @@ func (s *Server) orderResponse(ctx context.Context, o *order.Order) orderRespons
 			Shortage: w.Shortage, BottleneckStep: w.BottleneckStep,
 		}
 	}
-	resp.CapacityConstraint = &capacityConstraintResponse{Constrained: true, Site: s.CapacityConstraints.SiteID, Windows: brief}
+	resp.CapacityConstraint = &capacityConstraintResponse{Constrained: true, Site: s.CapacityConstraints.SiteFor(o), Windows: brief}
 	return resp
 }
 
@@ -300,6 +319,15 @@ func orderIDParam(w http.ResponseWriter, r *http.Request) (shared.OrderId, bool)
 
 const timeFormat = time.RFC3339
 
+func siteResponse(o *order.Order) *string {
+	s := o.FulfillmentSiteID()
+	if s == nil {
+		return nil
+	}
+	v := s.String()
+	return &v
+}
+
 func toOrderResponse(o *order.Order) orderResponse {
 	lines := make([]orderLineResponse, 0, len(o.Lines()))
 	for _, l := range o.Lines() {
@@ -326,6 +354,7 @@ func toOrderResponse(o *order.Order) orderResponse {
 		AllowPartialShipment: o.AllowPartialShipment(),
 		ReleaseOnAllocation:  o.ReleaseOnAllocation(),
 		RequiredShipBy:       o.RequiredShipBy(),
+		FulfillmentSiteID:    siteResponse(o),
 		PromiseDate:          promiseDate,
 		Lines:                lines,
 	}

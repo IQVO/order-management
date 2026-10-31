@@ -185,9 +185,9 @@ func (r *OrderRepo) upsertMissingOrderRow(ctx context.Context, tx pgx.Tx, o *ord
 		return false, ports.ErrConcurrentModification
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO orders (id, allow_partial_shipment, promise_date, promise_cpt_id, promise_basis, release_on_allocation, required_ship_by, version)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-	`, o.ID().String(), o.AllowPartialShipment(), promiseDate, promiseCptId, promiseBasis, o.ReleaseOnAllocation(), o.RequiredShipBy(), o.Version()); err != nil {
+		INSERT INTO orders (id, allow_partial_shipment, promise_date, promise_cpt_id, promise_basis, release_on_allocation, required_ship_by, fulfillment_site_id, version)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`, o.ID().String(), o.AllowPartialShipment(), promiseDate, promiseCptId, promiseBasis, o.ReleaseOnAllocation(), o.RequiredShipBy(), siteColumn(o), o.Version()); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -229,6 +229,7 @@ func (r *OrderRepo) FindByID(ctx context.Context, id shared.OrderId) (*order.Ord
 		PromiseGroups:        promiseGroups,
 		HeldAtIntake:         !header.releaseOnAllocation,
 		RequiredShipBy:       header.requiredShipBy,
+		FulfillmentSiteID:    header.fulfillmentSite(),
 		Version:              header.version,
 	}), nil
 }
@@ -243,7 +244,31 @@ type orderHeader struct {
 	promiseBasis         *order.PromiseBasis
 	releaseOnAllocation  bool
 	requiredShipBy       *time.Time
+	fulfillmentSiteID    *string
 	version              int
+}
+
+// fulfillmentSite rehydrates the nullable fulfillment_site_id column. The
+// value was validated at intake; a NULL (every pre-0013 row) is no site.
+func (h *orderHeader) fulfillmentSite() *shared.FulfillmentSiteID {
+	if h.fulfillmentSiteID == nil {
+		return nil
+	}
+	s := shared.FulfillmentSiteID(*h.fulfillmentSiteID)
+	return &s
+}
+
+// siteColumn is the fulfillment_site_id bind value: NULL when the caller
+// named no site. It is written ONLY by the INSERT — the version-guarded
+// UPDATE never touches the column, so the site is immutable in storage
+// too (ADR 0044).
+func siteColumn(o *order.Order) *string {
+	s := o.FulfillmentSiteID()
+	if s == nil {
+		return nil
+	}
+	v := s.String()
+	return &v
 }
 
 // fetchOrderHeader reads the single orders row for id through q (which
@@ -254,8 +279,8 @@ func fetchOrderHeader(ctx context.Context, q querier, id shared.OrderId) (*order
 	var promiseBasisRaw *string
 	h := &orderHeader{}
 	err := q.QueryRow(ctx, `
-		SELECT allow_partial_shipment, promise_date, promise_cpt_id, promise_basis, release_on_allocation, required_ship_by, version FROM orders WHERE id = $1
-	`, id.String()).Scan(&h.allowPartialShipment, &h.promiseDate, &h.promiseCptId, &promiseBasisRaw, &h.releaseOnAllocation, &h.requiredShipBy, &h.version)
+		SELECT allow_partial_shipment, promise_date, promise_cpt_id, promise_basis, release_on_allocation, required_ship_by, fulfillment_site_id, version FROM orders WHERE id = $1
+	`, id.String()).Scan(&h.allowPartialShipment, &h.promiseDate, &h.promiseCptId, &promiseBasisRaw, &h.releaseOnAllocation, &h.requiredShipBy, &h.fulfillmentSiteID, &h.version)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

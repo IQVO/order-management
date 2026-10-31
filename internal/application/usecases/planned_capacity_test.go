@@ -255,7 +255,7 @@ func pcPromisedOrder(t *testing.T, cutoff time.Time) *order.Order {
 func TestOrderCapacityConstraints_For(t *testing.T) {
 	s := newPCTxStore()
 	s.windows["plan-0b7a"] = pcWindow()
-	uc := &usecases.OrderCapacityConstraints{Windows: s, Clock: memory.NewFixedClock(pcNow), SiteID: "SIM1"}
+	uc := &usecases.OrderCapacityConstraints{Windows: s, Clock: memory.NewFixedClock(pcNow), DefaultSiteID: "SIM1"}
 
 	got, err := uc.For(context.Background(), pcPromisedOrder(t, pcEnd.Add(time.Hour)))
 	if err != nil || len(got) != 1 || got[0].PlanID != "plan-0b7a" {
@@ -274,7 +274,7 @@ func TestOrderCapacityConstraints_For(t *testing.T) {
 func TestOrderCapacityConstraints_OtherSiteIsNotConstrained(t *testing.T) {
 	s := newPCTxStore()
 	s.windows["plan-0b7a"] = pcWindow()
-	uc := &usecases.OrderCapacityConstraints{Windows: s, Clock: memory.NewFixedClock(pcNow), SiteID: "SIM2"}
+	uc := &usecases.OrderCapacityConstraints{Windows: s, Clock: memory.NewFixedClock(pcNow), DefaultSiteID: "SIM2"}
 	if got, err := uc.For(context.Background(), pcPromisedOrder(t, pcEnd.Add(time.Hour))); err != nil || len(got) != 0 {
 		t.Fatalf("For = %v, %v; want none for another site", got, err)
 	}
@@ -284,7 +284,7 @@ func TestOrderCapacityConstraints_NoPromiseSkipsTheReadModel(t *testing.T) {
 	s := newPCTxStore()
 	line, _ := order.NewOrderLine(1, "SKU-9", 3, "pick", false)
 	o, _ := order.New("ord-pc-2", []*order.OrderLine{line}, false)
-	uc := &usecases.OrderCapacityConstraints{Windows: s, Clock: memory.NewFixedClock(pcNow), SiteID: "SIM1"}
+	uc := &usecases.OrderCapacityConstraints{Windows: s, Clock: memory.NewFixedClock(pcNow), DefaultSiteID: "SIM1"}
 	got, err := uc.For(context.Background(), o)
 	if err != nil || got != nil {
 		t.Fatalf("For = %v, %v; want nil, nil", got, err)
@@ -297,7 +297,7 @@ func TestOrderCapacityConstraints_NoPromiseSkipsTheReadModel(t *testing.T) {
 func TestOrderCapacityConstraints_ReadModelErrorIsReturned(t *testing.T) {
 	s := newPCTxStore()
 	s.listErr = errBoom
-	uc := &usecases.OrderCapacityConstraints{Windows: s, Clock: memory.NewFixedClock(pcNow), SiteID: "SIM1"}
+	uc := &usecases.OrderCapacityConstraints{Windows: s, Clock: memory.NewFixedClock(pcNow), DefaultSiteID: "SIM1"}
 	if _, err := uc.For(context.Background(), pcPromisedOrder(t, pcEnd)); !errors.Is(err, errBoom) {
 		t.Fatalf("err = %v, want the read-model error", err)
 	}

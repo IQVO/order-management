@@ -15,6 +15,7 @@ import (
 	"github.com/claudioed/order-management/internal/adapters/outbound/postgres"
 	"github.com/claudioed/order-management/internal/application/ports"
 	"github.com/claudioed/order-management/internal/application/usecases"
+	"github.com/claudioed/order-management/internal/consumerdeath"
 )
 
 // Environment variables of the planned-capacity integration (ADR 0031).
@@ -26,9 +27,9 @@ const (
 	// behaves exactly as before. There is deliberately NO default group, so
 	// a locally run process can never join a live cluster's group by accident.
 	plannedCapacityGroupEnv = "PLANNED_CAPACITY_CONSUMER_GROUP"
-	// plannedCapacitySiteEnv names the planning `location` an order's promise
-	// is matched against. Unset falls back to DEFAULT_SITE_ID, i.e. the site
-	// the promise itself is computed for.
+	// plannedCapacitySiteEnv names the planning `location` an order WITHOUT
+	// a fulfillmentSiteId is matched against; an order that carries one is
+	// matched on its own site (ADR 0047). Unset falls back to DEFAULT_SITE_ID.
 	plannedCapacitySiteEnv = "PLANNED_CAPACITY_SITE_ID"
 )
 
@@ -76,7 +77,7 @@ func buildPlannedCapacity(pool *pgxpool.Pool, logger *slog.Logger) *plannedCapac
 // attach exposes the read model on the inbound HTTP server: the
 // order-response annotation and GET /planned-capacity.
 func (pc *plannedCapacity) attach(server *inboundhttp.Server, clock ports.Clock) {
-	server.CapacityConstraints = &usecases.OrderCapacityConstraints{Windows: pc.windows, Clock: clock, SiteID: pc.siteID}
+	server.CapacityConstraints = &usecases.OrderCapacityConstraints{Windows: pc.windows, Clock: clock, DefaultSiteID: pc.siteID}
 	server.PlannedCapacity = &usecases.GetPlannedCapacity{Windows: pc.windows, Clock: clock}
 }
 
@@ -84,7 +85,7 @@ func (pc *plannedCapacity) attach(server *inboundhttp.Server, clock ports.Clock)
 // returns a stop function that cancels it and waits (bounded) for the loop
 // to return, so the in-flight message's offset commit is not abandoned. It
 // returns a no-op stop, with a warning, when there is no broker configured.
-func (pc *plannedCapacity) startConsumer(logger *slog.Logger) (stop func()) {
+func (pc *plannedCapacity) startConsumer(logger *slog.Logger, deaths *consumerdeath.Deaths) (stop func()) {
 	brokers := os.Getenv("KAFKA_BROKERS")
 	if brokers == "" {
 		logger.Warn("KAFKA_BROKERS not configured; planned capacity consumer will not run, the read model stays empty",
@@ -100,9 +101,7 @@ func (pc *plannedCapacity) startConsumer(logger *slog.Logger) (stop func()) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if err := consumer.Run(ctx); err != nil {
-			logger.Error("planned capacity consumer stopped", "error", err)
-		}
+		deaths.Watch(ctx, "planned capacity consumer", logger, consumer.Run)
 	}()
 	return func() {
 		cancel()

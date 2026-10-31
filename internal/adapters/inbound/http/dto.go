@@ -48,6 +48,12 @@ type receiveOrderRequest struct {
 	// which is the answer a caller holding a fill-or-kill commitment
 	// actually needs.
 	RequiredShipBy *time.Time `json:"requiredShipBy,omitempty"`
+	// FulfillmentSiteID is the OPTIONAL site the caller assigns this order
+	// to (ADR 0044): uppercase letters and digits, e.g. "WH1". A POINTER so
+	// an absent field (the ordinary case: no site, behaviour unchanged) is
+	// distinguishable from an explicit "" (rejected, 400). This service
+	// carries the value; it never infers, defaults or looks one up.
+	FulfillmentSiteID *string `json:"fulfillmentSiteId,omitempty"`
 }
 
 // UnmarshalJSON rejects an explicit JSON null on any of this DTO's known
@@ -57,7 +63,7 @@ type receiveOrderRequest struct {
 // a null releaseOnAllocation being indistinguishable from an omitted one)
 // accepts schema-violating requests as if they were valid.
 func (r *receiveOrderRequest) UnmarshalJSON(data []byte) error {
-	if err := rejectNullFields(data, "lines", "allowPartialShipment", "releaseOnAllocation", "requiredShipBy"); err != nil {
+	if err := rejectNullFields(data, "lines", "allowPartialShipment", "releaseOnAllocation", "requiredShipBy", "fulfillmentSiteId"); err != nil {
 		return err
 	}
 	type alias receiveOrderRequest
@@ -111,7 +117,11 @@ type orderResponse struct {
 	AllowPartialShipment bool       `json:"allowPartialShipment"`
 	ReleaseOnAllocation  bool       `json:"releaseOnAllocation"`
 	RequiredShipBy       *time.Time `json:"requiredShipBy,omitempty"`
-	PromiseDate          *string    `json:"promiseDate,omitempty"`
+	// FulfillmentSiteID echoes the caller-assigned site (ADR 0044); omitted
+	// when the caller named none, so the response is byte-identical to
+	// before for every such order.
+	FulfillmentSiteID *string `json:"fulfillmentSiteId,omitempty"`
+	PromiseDate       *string `json:"promiseDate,omitempty"`
 	// CapacityConstraint is present ONLY when the order's promise overlaps a
 	// published warehouse-planning shortage window at the configured site
 	// (ADR 0031). It is a derived, read-time annotation: it never changes

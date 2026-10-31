@@ -133,7 +133,7 @@ func TestPlannedCapacityConsumer_RealBrokerAndPostgres_EndToEnd(t *testing.T) {
 	}
 	srv := httptest.NewServer(inboundhttp.NewRouter(&inboundhttp.Server{
 		GetOrder:            &usecases.GetOrder{Orders: orders},
-		CapacityConstraints: &usecases.OrderCapacityConstraints{Windows: windows, Clock: clock, SiteID: "SIM1"},
+		CapacityConstraints: &usecases.OrderCapacityConstraints{Windows: windows, Clock: clock, DefaultSiteID: "SIM1"},
 		PlannedCapacity:     &usecases.GetPlannedCapacity{Windows: windows, Clock: clock},
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)), ""))
 	defer srv.Close()
