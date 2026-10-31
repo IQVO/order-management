@@ -7,10 +7,6 @@
     "@stoplight/spectral-cli": "6.16.3"
   },
   "overrides": {
-    "fast-uri": "^3.1.9",
-    "nanoid": "^3.3.20",
-    "netmask": "^2.1.1",
-    "minimatch": "^11.0.3",
-    "glob": "^14.0.3"
+    "fast-uri": "^3.1.9"
   }
 }
