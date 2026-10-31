@@ -19,6 +19,7 @@ import (
 	"github.com/claudioed/order-management/internal/application/usecases"
 	"github.com/claudioed/order-management/internal/domain/order"
 	"github.com/claudioed/order-management/internal/domain/shared"
+	"github.com/claudioed/order-management/internal/pkg/logsanitize"
 )
 
 // DefaultServiceName labels this service in logs when the caller does not
@@ -249,7 +250,7 @@ func (s *Server) orderResponse(ctx context.Context, o *order.Order) orderRespons
 	windows, err := s.CapacityConstraints.For(ctx, o)
 	if err != nil {
 		slog.WarnContext(ctx, "capacity constraint lookup failed; omitting annotation",
-			"order_id", o.ID().String(), "error", err)
+			"order_id", logsanitize.Sanitize(o.ID().String()), "error", err)
 		return resp
 	}
 	if len(windows) == 0 {
