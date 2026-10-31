@@ -35,6 +35,7 @@ import (
 
 	"github.com/claudioed/order-management/internal/adapters/kafka/cloudevents"
 	"github.com/claudioed/order-management/internal/domain/order"
+	"github.com/claudioed/order-management/internal/pkg/logsanitize"
 )
 
 // Topic is process-path-management's publish topic — the same topic
@@ -358,7 +359,7 @@ func (c *Consumer) NextCutoffs(siteId string, from time.Time, n int) ([]order.CP
 	windows, err := computeNextCutoffs(sched, from, n)
 	if err != nil {
 		if c.Logger != nil {
-			c.Logger.Error("failed computing next CPT cutoffs", "site_id", siteId, "error", err)
+			c.Logger.Error("failed computing next CPT cutoffs", "site_id", logsanitize.Sanitize(siteId), "error", err)
 		}
 		return nil, false
 	}
