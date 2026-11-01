@@ -17,8 +17,8 @@ info:
     only ever expresses ONE intent: **place an order**
     (`POST /orders`). Allocation and release are internal saga steps this
     service performs automatically, right after intake, and again on
-    `retry-allocation` — they are no longer public REST verbs a caller
-    drives by hand. **Allocation** reserves stock per line through
+    `POST /orders/{id}/allocation-retries` — they are no longer public REST
+    verbs a caller drives by hand. **Allocation** reserves stock per line through
     inventory-storage's published `POST /reservations`; a `409` from that
     service is the business fact "no usable stock", which backorders that
     one line, while any other failure fails the whole allocation pass
@@ -41,6 +41,19 @@ info:
     fulfillment-execution), and it does not model a local Reservation or
     WorkUnit aggregate. Error responses across this API use RFC 7807
     (`application/problem+json`) Problem Details.
+
+
+    This API follows the fleet REST API guideline (ADR 0048): URLs name
+    things (commands are noun sub-resources such as
+    `POST /orders/{id}/releases` and `POST /orders/{id}/allocation-retries`),
+    EVERY `POST` is behind the Idempotency-Key middleware (a retry replays the
+    stored answer with the response header `Idempotency-Replayed: true`; the
+    same key with a different method, path or body is 409
+    `idempotency-key-reused`; a missing key is 400
+    `idempotency-key-required`, a malformed one 400
+    `idempotency-key-invalid`), and `DELETE /orders/{id}` is idempotent by
+    method. `GET /planned-capacity` is a bounded read model exempt from paging
+    (`x-pagination-exempt: report`).
   contact:
     name: Order Management (Generic/Supporting Bounded Context)
 servers:
@@ -56,11 +69,11 @@ tags:
   - name: Allocation
     description: >
       Automatic allocation of stock per line through inventory-storage,
-      folded into `POST /orders` and `POST /orders/{id}/retry-allocation`.
+      folded into `POST /orders` and `POST /orders/{id}/allocation-retries`.
       A `409` from that Supplier backorders a single line (a business
       fact); any other failure fails the whole allocation pass
       (fail-closed on ambiguity). A backordered line returns to
-      `Allocated` only via retry-allocation, which also re-attempts
+      `Allocated` only via an allocation retry, which also re-attempts
       release for any lines it newly clears.
   - name: PlannedCapacity
     description: >
@@ -169,7 +182,16 @@ paths:
         wes-work-planning's process-path vocabulary at intake; `pathId` is
         visible on every line in the response, but not settable on the
         request.
+
+
+        Idempotent (REST guideline, ADR 0023/0048): send an `Idempotency-Key`
+        header. A retry with the same key, method, path and body replays the
+        stored answer (with `Idempotency-Replayed: true`) and creates no
+        second order; the same key with another body is 409
+        `idempotency-key-reused`.
       tags: [Orders]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -205,6 +227,8 @@ paths:
             `Allocated`, or `Released` — a caller inspects `status`/line
             `status` for the outcome rather than assuming `Received`.
           headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
             Location:
               schema:
                 type: string
@@ -241,17 +265,32 @@ paths:
             SKU, a body with no lines, an explicit `null` on a non-nullable
             field, or a `fulfillmentSiteId` that is not a site code of
             uppercase letters and digits (problem type
-            `invalid-fulfillment-site-id`, ADR 0044).
+            `invalid-fulfillment-site-id`, ADR 0044). A missing or malformed
+            Idempotency-Key header is also a 400 (`idempotency-key-required` /
+            `idempotency-key-invalid`).
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/Problem"
-              example:
-                type: https://errors.order-management.warehouse-systems.dev/invalid-fulfillment-site-id
-                title: Fulfillment site id must be a site code of uppercase letters and digits
-                status: 400
-                detail: 'fulfillment site id must be a non-empty site code of uppercase letters and digits: "wh1" must contain only uppercase letters and digits'
-                instance: /orders
+              examples:
+                invalidFulfillmentSiteId:
+                  summary: Malformed fulfillment site id
+                  value:
+                    type: https://errors.order-management.warehouse-systems.dev/invalid-fulfillment-site-id
+                    title: Fulfillment site id must be a site code of uppercase letters and digits
+                    status: 400
+                    detail: 'fulfillment site id must be a non-empty site code of uppercase letters and digits: "wh1" must contain only uppercase letters and digits'
+                    instance: /orders
+                idempotencyKeyRequired:
+                  summary: Idempotency-Key header missing (REST guideline 2.2)
+                  value:
+                    type: https://errors.order-management.warehouse-systems.dev/idempotency-key-required
+                    title: Idempotency-Key header is required
+                    status: 400
+                    detail: This endpoint changes state and requires a caller-supplied Idempotency-Key header so a retried request is never applied twice.
+                    instance: /orders
+        "409":
+          $ref: "#/components/responses/IdempotencyKeyReused"
         "422":
           description: A line quantity is not greater than zero.
           content:
@@ -355,7 +394,7 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
-  /orders/{id}/release:
+  /orders/{id}/releases:
     post:
       operationId: releaseHeldOrder
       summary: Release an order held at intake
@@ -382,38 +421,63 @@ paths:
         holds even when that order has no allocated lines of its own (a
         backordered order, say): "never held" and "already released" are
         different answers and must not collapse into one.
+
+
+        Idempotent through the `Idempotency-Key` header (REST guideline, ADR
+        0023/0048): a retry with the same key, method, path and body replays
+        the stored answer with `Idempotency-Replayed: true` and runs nothing
+        again, so the key row, the order change and the outbox rows commit
+        together.
       tags: [Allocation]
       parameters:
         - $ref: "#/components/parameters/OrderId"
+        - $ref: "#/components/parameters/IdempotencyKey"
       responses:
         "200":
           description: The order after release (or unchanged, if already released).
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Order"
+        "400":
+          $ref: "#/components/responses/BadRequestOrIdempotencyKey"
         "404":
           $ref: "#/components/responses/OrderNotFound"
         "409":
           description: >
             This order was not held at intake, so it has nothing to release
-            on demand.
+            on demand. The same Idempotency-Key reused with a different
+            method, path or body is also a 409 (`idempotency-key-reused`).
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/Problem"
-              example:
-                type: https://errors.order-management.warehouse-systems.dev/order-not-held
-                title: Order was not held at intake
-                status: 409
-                detail: order was not held at intake
-                instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/release
+              examples:
+                orderNotHeld:
+                  summary: The order was not held at intake
+                  value:
+                    type: https://errors.order-management.warehouse-systems.dev/order-not-held
+                    title: Order was not held at intake
+                    status: 409
+                    detail: order was not held at intake
+                    instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/releases
+                idempotencyKeyReused:
+                  summary: Idempotency-Key reused with a different method, path or body (REST guideline 2.3)
+                  value:
+                    type: https://errors.order-management.warehouse-systems.dev/idempotency-key-reused
+                    title: Idempotency-Key was already used with a different request
+                    status: 409
+                    detail: The Idempotency-Key header on this request was already used with a different method, path or body. Use a new Idempotency-Key for a genuinely different request.
+                    instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/releases
         "503":
           $ref: "#/components/responses/DownstreamUnavailable"
         "500":
           $ref: "#/components/responses/InternalError"
 
-  /orders/{id}/retry-allocation:
+  /orders/{id}/allocation-retries:
     post:
       operationId: retryAllocation
       summary: Re-attempt allocation for backordered lines, then release
@@ -439,12 +503,23 @@ paths:
         allocation-then-release flow `POST /orders` uses — announced via
         the enriched `OrderAllocated` / `OrderPartiallyAllocated` Kafka
         events rather than any synchronous call to a Supplier.
+
+
+        Idempotent through the `Idempotency-Key` header (REST guideline, ADR
+        0023/0048): a retry with the same key, method, path and body replays
+        the stored answer with `Idempotency-Replayed: true` and allocates
+        nothing again, so the key row, the order change and the outbox rows
+        commit together.
       tags: [Allocation]
       parameters:
         - $ref: "#/components/parameters/OrderId"
+        - $ref: "#/components/parameters/IdempotencyKey"
       responses:
         "200":
           description: The order after the retry-then-release pass.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
           content:
             application/json:
               schema:
@@ -471,21 +546,35 @@ paths:
                     status: Released
                     reservationId: res-a1b2c3d4-0000-0000-0000-000000000010
         "400":
-          $ref: "#/components/responses/BadRequest"
+          $ref: "#/components/responses/BadRequestOrIdempotencyKey"
         "404":
           $ref: "#/components/responses/OrderNotFound"
         "409":
-          description: This order has no backordered line to retry.
+          description: >
+            This order has no backordered line to retry. The same
+            Idempotency-Key reused with a different method, path or body is
+            also a 409 (`idempotency-key-reused`).
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/Problem"
-              example:
-                type: https://errors.order-management.warehouse-systems.dev/no-backordered-lines
-                title: Order has no backordered lines to retry
-                status: 409
-                detail: order has no backordered lines to retry
-                instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/retry-allocation
+              examples:
+                noBackorderedLines:
+                  summary: The order has no backordered line to retry
+                  value:
+                    type: https://errors.order-management.warehouse-systems.dev/no-backordered-lines
+                    title: Order has no backordered lines to retry
+                    status: 409
+                    detail: order has no backordered lines to retry
+                    instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/allocation-retries
+                idempotencyKeyReused:
+                  summary: Idempotency-Key reused with a different method, path or body (REST guideline 2.3)
+                  value:
+                    type: https://errors.order-management.warehouse-systems.dev/idempotency-key-reused
+                    title: Idempotency-Key was already used with a different request
+                    status: 409
+                    detail: The Idempotency-Key header on this request was already used with a different method, path or body. Use a new Idempotency-Key for a genuinely different request.
+                    instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/allocation-retries
         "503":
           $ref: "#/components/responses/DownstreamUnavailable"
         "500":
@@ -508,7 +597,14 @@ paths:
         on the Order schema). Windows that ended before `from` are omitted.
         This route exists only when the integration is enabled; otherwise it
         is a 404.
+
+
+        Not paged (`x-pagination-exempt: report`, REST guideline 3.5): a
+        bounded read model of ONE site's planned windows, scoped by the
+        required `site` and the `from` instant, whose size is set by the
+        planning horizon warehouse-planning publishes, not by order volume.
       tags: [PlannedCapacity]
+      x-pagination-exempt: report
       parameters:
         - name: site
           in: query
@@ -573,6 +669,17 @@ paths:
           $ref: "#/components/responses/InternalError"
 
 components:
+  headers:
+    IdempotencyReplayed:
+      description: >
+        Present, with the value `true`, ONLY when this response is a replay
+        of the stored answer for the request's Idempotency-Key (the handler
+        did not run again). The first execution of a key never carries it.
+      schema:
+        type: string
+        enum: ["true"]
+        example: "true"
+
   parameters:
     OrderId:
       name: id
@@ -583,6 +690,27 @@ components:
         type: string
         minLength: 1
       example: ord-a1b2c3d4-0000-0000-0000-000000000001
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: >
+        Caller-generated unique key (a UUID per logical submit; a retry
+        reuses it, a new user action mints a new one) that makes a retried
+        request safe (ADR 0023, REST guideline section 2). Clients must ALWAYS
+        send a non-empty value of 1-128 printable ASCII characters: with
+        Postgres wired (every deployed runtime) a missing key is answered
+        with 400 `idempotency-key-required`, a malformed one with 400
+        `idempotency-key-invalid`; a replay with the same key and the same
+        method, path and body returns the original response plus
+        `Idempotency-Replayed: true`, while the same key with a different
+        method, path or body is 409 `idempotency-key-reused`. It is declared
+        optional here only because the in-memory development mode (no
+        `DATABASE_URL`, the mode the Schemathesis contract job boots) has no
+        transactional store and gates the middleware off.
+      schema:
+        type: string
+        example: 5b0f6a0e-6a41-4c63-9f33-0c8f5c1d2a77
 
   responses:
     BadRequest:
@@ -601,6 +729,49 @@ components:
             title: SKU must not be empty
             status: 400
             detail: sku must not be empty
+            instance: /orders
+
+    BadRequestOrIdempotencyKey:
+      description: >
+        The Idempotency-Key header is missing (`idempotency-key-required`)
+        or is not 1-128 printable ASCII characters
+        (`idempotency-key-invalid`), or the order id in the path is invalid.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            idempotencyKeyRequired:
+              summary: Idempotency-Key header missing (REST guideline 2.2)
+              value:
+                type: https://errors.order-management.warehouse-systems.dev/idempotency-key-required
+                title: Idempotency-Key header is required
+                status: 400
+                detail: This endpoint changes state and requires a caller-supplied Idempotency-Key header so a retried request is never applied twice.
+                instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/releases
+            idempotencyKeyInvalid:
+              summary: Idempotency-Key header is not 1-128 printable ASCII characters
+              value:
+                type: https://errors.order-management.warehouse-systems.dev/idempotency-key-invalid
+                title: Idempotency-Key header is invalid
+                status: 400
+                detail: The Idempotency-Key header must be 1-128 printable ASCII characters (a client-generated UUID per logical submit).
+                instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/releases
+
+    IdempotencyKeyReused:
+      description: >-
+        The Idempotency-Key was already used with a different method, path
+        or body (idempotency-key-reused). Distinguishable from a business 409
+        by the problem type; a client bug, never retried blindly.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://errors.order-management.warehouse-systems.dev/idempotency-key-reused
+            title: Idempotency-Key was already used with a different request
+            status: 409
+            detail: The Idempotency-Key header on this request was already used with a different method, path or body. Use a new Idempotency-Key for a genuinely different request.
             instance: /orders
 
     OrderNotFound:
@@ -637,7 +808,7 @@ components:
                 title: A downstream service is unavailable or answered unexpectedly
                 status: 503
                 detail: "downstream service is unavailable: inventory-storage: unexpected response status: 500"
-                instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/retry-allocation
+                instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/allocation-retries
             notConfigured:
               summary: inventory-storage client is in permissive (no-op) mode
               value:
@@ -645,7 +816,7 @@ components:
                 title: A downstream service is running in permissive (no-op) mode
                 status: 503
                 detail: downstream client is running in permissive (no-op) mode and cannot perform this operation
-                instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/retry-allocation
+                instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/allocation-retries
 
     InternalError:
       description: An unexpected internal error occurred.
@@ -771,7 +942,7 @@ components:
             HELD: lines are allocated, inventory reservations genuinely
             exist and a promise is computed and attached, but nothing is
             released and no work reaches the floor until
-            `POST /orders/{id}/release`. Intended for a caller that must
+            `POST /orders/{id}/releases`. Intended for a caller that must
             decide whether to commit to the order before it becomes work —
             see ADR 0020. A held order must be ship-complete: sending
             `releaseOnAllocation: false` together with
@@ -782,7 +953,8 @@ components:
           description: >
             When false (the default — ship-complete, BR3), a single
             backordered line holds the WHOLE order back from release until
-            retry-allocation clears it. When true, allocated lines are
+            an allocation retry (`POST /orders/{id}/allocation-retries`)
+            clears it. When true, allocated lines are
             independently eligible for release.
           example: false
 
@@ -839,7 +1011,7 @@ components:
       description: >
         The per-line status. `Pending` -> `Allocated` (inventory-storage
         reserved) or `Backordered` (inventory-storage answered 409);
-        `Backordered` -> `Allocated` ONLY via retry-allocation;
+        `Backordered` -> `Allocated` ONLY via an allocation retry;
         `Allocated` -> `Released` (a pure domain transition made in the
         same call once ship-complete rule BR3 allows it, ADR 0005 — the
         released lines are then announced on Kafka for wes-work-planning to
@@ -1056,7 +1228,7 @@ components:
           description: >
             False means the order was HELD at intake (ADR 0020): allocated
             but deliberately not released, awaiting
-            `POST /orders/{id}/release`. True for every order received
+            `POST /orders/{id}/releases`. True for every order received
             without the flag, including every order predating ADR 0020.
           example: true
         promiseDate:
