@@ -1,5 +1,5 @@
-# Derived from: apis/openapi.yaml paths./orders/{id}/release (releaseHeldOrder)
-# and paths./orders/{id}/retry-allocation, and .claude/rules/adrs.md entry 20
+# Derived from: apis/openapi.yaml paths./orders/{id}/releases (releaseHeldOrder)
+# and paths./orders/{id}/allocation-retries, and .claude/rules/adrs.md entry 20
 # (ADR 0020): a held order allocates and stops; a later retry-allocation must
 # not release work the caller never committed to; release goes through "the
 # same BR3-gated flow" and fires "the same OrderAllocated/OrderReleased

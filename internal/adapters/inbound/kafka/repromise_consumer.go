@@ -263,7 +263,7 @@ func newRecoverBackoff() backoff.BackOff {
 // ports.ErrConcurrentModification (the version-column optimistic-
 // concurrency sentinel — see ADR-0024) is a transient failure like any
 // other: handleWithRetry re-runs the handler (which re-reads the order)
-// so a conflict with another writer (an HTTP retry-allocation/release
+// so a conflict with another writer (an HTTP allocation-retries/releases
 // call, or a second repromise message for the same order) heals on
 // retry. It is NEVER returned as "handled" without a commit: a
 // persistently-conflicting message is dead-lettered after

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -33,7 +34,7 @@ const IdempotencyKeyHeader = "Idempotency-Key"
 // shape inventory-storage's middleware expects (read against its own
 // idempotency.go / idempotency_integration_test.go: a replayed key +
 // identical body returns the cached response with no second
-// reservation; the same key with a DIFFERENT body is 422
+// reservation; the same key with a DIFFERENT body is 409
 // idempotency-key-reused). Deterministic and side-effect-free — calling
 // it twice with the same ReservationRequest always yields the same
 // string, by construction, with no random/UUID component: this client
@@ -129,7 +130,9 @@ type reservationResponse struct {
 //
 //   - 201 -> the reservation id.
 //   - 409 -> ports.ErrInsufficientStock, the business fact that maps to a
-//     Backordered line.
+//     Backordered line, EXCEPT the problem type idempotency-key-reused
+//     (REST API guideline 2.3), which is a client bug and a hard error:
+//     reading it as "no stock" would silently backorder a line.
 //   - anything else, including any transport error -> a hard error.
 func (c *Client) Reserve(ctx context.Context, req ports.ReservationRequest) (ports.ReservationResult, error) {
 	body, err := json.Marshal(reserveRequest{
@@ -167,19 +170,34 @@ func (c *Client) Reserve(ctx context.Context, req ports.ReservationRequest) (por
 		}
 		return ports.ReservationResult{ReservationID: decoded.ID}, nil
 	case http.StatusConflict:
+		if isKeyReused(resp.Body) {
+			return ports.ReservationResult{}, fmt.Errorf("%w: %w: 409 idempotency-key-reused", ports.ErrDownstreamUnavailable, ErrUnexpectedStatus)
+		}
 		return ports.ReservationResult{}, ports.ErrInsufficientStock
 	default:
 		return ports.ReservationResult{}, fmt.Errorf("%w: %w: %d", ports.ErrDownstreamUnavailable, ErrUnexpectedStatus, resp.StatusCode)
 	}
 }
 
+// isKeyReused reports whether a 409 body is the RFC 9457 problem
+// idempotency-key-reused (a business 409 carries another problem type).
+func isKeyReused(body io.Reader) bool {
+	var problem struct {
+		Type string `json:"type"`
+	}
+	if err := json.NewDecoder(io.LimitReader(body, 64<<10)).Decode(&problem); err != nil {
+		return false
+	}
+	return strings.HasSuffix(problem.Type, "idempotency-key-reused")
+}
+
 // RevokeReservation calls DELETE /reservations/{id}.
 //
 // No Idempotency-Key header is sent here: inventory-storage's
-// RequireIdempotencyKey middleware is wired ONLY onto POST /stock/receive
-// and POST /reservations (confirmed by reading that service's own
-// server.go route table — DELETE /reservations/{id} is registered plain,
-// with no r.With(RequireIdempotencyKey(...)) wrapper). DELETE is already
+// RequireIdempotencyKey middleware is wired onto its POST routes (POST
+// /stock-receipts and POST /reservations among them) but not onto
+// DELETE /reservations/{id}, which is registered plain, with no
+// r.With(RequireIdempotencyKey(...)) wrapper. DELETE is already
 // idempotent by ordinary HTTP semantics on this specific route, which is
 // exactly why inventory-storage never gated it: deleting an
 // already-deleted (or never-existing) reservation id has no

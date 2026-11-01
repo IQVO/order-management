@@ -66,7 +66,7 @@ func testSiteOnHeldOrder(t *testing.T) {
 		t.Fatalf("held order fulfillmentSiteId = %q, want DC7", got)
 	}
 	id := decodeOrder(t, rec).ID
-	released := e.do(t, http.MethodPost, "/orders/"+id+"/release", "")
+	released := e.do(t, http.MethodPost, "/orders/"+id+"/releases", "")
 	if released.Code != http.StatusOK {
 		t.Fatalf("release status = %d (%s)", released.Code, released.Body.String())
 	}

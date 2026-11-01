@@ -39,7 +39,9 @@ type Server struct {
 	// leaves the route unregistered (404), as before.
 	PlannedCapacity *usecases.GetPlannedCapacity
 	// IdempotencyPool, when non-nil, wires RequireIdempotencyKey onto
-	// POST /orders (see idempotency.go). A nil pool means "no
+	// every POST route (POST /orders, POST /orders/{id}/releases and
+	// POST /orders/{id}/allocation-retries; see idempotency.go). A nil pool
+	// means "no
 	// transactional Postgres backing wired" (in-memory dev/test
 	// configuration) — the idempotency middleware needs a real
 	// pgxpool.Pool to begin its own transaction, so it is simply not
@@ -89,23 +91,22 @@ func NewRouter(s *Server, logger *slog.Logger, serviceName string) http.Handler 
 	r.Get("/healthz", s.handleHealthz)
 	r.Get("/readyz", s.handleReadyz)
 
-	// POST /orders is route-scoped (r.With, not r.Use) behind
-	// RequireIdempotencyKey — it is the one mutating endpoint that
-	// creates a NEW resource with a server-generated id, so a lost
-	// response and a client retry would otherwise create a duplicate
-	// order. The other mutating routes act on a caller-supplied {id}
-	// and are lower priority for v1 (see the ADR). IdempotencyPool nil
-	// (in-memory dev/test configuration, no transactional Postgres
-	// backing) skips the middleware entirely, mirroring every other
-	// optional Postgres-backed capability's nil convention in this repo.
+	// Every POST route is route-scoped (r.With, not r.Use) behind
+	// RequireIdempotencyKey (REST API guideline 2.1, 2.6): a lost response
+	// and a client retry must never apply a command twice. DELETE
+	// /orders/{id} is idempotent by method and takes no middleware.
+	// IdempotencyPool nil (in-memory dev/test configuration, no
+	// transactional Postgres backing) skips the middleware entirely,
+	// mirroring every other optional Postgres-backed capability's nil
+	// convention in this repo.
+	keyed := r.With()
 	if s.IdempotencyPool != nil {
-		r.With(RequireIdempotencyKey(s.IdempotencyPool)).Post("/orders", s.handleReceiveOrder)
-	} else {
-		r.Post("/orders", s.handleReceiveOrder)
+		keyed = r.With(RequireIdempotencyKey(s.IdempotencyPool))
 	}
+	keyed.Post("/orders", s.handleReceiveOrder)
 	r.Get("/orders/{id}", s.handleGetOrder)
-	r.Post("/orders/{id}/retry-allocation", s.handleRetryAllocation)
-	r.Post("/orders/{id}/release", s.handleReleaseHeldOrder)
+	keyed.Post("/orders/{id}/allocation-retries", s.handleRetryAllocation)
+	keyed.Post("/orders/{id}/releases", s.handleReleaseHeldOrder)
 	r.Delete("/orders/{id}", s.handleCancelOrder)
 	if s.PlannedCapacity != nil {
 		r.Get("/planned-capacity", s.handleGetPlannedCapacity)
@@ -296,8 +297,10 @@ func orderIDParam(w http.ResponseWriter, r *http.Request) (shared.OrderId, bool)
 // deployments.
 //
 // "Idempotency-Key" is allowed because the operator MFE sends one on every
-// POST /orders (ADR 0038; the service requires it with Postgres, ADR 0023):
+// POST (ADR 0038; the service requires it with Postgres, ADR 0023, ADR 0048):
 // without it the browser's preflight fails and the POST is never sent.
+// "Idempotency-Replayed" and "Location" are exposed so a browser caller can
+// read them.
 func corsMiddleware() func(http.Handler) http.Handler {
 	origins := []string{"http://localhost:5173", "http://localhost:5181"}
 	if v := os.Getenv("CORS_ALLOWED_ORIGINS"); v != "" {
@@ -307,6 +310,7 @@ func corsMiddleware() func(http.Handler) http.Handler {
 		AllowedOrigins:   origins,
 		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete},
 		AllowedHeaders:   []string{"Content-Type", "Authorization", "Idempotency-Key"},
+		ExposedHeaders:   []string{"Location", IdempotencyReplayedHeader},
 		AllowCredentials: false,
 		MaxAge:           300,
 	})
