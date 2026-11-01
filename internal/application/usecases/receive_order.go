@@ -28,7 +28,7 @@ type NewLine struct {
 // immediately attempts allocation-then-release in the SAME call, right
 // after the Save+OrderReceived publish above. This replaces the old
 // design where a caller had to separately invoke POST /orders/{id}/allocate
-// and POST /orders/{id}/release: placing an order now expresses the whole
+// and POST /orders/{id}/releases: placing an order now expresses the whole
 // intent, and allocation/release are internal saga steps triggered by that
 // intent rather than public commands a caller drives by hand.
 //

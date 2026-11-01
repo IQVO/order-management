@@ -7,7 +7,7 @@ custom_edit_url: null
 
 
 
-Automatic allocation of stock per line through inventory-storage, folded into `POST /orders` and `POST /orders/{id}/retry-allocation`. A `409` from that Supplier backorders a single line (a business fact); any other failure fails the whole allocation pass (fail-closed on ambiguity). A backordered line returns to `Allocated` only via retry-allocation, which also re-attempts release for any lines it newly clears.
+Automatic allocation of stock per line through inventory-storage, folded into `POST /orders` and `POST /orders/{id}/allocation-retries`. A `409` from that Supplier backorders a single line (a business fact); any other failure fails the whole allocation pass (fail-closed on ambiguity). A backordered line returns to `Allocated` only via an allocation retry, which also re-attempts release for any lines it newly clears.
 
 
 

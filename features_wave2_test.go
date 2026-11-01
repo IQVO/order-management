@@ -248,7 +248,7 @@ func (w *world) cancelNamed(id string) error {
 }
 
 func (w *world) releaseNamed(id string) error {
-	return w.do(http.MethodPost, "/orders/"+id+"/release", nil)
+	return w.do(http.MethodPost, "/orders/"+id+"/releases", nil)
 }
 
 func (w *world) requestPlannedCapacityFrom(site, from string) error {

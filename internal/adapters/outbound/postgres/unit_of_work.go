@@ -82,12 +82,22 @@ func NewUnitOfWork(pool *pgxpool.Pool) *UnitOfWork {
 }
 
 // Execute runs fn inside one transaction. A nested call (fn invoked with
-// a ctx that already carries a transaction) simply joins the outer scope
-// rather than opening a second one, so composing use cases never
-// deadlocks on itself.
+// a ctx that already carries a transaction) joins the outer scope rather
+// than opening a second one, so composing use cases never deadlocks on
+// itself, and a request-scoped Idempotency-Key transaction
+// (internal/adapters/inbound/http) carries the key row, the aggregate
+// writes and the outbox rows as one unit.
+//
+// A joined scope runs in a SAVEPOINT of the outer transaction: if fn fails,
+// only fn's writes are rolled back (the outer transaction stays usable),
+// exactly what a standalone Execute does by rolling back its own
+// transaction. Without it a failure half-way through a use case — a version
+// conflict, a unique violation that aborts the transaction — would leave the
+// first writes in the outer transaction (or the transaction itself aborted),
+// to be committed together with the cached 4xx answer.
 func (u *UnitOfWork) Execute(ctx context.Context, fn func(ctx context.Context) error) (err error) {
-	if _, ok := txFrom(ctx); ok {
-		return fn(ctx)
+	if outer, ok := txFrom(ctx); ok {
+		return executeInSavepoint(ctx, outer, fn)
 	}
 
 	tx, err := u.pool.Begin(ctx)
@@ -111,6 +121,36 @@ func (u *UnitOfWork) Execute(ctx context.Context, fn func(ctx context.Context) e
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return fmt.Errorf("postgres: commit unit of work: %w", err)
+	}
+	return nil
+}
+
+// executeInSavepoint runs fn in a SAVEPOINT of the outer transaction (pgx
+// models a nested Begin as one): released when fn succeeds, rolled back to
+// when it fails or panics. The panic is re-raised so the request's Recoverer
+// and the idempotency middleware still roll the whole transaction back.
+func executeInSavepoint(ctx context.Context, outer pgx.Tx, fn func(ctx context.Context) error) (err error) {
+	sp, err := outer.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin savepoint: %w", err)
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			_ = sp.Rollback(ctx)
+			panic(p)
+		}
+		if err != nil {
+			if rbErr := sp.Rollback(ctx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
+				err = errors.Join(err, fmt.Errorf("postgres: rollback savepoint: %w", rbErr))
+			}
+		}
+	}()
+
+	if err = fn(withTx(ctx, sp)); err != nil {
+		return err
+	}
+	if err = sp.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: release savepoint: %w", err)
 	}
 	return nil
 }

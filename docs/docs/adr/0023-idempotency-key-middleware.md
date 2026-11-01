@@ -10,6 +10,8 @@ description: "ADR 0023 — POST /orders requires a caller-supplied Idempotency-K
 
 ## Status
 
+> Amended by [ADR 0048](./0048-adopt-fleet-rest-api-guideline.md): key reuse is now `409`, the middleware wraps every `POST` (release and retry-allocation included), and the replay header is `Idempotency-Replayed`.
+
 Accepted — implemented in the same change that introduced this record.
 Intended as the reference pattern the rest of the warehouse-systems
 fleet copies for their own resource-creation endpoints.
@@ -24,8 +26,8 @@ dropped connection, a load-balancer timeout, a client-side retry policy
 request arrived and succeeded but I never saw the response," and a
 naive retry duplicates the order.
 
-The other mutating routes (`POST /orders/{id}/retry-allocation`,
-`POST /orders/{id}/release`) act on a caller-supplied `{id}`, which
+The other mutating routes (`POST /orders/{id}/allocation-retries`,
+`POST /orders/{id}/releases`) act on a caller-supplied `{id}`, which
 already makes a byte-identical retry far safer (at worst a redundant
 no-op against an already-allocated/released order — a separate,
 narrower lost-update race, explicitly out of scope for this change).

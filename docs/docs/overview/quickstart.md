@@ -165,11 +165,11 @@ lines in the same request and answers with `"status":"Released"`, a
 curl -s localhost:8080/orders/ord-1
 # 200, same body as above
 
-curl -s -X POST localhost:8080/orders/ord-1/retry-allocation
+curl -s -X POST localhost:8080/orders/ord-1/allocation-retries
 # 409 {"type":"https://errors.order-management.warehouse-systems.dev/no-backordered-lines",
 #      "title":"Order has no backordered lines to retry","status":409,...}
 
-curl -s -X POST localhost:8080/orders/ord-1/release
+curl -s -X POST localhost:8080/orders/ord-1/releases
 # 409 {"type":".../order-not-held","title":"Order was not held at intake and has nothing to release on demand",...}
 
 curl -s -i -X DELETE localhost:8080/orders/ord-1
@@ -196,7 +196,7 @@ curl -s localhost:8080/orders/ord-does-not-exist
 
 **Held order** (ADR 0020): `releaseOnAllocation: false` allocates and
 stops; `requiredShipBy` limits the promise to windows that meet it.
-`POST /orders/{id}/release` then releases it.
+`POST /orders/{id}/releases` then releases it.
 
 ```bash
 curl -s -X POST localhost:8080/orders -H 'Content-Type: application/json' \

@@ -4,7 +4,7 @@
 # OrderAllocationPartiallyFailed on a hard mid-allocation failure; "A fully
 # backordered order emits no order-level event"), the FulfillmentClass
 # definition (ADR 0008), BR2/BR3, and apis/openapi.yaml
-# paths./orders/{id}/retry-allocation ("A line still short of stock stays
+# paths./orders/{id}/allocation-retries ("A line still short of stock stays
 # Backordered (no error)").
 @bdd
 Feature: Allocation outcomes and the events that announce them

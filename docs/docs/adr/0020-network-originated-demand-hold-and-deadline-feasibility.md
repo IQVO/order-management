@@ -431,7 +431,7 @@ statement it checks against.
 > correct trigger and timeout live there, and a second, independent TTL
 > here would race it. Until a sweeper exists, an orphaned hold keeps its
 > inventory reservations until someone calls `DELETE /orders/{id}`
-> (BR6-legal while nothing is released) or `POST /orders/{id}/release`.
+> (BR6-legal while nothing is released) or `POST /orders/{id}/releases`.
 > Tracking: open a follow-up in `network-fulfillment` ("sweep orphaned
 > holds past the acknowledgement window by calling order-management's
 > cancel") — this is an accepted limitation, not an unowned one.

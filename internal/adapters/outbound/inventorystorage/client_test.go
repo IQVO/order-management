@@ -83,7 +83,7 @@ func TestReserveSendsInventoryStoragesPublishedRequestShape(t *testing.T) {
 // is the core regression test for the production incident: inventory-
 // storage's Idempotency-Key middleware replays the cached response for a
 // key it has already seen (same key + same body = no new reservation),
-// and rejects a reused key with a DIFFERENT body (422). This client's
+// and rejects a reused key with a DIFFERENT body (409). This client's
 // derived key must therefore be:
 //   - IDENTICAL on a genuine retry of the exact same (order, line,
 //     attempt) -- so a retried Reserve call replays instead of
@@ -147,6 +147,11 @@ func TestReserveMapsStatusesCorrectly(t *testing.T) {
 			name: "409 is the insufficient-stock business fact", status: http.StatusConflict,
 			responseBody: `{"type":"https://errors.inventory-storage.warehouse-systems.dev/insufficient-usable","title":"Requested quantity exceeds usable inventory","status":409,"detail":"insufficient usable"}`,
 			wantErr:      ports.ErrInsufficientStock,
+		},
+		{
+			name: "409 idempotency-key-reused is a client bug, NOT a backorder", status: http.StatusConflict,
+			responseBody: `{"type":"https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-reused","title":"Idempotency-Key was already used with a different request","status":409}`,
+			wantErr:      inventorystorage.ErrUnexpectedStatus,
 		},
 		{name: "400 is NOT a backorder", status: http.StatusBadRequest, wantErr: inventorystorage.ErrUnexpectedStatus},
 		{name: "404 is NOT a backorder", status: http.StatusNotFound, wantErr: inventorystorage.ErrUnexpectedStatus},

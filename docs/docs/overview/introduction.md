@@ -49,7 +49,7 @@ sentence seriously.
 | **Allocation** | Folded into `ReceiveOrder`/`RetryAllocation` (shared `allocateAndRelease`): inventory-storage's `POST /reservations` per line. A `409` is the business fact "no usable stock" (that line becomes `Backordered`); anything else fails the pass (fail-closed on ambiguity). |
 | **Promise** | Computed at allocation time by `PromisePolicy`: a CPT window derived from process-path capability, the site CPT schedule and wes-work-planning capacity ([ADR 0014](/docs/adr/0014-promise-derived-from-fulfillment-capability)), per shipment group when partial shipment is allowed (ADR 0017), re-promised when fulfillment-execution reports a missed CPT (ADR 0018). `LeadTimePolicy` is the tagged fallback when those caches are unavailable. |
 | **Release** | Marking allocated lines `Released` and announcing them as `OrderAllocated`/`OrderPartiallyAllocated` on Kafka, which wes-work-planning consumes ([ADR 0005](/docs/adr/0005-choreographed-release-via-kafka)). Optionally (`RELEASE_CONFIRMATION_MODE=kafka`, off by default) each released line is confirmed from wes-work-planning's `WorkUnitCreated` and flagged `OrderReleaseUnconfirmed` when it never is ([ADR 0043](/docs/adr/0043-release-confirmation-from-workunitcreated)); a fact only, nothing is cancelled or retried. |
-| **Hold and deadline feasibility** | An order received with `releaseOnAllocation: false` allocates and waits for `POST /orders/{id}/release`; an order with `requiredShipBy` is promised only a window that meets that deadline, or none at all ([ADR 0020](/docs/adr/0020-network-originated-demand-hold-and-deadline-feasibility)). |
+| **Hold and deadline feasibility** | An order received with `releaseOnAllocation: false` allocates and waits for `POST /orders/{id}/releases`; an order with `requiredShipBy` is promised only a window that meets that deadline, or none at all ([ADR 0020](/docs/adr/0020-network-originated-demand-hold-and-deadline-feasibility)). |
 | **Cancellation up to release** | `CancelOrder` revokes every allocated line's reservation via `DELETE /reservations/{id}`, but only while no line has reached `Released` (BR6). |
 | **Order-level status derivation** | `Status` (`Received` → `Allocated`/`PartiallyAllocated`/`Backordered` → `Released`/`PartiallyReleased`/`Cancelled`) is computed from line statuses on every read, never stored. |
 
@@ -106,7 +106,7 @@ flowchart LR
     WPL["warehouse-planning<br/>(Core)<br/>capacity plans"]
   end
 
-  NF -- "HTTP: POST /orders (held)<br/>POST /orders/{id}/release" --> OM
+  NF -- "HTTP: POST /orders (held)<br/>POST /orders/{id}/releases" --> OM
   OM -- "HTTP: POST /reservations<br/>DELETE /reservations/{id}" --> INV
   PMX -. "Kafka: ProductClassified<br/>(local copy, opt-in)" .-> OM
   OM -- "Kafka: OrderAllocated /<br/>OrderPartiallyAllocated" --> WP

@@ -97,7 +97,7 @@ default, never caller-supplied.**
   via the existing `OrderAllocationPartiallyFailed` event but is never
   surfaced as `ReceiveOrder` itself failing — the order genuinely was
   received.
-- `POST /orders/{id}/retry-allocation` (`RetryAllocation`) keeps its
+- `POST /orders/{id}/allocation-retries` (`RetryAllocation`) keeps its
   existing contract and error-return behaviour (a hard failure DOES
   propagate to its caller — it is an explicit, on-purpose recovery
   action), but now ALSO attempts release in the same call on success.

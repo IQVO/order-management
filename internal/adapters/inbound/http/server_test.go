@@ -426,7 +426,7 @@ func TestPostRetryAllocation(t *testing.T) {
 		}
 
 		e.inventory.reserveErr = nil
-		rec := e.do(t, http.MethodPost, "/orders/"+id+"/retry-allocation", "")
+		rec := e.do(t, http.MethodPost, "/orders/"+id+"/allocation-retries", "")
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 		}
@@ -441,7 +441,7 @@ func TestPostRetryAllocation(t *testing.T) {
 		e := newTestEnv(t)
 		id := e.receiveOrder(t, false)
 
-		rec := e.do(t, http.MethodPost, "/orders/"+id+"/retry-allocation", "")
+		rec := e.do(t, http.MethodPost, "/orders/"+id+"/allocation-retries", "")
 		p := assertProblem(t, rec, http.StatusConflict)
 		if !strings.HasSuffix(p.Type, "no-backordered-lines") {
 			t.Fatalf("problem.type = %q", p.Type)
@@ -450,7 +450,7 @@ func TestPostRetryAllocation(t *testing.T) {
 
 	t.Run("error: unknown order", func(t *testing.T) {
 		e := newTestEnv(t)
-		rec := e.do(t, http.MethodPost, "/orders/ord-missing/retry-allocation", "")
+		rec := e.do(t, http.MethodPost, "/orders/ord-missing/allocation-retries", "")
 		assertProblem(t, rec, http.StatusNotFound)
 	})
 
@@ -460,7 +460,7 @@ func TestPostRetryAllocation(t *testing.T) {
 		id := e.receiveOrder(t, false)
 
 		e.inventory.reserveErr = ports.ErrDownstreamNotConfigured
-		rec := e.do(t, http.MethodPost, "/orders/"+id+"/retry-allocation", "")
+		rec := e.do(t, http.MethodPost, "/orders/"+id+"/allocation-retries", "")
 		assertProblem(t, rec, http.StatusServiceUnavailable)
 	})
 }
@@ -514,7 +514,7 @@ func TestUnmappedErrorBecomesAProblem500(t *testing.T) {
 	id := e.receiveOrder(t, false)
 
 	e.inventory.reserveErr = errUnmapped
-	rec := e.do(t, http.MethodPost, "/orders/"+id+"/retry-allocation", "")
+	rec := e.do(t, http.MethodPost, "/orders/"+id+"/allocation-retries", "")
 	p := assertProblem(t, rec, http.StatusInternalServerError)
 	if !strings.HasSuffix(p.Type, "internal-error") {
 		t.Fatalf("problem.type = %q", p.Type)
@@ -536,7 +536,7 @@ func TestReleaseUnheldOrder_CarriesItsOwnProblemType(t *testing.T) {
 	e := newTestEnv(t)
 	id := e.receiveOrder(t, false) // unheld: releases at allocation
 
-	rec := e.do(t, http.MethodPost, "/orders/"+id+"/release", "")
+	rec := e.do(t, http.MethodPost, "/orders/"+id+"/releases", "")
 	body := assertProblem(t, rec, http.StatusConflict)
 
 	if !strings.HasSuffix(body.Type, "/order-not-held") {
@@ -581,7 +581,7 @@ func TestNo4xxProblemFallsBackToInternalError(t *testing.T) {
 		name, method, path, body string
 		want                     int
 	}{
-		{"unknown order", http.MethodPost, "/orders/ord-does-not-exist/release", "", http.StatusNotFound},
+		{"unknown order", http.MethodPost, "/orders/ord-does-not-exist/releases", "", http.StatusNotFound},
 		{"malformed json", http.MethodPost, "/orders", "{", http.StatusBadRequest},
 		{"empty lines", http.MethodPost, "/orders", `{"lines":[]}`, http.StatusBadRequest},
 		{"non-positive quantity", http.MethodPost, "/orders", `{"lines":[{"sku":"SKU-1","quantity":0}]}`, http.StatusUnprocessableEntity},
