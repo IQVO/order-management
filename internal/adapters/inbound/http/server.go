@@ -1,8 +1,6 @@
 package http
 
 import (
-	"context"
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"os"
@@ -19,7 +17,6 @@ import (
 	"github.com/claudioed/order-management/internal/application/usecases"
 	"github.com/claudioed/order-management/internal/domain/order"
 	"github.com/claudioed/order-management/internal/domain/shared"
-	"github.com/claudioed/order-management/internal/pkg/logsanitize"
 )
 
 // DefaultServiceName labels this service in logs when the caller does not
@@ -238,35 +235,6 @@ func (s *Server) handleCancelOrder(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// orderResponse builds the order DTO and, when a planned-capacity read model
-// is wired, annotates it with the capacity constraint (ADR 0031). A failing
-// read model is logged and omitted: an order read must never fail because an
-// advisory annotation is unavailable.
-func (s *Server) orderResponse(ctx context.Context, o *order.Order) orderResponse {
-	resp := toOrderResponse(o)
-	if s.CapacityConstraints == nil {
-		return resp
-	}
-	windows, err := s.CapacityConstraints.For(ctx, o)
-	if err != nil {
-		slog.WarnContext(ctx, "capacity constraint lookup failed; omitting annotation",
-			"order_id", logsanitize.Sanitize(o.ID().String()), "error", err)
-		return resp
-	}
-	if len(windows) == 0 {
-		return resp
-	}
-	brief := make([]plannedCapacityWindowBrief, len(windows))
-	for i, w := range windows {
-		brief[i] = plannedCapacityWindowBrief{
-			PlanID: w.PlanID, WindowStart: w.Start.UTC().Format(timeFormat), WindowEnd: w.End.UTC().Format(timeFormat),
-			Shortage: w.Shortage, BottleneckStep: w.BottleneckStep,
-		}
-	}
-	resp.CapacityConstraint = &capacityConstraintResponse{Constrained: true, Site: s.CapacityConstraints.SiteFor(o), Windows: brief}
-	return resp
-}
-
 // handleGetPlannedCapacity serves the local planned-capacity read model for
 // one site: GET /planned-capacity?site=SIM1[&from=RFC3339]. It lists windows
 // of any status ending after `from` (default: now), so an operator can see
@@ -316,81 +284,6 @@ func orderIDParam(w http.ResponseWriter, r *http.Request) (shared.OrderId, bool)
 		return "", false
 	}
 	return id, true
-}
-
-const timeFormat = time.RFC3339
-
-func siteResponse(o *order.Order) *string {
-	s := o.FulfillmentSiteID()
-	if s == nil {
-		return nil
-	}
-	v := s.String()
-	return &v
-}
-
-func toOrderResponse(o *order.Order) orderResponse {
-	lines := make([]orderLineResponse, 0, len(o.Lines()))
-	for _, l := range o.Lines() {
-		lines = append(lines, orderLineResponse{
-			LineNo:        l.LineNo(),
-			SKU:           l.SKU().String(),
-			Quantity:      l.Quantity(),
-			PathID:        l.PathID().String(),
-			GiftWrap:      l.GiftWrap(),
-			Status:        string(l.Status()),
-			ReservationID: l.ReservationID(),
-		})
-	}
-
-	var promiseDate *string
-	if d := o.PromiseDate(); d != nil {
-		formatted := d.UTC().Format(timeFormat)
-		promiseDate = &formatted
-	}
-
-	return orderResponse{
-		ID:                   o.ID().String(),
-		Status:               string(o.Status()),
-		AllowPartialShipment: o.AllowPartialShipment(),
-		ReleaseOnAllocation:  o.ReleaseOnAllocation(),
-		RequiredShipBy:       o.RequiredShipBy(),
-		FulfillmentSiteID:    siteResponse(o),
-		PromiseDate:          promiseDate,
-		Lines:                lines,
-	}
-}
-
-func decodeJSON(w http.ResponseWriter, r *http.Request, dest any) bool {
-	if err := json.NewDecoder(r.Body).Decode(dest); err != nil {
-		writeProblem(w, http.StatusBadRequest, problemInfo{"malformed-request-body", "The request body is not valid JSON"}, err.Error(), r.URL.Path)
-		return false
-	}
-	return true
-}
-
-// writeError writes a domain/application error as an RFC 7807
-// (application/problem+json) response.
-func writeError(w http.ResponseWriter, r *http.Request, err error) {
-	writeProblem(w, statusFor(err), problemFor(err), err.Error(), r.URL.Path)
-}
-
-func writeProblem(w http.ResponseWriter, status int, info problemInfo, detail, instance string) {
-	w.Header().Set("Content-Type", "application/problem+json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(problemDetails{
-		Type:     problemBaseURI + info.slug,
-		Title:    info.title,
-		Status:   status,
-		Detail:   detail,
-		Instance: instance,
-	})
-}
-
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
 }
 
 // corsMiddleware allows the warehouse-console browser SPA (and this
