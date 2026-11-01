@@ -84,8 +84,7 @@ func NewRouter(s *Server, logger *slog.Logger, serviceName string) http.Handler 
 	// conventions; no hand-rolled histogram needed.
 	r.Use(otelchimetric.NewServerRequestDuration(otelchimetric.NewBaseConfig(serviceName)))
 	r.Use(RequestLogger(logger))
-	r.Use(middleware.Recoverer)
-	r.Use(corsMiddleware())
+	r.Use(middleware.Recoverer, corsMiddleware())
 
 	r.Get("/healthz", s.handleHealthz)
 	r.Get("/readyz", s.handleReadyz)
