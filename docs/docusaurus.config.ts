@@ -163,7 +163,7 @@ const config: Config = {
           ],
         },
       ],
-      copyright: `Order Management — a warehouse-systems bounded context. Built ${new Date().getFullYear()}.`,
+      copyright: `Order Management — a warehouse-systems bounded context. Built ${new Date().getFullYear()}. This project is a domain-driven design study. It is not associated with, endorsed by or affiliated with any company, and it uses no company's code, data, logos or trademarks. All names, figures and examples are illustrative or synthetic.`,
     },
     prism: {
       theme: prismThemes.github,
