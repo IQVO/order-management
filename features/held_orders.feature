@@ -1,6 +1,6 @@
 # Held orders (ADR 0020), pinned to apis/openapi.yaml
 # (components.schemas.ReceiveOrderRequest.releaseOnAllocation and
-# paths./orders/{id}/release — operationId releaseHeldOrder) and
+# paths./orders/{id}/releases — operationId releaseHeldOrder) and
 # .claude/rules/adrs.md entry 20: an optional intake flag holds the
 # ADR-0005 folded saga after allocation, a later explicit release
 # commits the order to the floor, that release is idempotent for a

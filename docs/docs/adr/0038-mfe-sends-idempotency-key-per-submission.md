@@ -11,6 +11,8 @@ description: "ADR 0038 — order_mgmt_mfe (web/) sends Idempotency-Key on POST /
 
 ## Status
 
+> Amended by [ADR 0048](./0048-adopt-fleet-rest-api-guideline.md): key reuse is now `409`, and every command (not only `POST /orders`) carries a key.
+
 Accepted — implemented by the change that introduces this record (fleet
 gap-fix wave 2026-10-12, decision D8).
 

@@ -71,7 +71,7 @@ func (uc *ReleaseHeldOrder) Execute(ctx context.Context, id shared.OrderId) (*or
 	// the idempotency check first, this one was unreachable for anything
 	// intake can produce, and "release an order that was never held"
 	// answered 200. Verified against the running cluster: a plain order
-	// returned 200 from POST /orders/{id}/release, which is precisely
+	// returned 200 from POST /orders/{id}/releases, which is precisely
 	// the wrong mental model this error exists to surface.
 	//
 	// Ordering them this way costs nothing for the case idempotency

@@ -56,7 +56,7 @@ func TestBR3Block_PostRetryAllocation_StillShort_Is200WithBackorderedOrder(t *te
 	id := e.receiveOrder(t, false)
 
 	// Stock is still short on the retry: the order stays Backordered, the call succeeds.
-	rec := e.do(t, http.MethodPost, "/orders/"+id+"/retry-allocation", "")
+	rec := e.do(t, http.MethodPost, "/orders/"+id+"/allocation-retries", "")
 	assertBackorderedNotAProblem(t, rec, http.StatusOK)
 }
 
@@ -77,6 +77,6 @@ func TestBR3Block_PostRelease_HeldOrderThatLostItsReservation_Is200WithBackorder
 	// The reservation lapses before the release is requested: reconfirm gets a 409,
 	// the line goes back to Backordered and BR3 blocks the release.
 	e.inventory.reserveErr = ports.ErrInsufficientStock
-	rec = e.do(t, http.MethodPost, "/orders/"+held.ID+"/release", "")
+	rec = e.do(t, http.MethodPost, "/orders/"+held.ID+"/releases", "")
 	assertBackorderedNotAProblem(t, rec, http.StatusOK)
 }

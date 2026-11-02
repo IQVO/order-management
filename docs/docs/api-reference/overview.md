@@ -41,37 +41,46 @@ a media type, a required property or an undocumented property.
 `internal/adapters/inbound/http/server.go` registers 8 routes; 7 of them are
 declared in `apis/openapi.yaml` (`GET /readyz` is not — see the note below
 the table). There is no `/orders/{id}/allocate` any more: allocation and
-release are folded into `POST /orders` and `retry-allocation`
-([ADR 0005](/docs/adr/0005-choreographed-release-via-kafka)).
+release are folded into `POST /orders` and the allocation-retries transition
+resource ([ADR 0005](/docs/adr/0005-choreographed-release-via-kafka)). The
+routes follow the fleet REST API guideline
+([ADR 0048](/docs/adr/0048-adopt-fleet-rest-api-guideline)): nouns, never
+verbs.
 
 | Method | Path | Operation | Tag | Success | Errors |
 | --- | --- | --- | --- | --- | --- |
 | `GET` | `/healthz` | `getHealthz` | Health | `200` | — |
 | `GET` | `/readyz` | *(not in spec)* | — | `200` `{"status":"ready"}` | `503` `{"status":"not_ready"}` once shutdown starts (ADR 0025) |
-| `POST` | `/orders` | `receiveOrder` | Orders | `201` | `400` `422` `500` |
+| `POST` | `/orders` | `receiveOrder` | Orders | `201` | `400` `409` `422` `500` |
 | `GET` | `/orders/{id}` | `getOrder` | Orders | `200` | `400` `404` `500` |
 | `DELETE` | `/orders/{id}` | `cancelOrder` | Orders | `204` | `400` `404` `409` `503` `500` |
-| `POST` | `/orders/{id}/release` | `releaseHeldOrder` | Allocation | `200` | `404` `409` `503` `500` |
-| `POST` | `/orders/{id}/retry-allocation` | `retryAllocation` | Allocation | `200` | `400` `404` `409` `503` `500` |
+| `POST` | `/orders/{id}/releases` | `releaseHeldOrder` | Allocation | `200` | `400` `404` `409` `503` `500` |
+| `POST` | `/orders/{id}/allocation-retries` | `retryAllocation` | Allocation | `200` | `400` `404` `409` `503` `500` |
 | `GET` | `/planned-capacity` | `getPlannedCapacity` | PlannedCapacity | `200` | `400` `500` |
 
 `GET /planned-capacity` is registered only when
 `PLANNED_CAPACITY_CONSUMER_GROUP` is set
 ([ADR 0031](/docs/adr/0031-consume-warehouse-planning-capacity-plans)).
-`POST /orders` is wrapped by the `Idempotency-Key` middleware
-([ADR 0023](/docs/adr/0023-idempotency-key-middleware)) whenever the
+Every `POST` (`/orders`, `/orders/{id}/releases`,
+`/orders/{id}/allocation-retries`) is wrapped by the `Idempotency-Key`
+middleware ([ADR 0023](/docs/adr/0023-idempotency-key-middleware),
+[ADR 0048](/docs/adr/0048-adopt-fleet-rest-api-guideline)) whenever the
 service runs with `DATABASE_URL`: a missing key is `400
-idempotency-key-required`, the same key with a different body is `422
-idempotency-key-reused`, and a replay returns the stored response. The
-header is not declared as a parameter in `apis/openapi.yaml`. A
+idempotency-key-required`, a key that is not 1-128 printable ASCII
+characters is `400 idempotency-key-invalid`, the same key with a different
+method, path or body is `409 idempotency-key-reused`, and a replay returns
+the stored response with the header `Idempotency-Replayed: true`. The header
+is declared as the `IdempotencyKey` parameter in `apis/openapi.yaml`;
+`DELETE /orders/{id}` is idempotent by method and takes no key. A
 version-guard conflict on any write (ADR 0024) is `409
-concurrent-modification`.
+concurrent-modification`. `GET /planned-capacity` is a bounded read model
+for one site (`x-pagination-exempt: report`), not a paged collection.
 
 ## Status-code conventions
 
 | Code | Used for | Example |
 | --- | --- | --- |
-| `200 OK` | A read, or a command whose result *is* the response body | `GET /orders/{id}`; `POST /orders/{id}/retry-allocation` returns the order after the pass |
+| `200 OK` | A read, or a command whose result *is* the response body | `GET /orders/{id}`; `POST /orders/{id}/allocation-retries` returns the order after the pass |
 | `201 Created` | A new addressable resource, with a `Location` header | `POST /orders` → `Location: /orders/{id}` |
 | `204 No Content` | A state transition with nothing useful to return | `DELETE /orders/{id}` |
 | `400 Bad Request` | Malformed or missing input | empty SKU, unparseable JSON |
@@ -118,18 +127,19 @@ other services in this platform emit:
 | `order-without-lines` | 400 | the order has no lines |
 | `unknown-process-path` | 400 | the resolved path is not active in the process-path catalogue (ADR 0013) |
 | `malformed-request-body` | 400 | the body is not valid JSON, or a field is explicitly `null` |
-| `idempotency-key-required` | 400 | `POST /orders` without an `Idempotency-Key` header (ADR 0023) |
+| `idempotency-key-required` | 400 | a `POST` without an `Idempotency-Key` header (ADR 0023, ADR 0048) |
+| `idempotency-key-invalid` | 400 | an `Idempotency-Key` that is not 1-128 printable ASCII characters (ADR 0048) |
 | `invalid-query-parameter` | 400 | `GET /planned-capacity` without `site`, or a non-RFC 3339 `from` |
 | `non-positive-quantity` | 422 | a line's quantity is not greater than zero |
 | `line-ineligible-for-resolved-path` | 422 | a line's product attributes are not eligible for any active path (ADR 0016/0021) |
 | `held-order-must-be-ship-complete` | 422 | `releaseOnAllocation: false` combined with `allowPartialShipment: true` (ADR 0020) |
-| `idempotency-key-reused` | 422 | the same `Idempotency-Key` sent with a different body (ADR 0023) |
 | `order-already-released` | 409 | `CancelOrder` when any line is `Released` (BR6) |
 | `no-backordered-lines` | 409 | `RetryAllocation` on an order with nothing backordered |
 | `order-not-held` | 409 | `ReleaseHeldOrder` on an order that was not held at intake (ADR 0020) |
 | `concurrent-modification` | 409 | the order's `version` changed between read and save (ADR 0024) |
+| `idempotency-key-reused` | 409 | the same `Idempotency-Key` sent with a different method, path or body (ADR 0023, ADR 0048); distinguishable from the business 409s by this type |
 | `downstream-not-configured` | 503 | a Supplier client is running in permissive (no-op) mode |
-| `downstream-unavailable` | 503 | inventory-storage failed (transport error, timeout, open circuit breaker, unexpected status) on `POST /orders/{id}/retry-allocation`, `POST /orders/{id}/release` or `DELETE /orders/{id}` (ADR 0003, ADR 0025) |
+| `downstream-unavailable` | 503 | inventory-storage failed (transport error, timeout, open circuit breaker, unexpected status) on `POST /orders/{id}/allocation-retries`, `POST /orders/{id}/releases` or `DELETE /orders/{id}` (ADR 0003, ADR 0025) |
 | `internal-error` | 500 | anything unmapped |
 
 The reports binary (`cmd/order-reports`) uses its own two types,
@@ -147,8 +157,8 @@ becomes a `Backordered` line, not an error).
 There is deliberately no problem type for BR3 (ship-complete). A ship-complete
 order whose release is blocked because a line is unallocated is a hold, not an
 error ([ADR 0003](/docs/adr/0003-ship-complete-default-and-fail-closed-allocation)):
-`POST /orders` answers `201`, and `POST /orders/{id}/retry-allocation` and
-`POST /orders/{id}/release` answer `200`, each with the order `Backordered` and
+`POST /orders` answers `201`, and `POST /orders/{id}/allocation-retries` and
+`POST /orders/{id}/releases` answer `200`, each with the order `Backordered` and
 nothing released.
 
 The domain never knows about any of this. It returns typed errors; the

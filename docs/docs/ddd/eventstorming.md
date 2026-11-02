@@ -218,8 +218,8 @@ Omits: the analytics projector (a read model built from every event, see
 | --- | --- | --- |
 | Customer channel, Operator, Console user or AI agent | Actor | REST callers of `internal/adapters/inbound/http`, MCP `get_order` |
 | Receive Order | Command | `usecases.ReceiveOrder`, `POST /orders` |
-| Retry Allocation | Command | `usecases.RetryAllocation`, `POST /orders/{id}/retry-allocation` |
-| Release Held Order | Command | `usecases.ReleaseHeldOrder`, `POST /orders/{id}/release` |
+| Retry Allocation | Command | `usecases.RetryAllocation`, `POST /orders/{id}/allocation-retries` |
+| Release Held Order | Command | `usecases.ReleaseHeldOrder`, `POST /orders/{id}/releases` |
 | Cancel Order | Command | `usecases.CancelOrder`, `DELETE /orders/{id}` |
 | Repromise Order | Command | `usecases.RepromiseOrder` |
 | Apply Planned Capacity | Command | `usecases.ApplyPlannedCapacity` |

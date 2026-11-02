@@ -43,7 +43,7 @@ sequenceDiagram
   alt key already stored
     MW->>DB: ROLLBACK then SELECT stored response
     alt request hash differs
-      MW-->>Client: 422 idempotency-key-reused
+      MW-->>Client: 409 idempotency-key-reused
     else same request
       MW-->>Client: replay stored status, headers and body
     end
@@ -179,7 +179,7 @@ breaker wrapping the inventory client (ADR 0025), and the rule that the
 outcome event is skipped when the order ends `Backordered` or the pass
 changed nothing.
 
-## 3. RetryAllocation — `POST /orders/{id}/retry-allocation`
+## 3. RetryAllocation — `POST /orders/{id}/allocation-retries`
 
 ```mermaid
 sequenceDiagram
@@ -191,7 +191,7 @@ sequenceDiagram
   participant O as Order
   participant AP as allocateAndRelease
 
-  Operator->>H: POST /orders/{id}/retry-allocation
+  Operator->>H: POST /orders/{id}/allocation-retries
   H->>UC: Execute(id)
   UC->>R: FindByID(id)
   alt not found
@@ -218,7 +218,7 @@ Source: `internal/application/usecases/retry_allocation.go`,
 client (`503 downstream-not-configured`). Unlike ReceiveOrder, a hard
 failure here is returned to the caller.
 
-## 4. ReleaseHeldOrder — `POST /orders/{id}/release`
+## 4. ReleaseHeldOrder — `POST /orders/{id}/releases`
 
 ```mermaid
 sequenceDiagram
@@ -230,7 +230,7 @@ sequenceDiagram
   participant O as Order
   participant AP as allocateAndRelease
 
-  NF->>H: POST /orders/{id}/release
+  NF->>H: POST /orders/{id}/releases
   H->>UC: Execute(id)
   UC->>R: FindByID(id)
   alt not found

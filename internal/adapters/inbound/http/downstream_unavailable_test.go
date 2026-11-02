@@ -23,7 +23,7 @@ func TestRetryAllocation_DownstreamUnavailableIs503(t *testing.T) {
 	id := e.receiveOrder(t, false)
 
 	e.inventory.reserveErr = unavailableErr()
-	rec := e.do(t, http.MethodPost, "/orders/"+id+"/retry-allocation", "")
+	rec := e.do(t, http.MethodPost, "/orders/"+id+"/allocation-retries", "")
 	p := assertProblem(t, rec, http.StatusServiceUnavailable)
 	if !strings.HasSuffix(p.Type, "/downstream-unavailable") {
 		t.Fatalf("problem.type = %q, want .../downstream-unavailable", p.Type)
@@ -56,7 +56,7 @@ func TestRetryAllocation_CircuitOpenReportsUnavailableNotNotConfigured(t *testin
 	id := e.receiveOrder(t, false)
 
 	e.inventory.reserveErr = fmt.Errorf("%w: circuit open: %w", ports.ErrDownstreamUnavailable, ports.ErrDownstreamNotConfigured)
-	rec := e.do(t, http.MethodPost, "/orders/"+id+"/retry-allocation", "")
+	rec := e.do(t, http.MethodPost, "/orders/"+id+"/allocation-retries", "")
 	p := assertProblem(t, rec, http.StatusServiceUnavailable)
 	if !strings.HasSuffix(p.Type, "/downstream-unavailable") {
 		t.Fatalf("problem.type = %q, want .../downstream-unavailable", p.Type)

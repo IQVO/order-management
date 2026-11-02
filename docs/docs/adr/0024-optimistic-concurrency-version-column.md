@@ -44,7 +44,7 @@ code paths each perform a full read-mutate-save cycle against an
 
 Two concrete, realistic interleavings:
 
-1. `POST /orders/{id}/retry-allocation` and `POST /orders/{id}/release`
+1. `POST /orders/{id}/allocation-retries` and `POST /orders/{id}/releases`
    arrive for the same order within the same few milliseconds (an
    operator retries allocation while a released-inventory automation
    independently calls release). Both load the order, both mutate

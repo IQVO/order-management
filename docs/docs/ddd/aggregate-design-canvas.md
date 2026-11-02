@@ -148,7 +148,7 @@ with a `Backordered` order — BR3 is a hold, not an error, so there is no
 
 | Situation | Corrective policy | Code |
 | --- | --- | --- |
-| A line was backordered (409) | Operator or caller retries: `POST /orders/{id}/retry-allocation` re-reserves only the backordered lines | `usecases.RetryAllocation` |
+| A line was backordered (409) | Operator or caller retries: `POST /orders/{id}/allocation-retries` re-reserves only the backordered lines | `usecases.RetryAllocation` |
 | A reservation lapsed upstream before release | Reconfirm every previously allocated line right before release; a 409 now moves the line back to `Backordered` (`LoseReservation`) and, for a ship-complete order, blocks the release | `reconfirmAllocatedLines`, `reconfirmBeforeRelease` |
 | Hard failure part-way through allocation | Keep the lines that did allocate (their reservations are real), save, and raise `OrderAllocationPartiallyFailed` | `salvageAllocationFailure` |
 | The building missed a CPT or manifested a package | Recompute the line's shipment group; if the promise moved, save and raise `OrderRepromised` | `usecases.RepromiseOrder` |
@@ -164,8 +164,8 @@ work is never clawed back after cancellation (ADR 0004, ADR 0020).
 | --- | --- | --- |
 | ReceiveOrder | `POST /orders` | `order.New`, `ValidateIntakeIntent`, `Hold`, `SetRequiredShipBy`, then the allocation pass below |
 | Allocation pass (internal, `allocateAndRelease`) | inside ReceiveOrder, RetryAllocation, ReleaseHeldOrder | `Allocate` / `RetryAllocate` / `MarkBackordered`, `SetPromiseGroups`, `ReconfirmReservation` / `LoseReservation`, `EnsureReleasable`, `Release` |
-| RetryAllocation | `POST /orders/{id}/retry-allocation` | `RetryAllocate`, `MarkBackordered`, then release as above |
-| ReleaseHeldOrder | `POST /orders/{id}/release` | `ReconfirmReservation` / `LoseReservation`, `EnsureReleasable`, `Release` |
+| RetryAllocation | `POST /orders/{id}/allocation-retries` | `RetryAllocate`, `MarkBackordered`, then release as above |
+| ReleaseHeldOrder | `POST /orders/{id}/releases` | `ReconfirmReservation` / `LoseReservation`, `EnsureReleasable`, `Release` |
 | CancelOrder | `DELETE /orders/{id}` | `EnsureCancellable`, `Cancel` |
 | RepromiseOrder | Kafka `warehouse.fulfillment.events` | `SetPromiseGroups` |
 

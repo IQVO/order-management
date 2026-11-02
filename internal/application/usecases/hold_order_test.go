@@ -168,7 +168,7 @@ func TestReleaseHeldOrder_OnUnheldOrder_IsRejected(t *testing.T) {
 	// This test previously asserted the OPPOSITE of its own name: it
 	// accepted the idempotent no-op success, which made ErrOrderNotHeld
 	// unreachable for every order intake can produce. Found by calling
-	// POST /orders/{id}/release against a plain order in the running
+	// POST /orders/{id}/releases against a plain order in the running
 	// cluster and getting 200.
 	_, err = uc.Execute(context.Background(), o.ID())
 	if !errors.Is(err, usecases.ErrOrderNotHeld) {

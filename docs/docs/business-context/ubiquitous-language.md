@@ -29,7 +29,7 @@ wes-work-planning or fulfillment-execution — see
 | **Ship-complete** | An order with `allowPartialShipment=false` (the default): nothing is released while any line is unallocated (BR3). | `Order.EnsureReleasable`, `ErrShipCompleteBlocked` |
 | **Partial shipment** | `allowPartialShipment=true`: allocated lines release even if others are backordered, possibly in several shipment groups. | `Order.AllowPartialShipment()` |
 | **Cancellation boundary** | An order can be cancelled until any line is released (BR6). | `Order.EnsureCancellable`, `ErrOrderAlreadyReleased` |
-| **Held order** | Received with `releaseOnAllocation=false`: it allocates, then waits for `POST /orders/{id}/release` or a cancel. Must be ship-complete. Not a status. | `Order.Hold`, `Order.ReleaseOnAllocation()`, `usecases.ReleaseHeldOrder` |
+| **Held order** | Received with `releaseOnAllocation=false`: it allocates, then waits for `POST /orders/{id}/releases` or a cancel. Must be ship-complete. Not a status. | `Order.Hold`, `Order.ReleaseOnAllocation()`, `usecases.ReleaseHeldOrder` |
 | **Required ship-by** | A caller's deadline; the promise may only use a CPT window at or before it. | `Order.SetRequiredShipBy`, `PromisePolicy.FeasibleBy` |
 
 ## Promise terms

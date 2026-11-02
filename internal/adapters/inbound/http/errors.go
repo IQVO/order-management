@@ -98,7 +98,8 @@ var problemCatalog = []struct {
 	// order.ErrShipCompleteBlocked (BR3) is deliberately NOT mapped: a
 	// ship-complete order whose release is blocked is a HOLD, not an error
 	// (ADR 0003/0005). The release leg treats it as "nothing to release", so
-	// POST /orders answers 201 and retry-allocation / release answer 200, all
+	// POST /orders answers 201 and POST .../allocation-retries and
+	// POST .../releases answer 200, all
 	// with the order Backordered. There is no ship-complete-blocked problem type.
 	{order.ErrLineAlreadyAllocated, problemInfo{"order-line-already-allocated", "Order line is already allocated"}},
 	{order.ErrLineNotPending, problemInfo{"order-line-not-pending", "Order line is not pending allocation"}},

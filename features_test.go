@@ -421,7 +421,7 @@ func (w *world) retryAllocation() error {
 	if w.lastOrderID == "" {
 		return fmt.Errorf("no order placed in this scenario yet")
 	}
-	return w.do(http.MethodPost, "/orders/"+w.lastOrderID+"/retry-allocation", nil)
+	return w.do(http.MethodPost, "/orders/"+w.lastOrderID+"/allocation-retries", nil)
 }
 
 func (w *world) cancelOrder() error {
@@ -435,7 +435,7 @@ func (w *world) releaseOrder() error {
 	if w.lastOrderID == "" {
 		return fmt.Errorf("no order placed in this scenario yet")
 	}
-	return w.do(http.MethodPost, "/orders/"+w.lastOrderID+"/release", nil)
+	return w.do(http.MethodPost, "/orders/"+w.lastOrderID+"/releases", nil)
 }
 
 func (w *world) fetchPlacedOrder() error {
