@@ -789,22 +789,6 @@ components:
                 detail: The Idempotency-Key header must be 1-128 printable ASCII characters (a client-generated UUID per logical submit).
                 instance: /orders/ord-a1b2c3d4-0000-0000-0000-000000000001/releases
 
-    IdempotencyKeyReused:
-      description: >-
-        The Idempotency-Key was already used with a different method, path
-        or body (idempotency-key-reused). Distinguishable from a business 409
-        by the problem type; a client bug, never retried blindly.
-      content:
-        application/problem+json:
-          schema:
-            $ref: "#/components/schemas/Problem"
-          example:
-            type: https://errors.order-management.warehouse-systems.dev/idempotency-key-reused
-            title: Idempotency-Key was already used with a different request
-            status: 409
-            detail: The Idempotency-Key header on this request was already used with a different method, path or body. Use a new Idempotency-Key for a genuinely different request.
-            instance: /orders
-
     OrderNotFound:
       description: No order has this id.
       content:
