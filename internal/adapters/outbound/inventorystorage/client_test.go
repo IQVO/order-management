@@ -175,7 +175,7 @@ func TestReserveMapsStatusesCorrectly(t *testing.T) {
 				t.Fatalf("err = %v, want %v", err, tt.wantErr)
 			}
 			// Whatever the outcome, it must never be BOTH.
-			if tt.wantErr != ports.ErrInsufficientStock && errors.Is(err, ports.ErrInsufficientStock) {
+			if !errors.Is(tt.wantErr, ports.ErrInsufficientStock) && errors.Is(err, ports.ErrInsufficientStock) {
 				t.Fatalf("status %d was wrongly treated as a backorder", tt.status)
 			}
 		})

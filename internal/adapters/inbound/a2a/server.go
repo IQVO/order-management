@@ -87,8 +87,8 @@ func Card(cfg Config) *a2a.AgentCard {
 		SupportedInterfaces: []*a2a.AgentInterface{
 			a2a.NewAgentInterface(cfg.AgentURL, a2a.TransportProtocolJSONRPC),
 		},
-		DefaultInputModes:  []string{"application/json", "text/plain"},
-		DefaultOutputModes: []string{"application/json", "text/plain"},
+		DefaultInputModes:  []string{mediaTypeJSON, "text/plain"},
+		DefaultOutputModes: []string{mediaTypeJSON, "text/plain"},
 		Capabilities:       a2a.AgentCapabilities{Streaming: false},
 		Skills: []a2a.AgentSkill{
 			{
@@ -96,7 +96,7 @@ func Card(cfg Config) *a2a.AgentCard {
 				Name:        "Where does an order stand",
 				Description: "Current state of one order by id: status, allow-partial-shipment flag, promise date and every line's SKU, quantity, process path, gift-wrap, status and reservation id (present only once the line is allocated). Use it for allocation, backorder, release or cancellation progress. An unknown id is answered as a 404 problem.",
 				Tags:        []string{"orders", "status", "read"},
-				InputModes:  []string{"application/json"},
+				InputModes:  []string{mediaTypeJSON},
 				Examples: []string{
 					`{"skill":"order_status","arguments":{"orderId":"ORD-1"}}`,
 				},
@@ -106,7 +106,7 @@ func Card(cfg Config) *a2a.AgentCard {
 				Name:        "How healthy are our delivery promises",
 				Description: "Promise-health KPIs for a time window [from, to) (RFC3339) and an optional exact-match pathId, from the Order Funnel & Allocation Health data product: promise basis distribution (capability-derived CPT window, LeadTimePolicy fallback, or an external network deadline), re-promise rate (fleet-wide, NOT path-scoped: a pathId filter zeroes it), split-shipment rate and the mean promise-to-cutoff gap in seconds. Does NOT include on-time-to-CPT, which lives in fulfillment-execution's own analytics. The data product is eventually consistent.",
 				Tags:        []string{"orders", "promise", "analytics", "read"},
-				InputModes:  []string{"application/json"},
+				InputModes:  []string{mediaTypeJSON},
 				Examples: []string{
 					`{"skill":"promise_health","arguments":{"from":"2026-10-01T00:00:00Z","to":"2026-10-08T00:00:00Z"}}`,
 					`{"skill":"promise_health","arguments":{"from":"2026-10-01T00:00:00Z","to":"2026-10-08T00:00:00Z","pathId":"pick"}}`,

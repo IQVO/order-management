@@ -111,19 +111,27 @@ func (s *MemoryStore) ApplyOrderReceived(_ context.Context, eventId, pathId stri
 // report.ProjectionStore.ApplyOrderAllocated's doc comment for why these
 // facts are applied in the same call as the funnel counter, not a separate
 // method.
+// Promise-basis values mirrored from order.Basis* (PromiseBasis); plain
+// strings here because the projection stores the raw value it received.
+const (
+	promiseBasisCapability = "Capability"
+	promiseBasisLeadTime   = "LeadTime"
+	promiseBasisNetwork    = "Network"
+)
+
 func applyPromiseKPIs(r *rowAcc, at time.Time, basis string, cutoffAt *time.Time, splitShipment bool) {
 	switch basis {
-	case "Capability":
+	case promiseBasisCapability:
 		r.promiseBasisCapability++
-	case "LeadTime":
+	case promiseBasisLeadTime:
 		r.promiseBasisLeadTime++
-	case "Network":
+	case promiseBasisNetwork:
 		r.promiseBasisNetwork++
 	}
 	if splitShipment {
 		r.ordersSplitShipment++
 	}
-	if basis == "Capability" && cutoffAt != nil {
+	if basis == promiseBasisCapability && cutoffAt != nil {
 		r.promiseToCutoffGapSum += cutoffAt.Sub(at).Seconds()
 		r.promiseToCutoffGapSamples++
 	}

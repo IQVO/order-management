@@ -144,7 +144,7 @@ func (c *ProductClassificationConsumer) handleUntilDone(ctx context.Context, pol
 		if ctx.Err() != nil {
 			return false
 		}
-		if !c.waitToRecover(ctx, policy, "handle", err, "partition", msg.Partition, "offset", msg.Offset) {
+		if !c.waitToRecover(ctx, policy, "handle", err, logKeyPartition, msg.Partition, logKeyOffset, msg.Offset) {
 			return false
 		}
 	}
@@ -153,7 +153,7 @@ func (c *ProductClassificationConsumer) handleUntilDone(ctx context.Context, pol
 func (c *ProductClassificationConsumer) waitToRecover(ctx context.Context, policy backoff.BackOff, stage string, err error, args ...any) bool {
 	wait := policy.NextBackOff()
 	c.log(ctx, "product classification: handling failed, retrying the same message",
-		append([]any{"stage", stage, "retry_in", wait.String(), "error", err}, args...)...)
+		append([]any{logKeyStage, stage, logKeyRetryIn, wait.String(), logKeyError, err}, args...)...)
 	select {
 	case <-ctx.Done():
 		return false
@@ -213,7 +213,7 @@ var errUndecodableClassification = errors.New("undecodable ProductClassified")
 func productClassifiedRequestFrom(e ce.Event) (usecases.ApplyProductClassificationRequest, error) {
 	var data productClassifiedData
 	if err := e.DataAs(&data); err != nil {
-		return usecases.ApplyProductClassificationRequest{}, fmt.Errorf("%w: decode data: %v", errUndecodableClassification, err)
+		return usecases.ApplyProductClassificationRequest{}, fmt.Errorf("%w: decode data: %w", errUndecodableClassification, err)
 	}
 	if e.Subject() != "" && data.SKU != "" && e.Subject() != data.SKU {
 		return usecases.ApplyProductClassificationRequest{},
@@ -233,9 +233,9 @@ func productClassifiedRequestFrom(e ce.Event) (usecases.ApplyProductClassificati
 
 // skip logs a message that will never be applied; the caller commits it.
 func (c *ProductClassificationConsumer) skip(ctx context.Context, msg kafkago.Message, why string, cause error, e *ce.Event) {
-	args := []any{"topic", c.reader.Config().Topic, "partition", msg.Partition, "offset", msg.Offset, "error", cause}
+	args := []any{logKeyTopic, c.reader.Config().Topic, logKeyPartition, msg.Partition, logKeyOffset, msg.Offset, logKeyError, cause}
 	if e != nil {
-		args = append(args, "ce_id", e.ID(), "ce_type", e.Type())
+		args = append(args, logKeyCeID, e.ID(), logKeyCeType, e.Type())
 	}
 	c.log(ctx, "product classification: "+why+", skipping", args...)
 }

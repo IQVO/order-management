@@ -39,7 +39,6 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/claudioed/order-management/internal/adapters/kafka/cloudevents"
 	"github.com/claudioed/order-management/internal/application/usecases"
 	"github.com/claudioed/order-management/internal/domain/order"
 )
@@ -162,7 +161,7 @@ func (c *PlannedCapacityConsumer) handleUntilDone(ctx context.Context, policy ba
 		if ctx.Err() != nil {
 			return false
 		}
-		if !c.waitToRecover(ctx, policy, "handle", err, "partition", msg.Partition, "offset", msg.Offset) {
+		if !c.waitToRecover(ctx, policy, "handle", err, logKeyPartition, msg.Partition, logKeyOffset, msg.Offset) {
 			return false
 		}
 	}
@@ -171,7 +170,7 @@ func (c *PlannedCapacityConsumer) handleUntilDone(ctx context.Context, policy ba
 func (c *PlannedCapacityConsumer) waitToRecover(ctx context.Context, policy backoff.BackOff, stage string, err error, args ...any) bool {
 	wait := policy.NextBackOff()
 	c.log(ctx, "planned capacity: kafka unavailable, retrying",
-		append([]any{"stage", stage, "retry_in", wait.String(), "error", err}, args...)...)
+		append([]any{logKeyStage, stage, logKeyRetryIn, wait.String(), logKeyError, err}, args...)...)
 	select {
 	case <-ctx.Done():
 		return false
@@ -185,43 +184,8 @@ func (c *PlannedCapacityConsumer) waitToRecover(ctx context.Context, policy back
 // dead-lettered. Only a commit or DLQ-publish failure is returned (the
 // caller retries the same message).
 func (c *PlannedCapacityConsumer) handleMessage(ctx context.Context, msg kafkago.Message) error {
-	topic := c.reader.Config().Topic
-	msgCtx, span := c.startConsumeSpan(ctx, topic, msg)
-	defer span.End()
-
-	e, err := cloudevents.Decode(msg.Value)
-	if err != nil {
-		recordSpanError(span, err)
-		return c.deadLetter(msgCtx, ctx, msg, "non-CloudEvents message", err, nil)
-	}
-	span.SetAttributes(
-		semconv.MessagingMessageID(e.ID()),
-		semconv.CloudEventsEventType(e.Type()),
-		semconv.CloudEventsEventSource(e.Source()),
-	)
-
-	req, relevant, err := planningRequestFrom(e)
-	if err != nil {
-		recordSpanError(span, err)
-		return c.deadLetter(msgCtx, ctx, msg, "invalid planning event", err, &e)
-	}
-	if !relevant {
-		// Unknown type (forward compatibility) or a known type that carries
-		// nothing the read model lacks (BottleneckDetected): commit past it.
-		return c.commit(ctx, msg)
-	}
-
-	if err := c.applyWithRetry(msgCtx, req); err != nil {
-		if ctx.Err() != nil {
-			// Shutting down: never dead-letter a message only cancellation
-			// interrupted. The offset stays uncommitted, so it is redelivered
-			// on the next start and the use case's claim absorbs the replay.
-			return ctx.Err()
-		}
-		recordSpanError(span, err)
-		return c.deadLetter(msgCtx, ctx, msg, "exhausted retries", err, &e)
-	}
-	return c.commit(ctx, msg)
+	return handleEventMessage(ctx, c, msg, c.reader.Config().Topic,
+		planningRequestFrom, "invalid planning event", c.applyWithRetry)
 }
 
 // planningRequestFrom maps a decoded CloudEvent to an apply request.
@@ -283,10 +247,10 @@ func (c *PlannedCapacityConsumer) applyWithRetry(ctx context.Context, req usecas
 // headers) and commits it. logCtx carries the span; ctx is the consumer's.
 func (c *PlannedCapacityConsumer) deadLetter(logCtx, ctx context.Context, msg kafkago.Message, why string, cause error, e *ce.Event) error {
 	topic := c.reader.Config().Topic
-	args := []any{"topic", topic, "partition", msg.Partition, "offset", msg.Offset,
-		"dlq_topic", topic + dlqTopicSuffix, "error", cause}
+	args := []any{logKeyTopic, topic, logKeyPartition, msg.Partition, logKeyOffset, msg.Offset,
+		logKeyDlqTopic, topic + dlqTopicSuffix, logKeyError, cause}
 	if e != nil {
-		args = append(args, "ce_id", e.ID(), "ce_type", e.Type())
+		args = append(args, logKeyCeID, e.ID(), logKeyCeType, e.Type())
 	}
 	c.log(logCtx, "planned capacity: "+why+", sending to dead-letter topic", args...)
 	if err := c.dlqPublish(ctx, msg, cause); err != nil {
@@ -303,9 +267,9 @@ func (c *PlannedCapacityConsumer) dlqPublish(ctx context.Context, msg kafkago.Me
 	}
 	headers := append([]kafkago.Header{}, msg.Headers...)
 	headers = append(headers,
-		kafkago.Header{Key: "x-dlq-source-topic", Value: []byte(c.reader.Config().Topic)},
-		kafkago.Header{Key: "x-dlq-error", Value: []byte(cause.Error())},
-		kafkago.Header{Key: "x-dlq-failed-at", Value: []byte(time.Now().UTC().Format(time.RFC3339))},
+		kafkago.Header{Key: dlqHeaderSourceTopic, Value: []byte(c.reader.Config().Topic)},
+		kafkago.Header{Key: dlqHeaderError, Value: []byte(cause.Error())},
+		kafkago.Header{Key: dlqHeaderFailedAt, Value: []byte(time.Now().UTC().Format(time.RFC3339))},
 	)
 	return writeDLQ(ctx, c.dlqWriter, kafkago.Message{Key: msg.Key, Value: msg.Value, Headers: headers})
 }

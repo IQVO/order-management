@@ -59,7 +59,7 @@ func (uc *RetryAllocation) Execute(ctx context.Context, id shared.OrderId) (*ord
 	}
 
 	deps := allocationDeps{Orders: uc.Orders, Inventory: uc.Inventory, Events: uc.Events, Clock: uc.Clock, Promise: uc.Promise, DemandProjection: uc.DemandProjection, UnitOfWork: uc.UnitOfWork, ReleaseConfirmations: uc.ReleaseConfirmations}
-	if _, err := allocateAndRelease(ctx, deps, o, backordered, true, o.ReleaseOnAllocation()); err != nil {
+	if err := allocateAndRelease(ctx, deps, o, backordered, true, o.ReleaseOnAllocation()); err != nil {
 		return nil, err
 	}
 	return o, nil
