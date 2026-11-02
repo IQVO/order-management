@@ -19,6 +19,9 @@ import (
 	"github.com/claudioed/order-management/internal/domain/shared"
 )
 
+// statusKey is the JSON field every liveness/readiness/report ping answers with.
+const statusKey = "status"
+
 // DefaultServiceName labels this service in logs when the caller does not
 // supply one.
 const DefaultServiceName = "order-management"
@@ -116,7 +119,7 @@ func NewRouter(s *Server, logger *slog.Logger, serviceName string) http.Handler 
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]string{statusKey: "ok"})
 }
 
 func (s *Server) handleReceiveOrder(w http.ResponseWriter, r *http.Request) {

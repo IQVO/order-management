@@ -283,7 +283,7 @@ func allocateAndRelease(
 	lines []*order.OrderLine,
 	retry bool,
 	releaseOnAllocation bool,
-) (allocationOutcome, error) {
+) error {
 	var outcome allocationOutcome
 	// reportErr is the hard allocation failure to surface to THIS
 	// function's own caller. It is captured outside the atomically
@@ -349,12 +349,12 @@ func allocateAndRelease(
 		return saveReleasePass(ctx, deps, o, newlyAllocated, outcome, released)
 	})
 	if txErr != nil {
-		return outcome, txErr
+		return txErr
 	}
 	if reportErr != nil {
-		return outcome, reportErr
+		return reportErr
 	}
-	return outcome, nil
+	return nil
 }
 
 // saveReleasePass is the tail of a releasing allocation pass, run inside the

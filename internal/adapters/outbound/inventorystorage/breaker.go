@@ -108,7 +108,11 @@ func (c *BreakerClient) Reserve(ctx context.Context, req ports.ReservationReques
 	if err != nil {
 		return ports.ReservationResult{}, err
 	}
-	return v.(ports.ReservationResult), nil
+	res, ok := v.(ports.ReservationResult)
+	if !ok {
+		return ports.ReservationResult{}, fmt.Errorf("breaker returned %T, not a ReservationResult", v)
+	}
+	return res, nil
 }
 
 // RevokeReservation mirrors Reserve's breaker/fallback/timeout shape.
