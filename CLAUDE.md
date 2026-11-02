@@ -34,7 +34,7 @@ docs-site regeneration and local run: `.claude/rules/ci-quality-gates.md` and
   (`make arch-test`). `internal/analytics/report` depends on nothing internal.
 - **One public command (ADR-0005):** callers place an order via `POST /orders`
   alone; allocation + release are a folded, best-effort saga inside it. There is
-  NO public `/allocate` verb and NO `WorkReleaseClient`. `POST /orders/{id}/release`
+  NO public `/allocate` verb and NO `WorkReleaseClient`. `POST /orders/{id}/releases`
   exists only for orders received with `releaseOnAllocation=false` (ADR-0020).
   Read `.claude/rules/bounded-context-boundary.md` before touching the
   allocation/release path.

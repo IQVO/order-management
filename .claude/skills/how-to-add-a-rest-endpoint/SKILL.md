@@ -10,7 +10,7 @@ this order — domain first, adapter last — never the reverse; writing the
 HTTP handler before the domain invariant it enforces produces handlers
 that validate nothing and use cases that get bypassed.
 
-This walks the exact path `POST /orders/{id}/retry-allocation` took
+This walks the exact path `POST /orders/{id}/allocation-retries` took
 (`internal/application/usecases/retry_allocation.go` +
 `internal/adapters/inbound/http/server.go`'s `handleRetryAllocation`) as
 the concrete worked example — read those two files alongside this guide.
@@ -110,7 +110,7 @@ the success case, "no backordered lines" (409), and "order not found"
 
 Add the path to `apis/openapi.yaml` (request/response schemas, the RFC
 7807 problem-detail response for each error case — see the existing
-`/orders/{id}/retry-allocation` entry for the shape).
+`/orders/{id}/allocation-retries` entry for the shape).
 
 Regenerate the Docusaurus REST reference. Do it by hand: the
 `docs-api-drift` CI job is meant to catch a skipped regen but currently
