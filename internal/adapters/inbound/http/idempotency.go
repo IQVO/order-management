@@ -275,6 +275,20 @@ func runFreshRequest(w http.ResponseWriter, r *http.Request, ctx context.Context
 		}
 	}()
 
+	// The handler runs behind a SAVEPOINT. A mapped domain conflict — a
+	// statement failing on the server and being translated to a typed
+	// error the handler answers with a truthful 4xx — leaves the whole
+	// transaction ABORTED (25P02), so without the savepoint the outcome
+	// UPDATE below would fail and the client would get a 500 for a
+	// request that deserved its 4xx, with nothing cached and the same
+	// key re-running the handler. The savepoint localises the abort so
+	// the transaction can be healed and the truthful outcome committed.
+	if _, err := tx.Exec(ctx, "SAVEPOINT handler_run"); err != nil {
+		_ = tx.Rollback(ctx)
+		writeProblem(w, http.StatusInternalServerError, internalErrorProblem, err.Error(), r.URL.Path)
+		return
+	}
+
 	txCtx := pgtx.WithTx(ctx, tx)
 	rec := httptest.NewRecorder()
 	next.ServeHTTP(rec, r.WithContext(txCtx))
@@ -289,6 +303,27 @@ func runFreshRequest(w http.ResponseWriter, r *http.Request, ctx context.Context
 		_ = tx.Rollback(ctx)
 		writeRecorded(w, rec)
 		return
+	}
+
+	if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT handler_run"); err != nil {
+		// A statement inside the handler failed on the server: the
+		// transaction is aborted. Rolling back to the savepoint discards
+		// the handler's partial writes — the correct all-or-nothing
+		// semantics for an error answer — and returns the transaction
+		// to health.
+		if _, rerr := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT handler_run"); rerr != nil {
+			_ = tx.Rollback(ctx)
+			writeProblem(w, http.StatusInternalServerError, internalErrorProblem, err.Error(), r.URL.Path)
+			return
+		}
+		if rec.Code < http.StatusBadRequest {
+			// A success answer whose writes cannot be committed must
+			// neither be returned nor cached: fail the request so the
+			// same key retries the real work.
+			_ = tx.Rollback(ctx)
+			writeProblem(w, http.StatusInternalServerError, internalErrorProblem, err.Error(), r.URL.Path)
+			return
+		}
 	}
 
 	// Every other NORMAL (non-panic) response is cached here, including a
