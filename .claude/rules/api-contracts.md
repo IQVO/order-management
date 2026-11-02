@@ -13,7 +13,7 @@ paths:
   allocation-then-release into the same call (ADR-0005). 201 always, even
   if the implicit allocation pass hits a hard failure. With `DATABASE_URL`
   set the route is wrapped by `RequireIdempotencyKey` (ADR-0023): 400
-  `idempotency-key-required` without the header, 422
+  `idempotency-key-required` without the header, 409
   `idempotency-key-reused` for the same key with a different body, stored
   response replayed otherwise (the header is not declared in the spec).
   Optional `releaseOnAllocation` (default `true`; `false` = hold after
@@ -24,11 +24,11 @@ paths:
   at or before it via `PromisePolicy.FeasibleBy`, and an infeasible
   deadline comes back with NO `promiseDate` rather than an error).
 - `GET    /orders/{id}`                  → `getOrder`
-- `POST   /orders/{id}/release`          → `releaseHeldOrder` (ADR-0020) —
+- `POST   /orders/{id}/releases`          → `releaseHeldOrder` (ADR-0020) —
   releases a HELD order's allocated lines through the same release leg.
   Idempotent for a held order (200, no event, if already released); 409
   `order-not-held` for an order that was never held.
-- `POST   /orders/{id}/retry-allocation` → `retryAllocation` — 503 on a
+- `POST   /orders/{id}/allocation-retries` → `retryAllocation` — 503 on a
   genuine hard failure (this IS an explicit ask for allocation now).
 - `DELETE /orders/{id}`                  → `cancelOrder` — 409 if any line
   already `Released` (BR6); 204 on success.

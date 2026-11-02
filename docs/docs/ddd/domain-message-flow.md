@@ -77,7 +77,7 @@ sequenceDiagram
   OM-)WP: evt: OrderAllocated with no lines, held
   OM-->>NF: 201 order, promiseDate absent if the deadline cannot be met
   alt network commits
-    NF->>OM: cmd: POST /orders/id/release
+    NF->>OM: cmd: POST /orders/id/releases
     OM->>INV: cmd: POST /reservations again to reconfirm
     OM-)WP: evt: OrderAllocated with released lines
     OM-->>NF: 200 order Released

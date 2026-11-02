@@ -1,8 +1,6 @@
 package http
 
 import (
-	"context"
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"os"
@@ -41,7 +39,9 @@ type Server struct {
 	// leaves the route unregistered (404), as before.
 	PlannedCapacity *usecases.GetPlannedCapacity
 	// IdempotencyPool, when non-nil, wires RequireIdempotencyKey onto
-	// POST /orders (see idempotency.go). A nil pool means "no
+	// every POST route (POST /orders, POST /orders/{id}/releases and
+	// POST /orders/{id}/allocation-retries; see idempotency.go). A nil pool
+	// means "no
 	// transactional Postgres backing wired" (in-memory dev/test
 	// configuration) — the idempotency middleware needs a real
 	// pgxpool.Pool to begin its own transaction, so it is simply not
@@ -86,29 +86,27 @@ func NewRouter(s *Server, logger *slog.Logger, serviceName string) http.Handler 
 	// conventions; no hand-rolled histogram needed.
 	r.Use(otelchimetric.NewServerRequestDuration(otelchimetric.NewBaseConfig(serviceName)))
 	r.Use(RequestLogger(logger))
-	r.Use(middleware.Recoverer)
-	r.Use(corsMiddleware())
+	r.Use(middleware.Recoverer, corsMiddleware())
 
 	r.Get("/healthz", s.handleHealthz)
 	r.Get("/readyz", s.handleReadyz)
 
-	// POST /orders is route-scoped (r.With, not r.Use) behind
-	// RequireIdempotencyKey — it is the one mutating endpoint that
-	// creates a NEW resource with a server-generated id, so a lost
-	// response and a client retry would otherwise create a duplicate
-	// order. The other mutating routes act on a caller-supplied {id}
-	// and are lower priority for v1 (see the ADR). IdempotencyPool nil
-	// (in-memory dev/test configuration, no transactional Postgres
-	// backing) skips the middleware entirely, mirroring every other
-	// optional Postgres-backed capability's nil convention in this repo.
+	// Every POST route is route-scoped (r.With, not r.Use) behind
+	// RequireIdempotencyKey (REST API guideline 2.1, 2.6): a lost response
+	// and a client retry must never apply a command twice. DELETE
+	// /orders/{id} is idempotent by method and takes no middleware.
+	// IdempotencyPool nil (in-memory dev/test configuration, no
+	// transactional Postgres backing) skips the middleware entirely,
+	// mirroring every other optional Postgres-backed capability's nil
+	// convention in this repo.
+	keyed := r.With()
 	if s.IdempotencyPool != nil {
-		r.With(RequireIdempotencyKey(s.IdempotencyPool)).Post("/orders", s.handleReceiveOrder)
-	} else {
-		r.Post("/orders", s.handleReceiveOrder)
+		keyed = r.With(RequireIdempotencyKey(s.IdempotencyPool))
 	}
+	keyed.Post("/orders", s.handleReceiveOrder)
 	r.Get("/orders/{id}", s.handleGetOrder)
-	r.Post("/orders/{id}/retry-allocation", s.handleRetryAllocation)
-	r.Post("/orders/{id}/release", s.handleReleaseHeldOrder)
+	keyed.Post("/orders/{id}/allocation-retries", s.handleRetryAllocation)
+	keyed.Post("/orders/{id}/releases", s.handleReleaseHeldOrder)
 	r.Delete("/orders/{id}", s.handleCancelOrder)
 	if s.PlannedCapacity != nil {
 		r.Get("/planned-capacity", s.handleGetPlannedCapacity)
@@ -237,35 +235,6 @@ func (s *Server) handleCancelOrder(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// orderResponse builds the order DTO and, when a planned-capacity read model
-// is wired, annotates it with the capacity constraint (ADR 0031). A failing
-// read model is logged and omitted: an order read must never fail because an
-// advisory annotation is unavailable.
-func (s *Server) orderResponse(ctx context.Context, o *order.Order) orderResponse {
-	resp := toOrderResponse(o)
-	if s.CapacityConstraints == nil {
-		return resp
-	}
-	windows, err := s.CapacityConstraints.For(ctx, o)
-	if err != nil {
-		slog.WarnContext(ctx, "capacity constraint lookup failed; omitting annotation",
-			"order_id", o.ID().String(), "error", err)
-		return resp
-	}
-	if len(windows) == 0 {
-		return resp
-	}
-	brief := make([]plannedCapacityWindowBrief, len(windows))
-	for i, w := range windows {
-		brief[i] = plannedCapacityWindowBrief{
-			PlanID: w.PlanID, WindowStart: w.Start.UTC().Format(timeFormat), WindowEnd: w.End.UTC().Format(timeFormat),
-			Shortage: w.Shortage, BottleneckStep: w.BottleneckStep,
-		}
-	}
-	resp.CapacityConstraint = &capacityConstraintResponse{Constrained: true, Site: s.CapacityConstraints.SiteFor(o), Windows: brief}
-	return resp
-}
-
 // handleGetPlannedCapacity serves the local planned-capacity read model for
 // one site: GET /planned-capacity?site=SIM1[&from=RFC3339]. It lists windows
 // of any status ending after `from` (default: now), so an operator can see
@@ -317,81 +286,6 @@ func orderIDParam(w http.ResponseWriter, r *http.Request) (shared.OrderId, bool)
 	return id, true
 }
 
-const timeFormat = time.RFC3339
-
-func siteResponse(o *order.Order) *string {
-	s := o.FulfillmentSiteID()
-	if s == nil {
-		return nil
-	}
-	v := s.String()
-	return &v
-}
-
-func toOrderResponse(o *order.Order) orderResponse {
-	lines := make([]orderLineResponse, 0, len(o.Lines()))
-	for _, l := range o.Lines() {
-		lines = append(lines, orderLineResponse{
-			LineNo:        l.LineNo(),
-			SKU:           l.SKU().String(),
-			Quantity:      l.Quantity(),
-			PathID:        l.PathID().String(),
-			GiftWrap:      l.GiftWrap(),
-			Status:        string(l.Status()),
-			ReservationID: l.ReservationID(),
-		})
-	}
-
-	var promiseDate *string
-	if d := o.PromiseDate(); d != nil {
-		formatted := d.UTC().Format(timeFormat)
-		promiseDate = &formatted
-	}
-
-	return orderResponse{
-		ID:                   o.ID().String(),
-		Status:               string(o.Status()),
-		AllowPartialShipment: o.AllowPartialShipment(),
-		ReleaseOnAllocation:  o.ReleaseOnAllocation(),
-		RequiredShipBy:       o.RequiredShipBy(),
-		FulfillmentSiteID:    siteResponse(o),
-		PromiseDate:          promiseDate,
-		Lines:                lines,
-	}
-}
-
-func decodeJSON(w http.ResponseWriter, r *http.Request, dest any) bool {
-	if err := json.NewDecoder(r.Body).Decode(dest); err != nil {
-		writeProblem(w, http.StatusBadRequest, problemInfo{"malformed-request-body", "The request body is not valid JSON"}, err.Error(), r.URL.Path)
-		return false
-	}
-	return true
-}
-
-// writeError writes a domain/application error as an RFC 7807
-// (application/problem+json) response.
-func writeError(w http.ResponseWriter, r *http.Request, err error) {
-	writeProblem(w, statusFor(err), problemFor(err), err.Error(), r.URL.Path)
-}
-
-func writeProblem(w http.ResponseWriter, status int, info problemInfo, detail, instance string) {
-	w.Header().Set("Content-Type", "application/problem+json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(problemDetails{
-		Type:     problemBaseURI + info.slug,
-		Title:    info.title,
-		Status:   status,
-		Detail:   detail,
-		Instance: instance,
-	})
-}
-
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
-}
-
 // corsMiddleware allows the warehouse-console browser SPA (and this
 // service's own future MFE remote dev origin) to call this API directly
 // from the browser. REST and MCP are unauthenticated by decision
@@ -403,8 +297,10 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 // deployments.
 //
 // "Idempotency-Key" is allowed because the operator MFE sends one on every
-// POST /orders (ADR 0038; the service requires it with Postgres, ADR 0023):
+// POST (ADR 0038; the service requires it with Postgres, ADR 0023, ADR 0048):
 // without it the browser's preflight fails and the POST is never sent.
+// "Idempotency-Replayed" and "Location" are exposed so a browser caller can
+// read them.
 func corsMiddleware() func(http.Handler) http.Handler {
 	origins := []string{"http://localhost:5173", "http://localhost:5181"}
 	if v := os.Getenv("CORS_ALLOWED_ORIGINS"); v != "" {
@@ -414,6 +310,7 @@ func corsMiddleware() func(http.Handler) http.Handler {
 		AllowedOrigins:   origins,
 		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete},
 		AllowedHeaders:   []string{"Content-Type", "Authorization", "Idempotency-Key"},
+		ExposedHeaders:   []string{"Location", IdempotencyReplayedHeader},
 		AllowCredentials: false,
 		MaxAge:           300,
 	})

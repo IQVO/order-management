@@ -447,25 +447,30 @@ Logs are structured `log/slog` JSON on stdout; relevant OTel env vars:
 
 Five order endpoints, an opt-in planned-capacity read, and liveness/readiness
 probes. The full contract, including the RFC 7807 error schema, is in
-[`apis/openapi.yaml`](apis/openapi.yaml).
+[`apis/openapi.yaml`](apis/openapi.yaml). The API follows the fleet REST API
+guideline ([ADR 0048](docs/docs/adr/0048-adopt-fleet-rest-api-guideline.md)):
+URLs are nouns (commands are transition resources, `releases` and
+`allocation-retries`), **every `POST` requires an `Idempotency-Key`** and a
+replay is answered with `Idempotency-Replayed: true`, and `DELETE` is
+idempotent by method. `GET /planned-capacity` is a bounded read model
+(`x-pagination-exempt: report`).
 
 | Method | Path | Use case |
 | --- | --- | --- |
-| `POST` | `/orders` | ReceiveOrder — allocates and releases automatically. With `DATABASE_URL` set it requires an `Idempotency-Key` request header (ADR 0023); a request without one gets `400`. |
+| `POST` | `/orders` | ReceiveOrder — allocates and releases automatically. Idempotent: with `DATABASE_URL` set it requires an `Idempotency-Key` request header (ADR 0023, ADR 0048); a request without one gets `400`. |
 | `GET` | `/orders/{id}` | GetOrder |
-| `POST` | `/orders/{id}/retry-allocation` | RetryAllocation — retries and releases automatically |
-| `POST` | `/orders/{id}/release` | ReleaseHeldOrder — releases an order received with `releaseOnAllocation: false` (ADR 0020) |
+| `POST` | `/orders/{id}/allocation-retries` | RetryAllocation — retries and releases automatically |
+| `POST` | `/orders/{id}/releases` | ReleaseHeldOrder — releases an order received with `releaseOnAllocation: false` (ADR 0020) |
 | `DELETE` | `/orders/{id}` | CancelOrder |
 | `GET` | `/planned-capacity?site=` | GetPlannedCapacity — registered only when `PLANNED_CAPACITY_CONSUMER_GROUP` is set (ADR 0031) |
 | `GET` | `/healthz` | Liveness probe |
 | `GET` | `/readyz` | Readiness probe — flips to `503` first on shutdown (ADR 0025) |
 
-`POST /orders/{id}/allocate` and the old general-purpose
-`POST /orders/{id}/release` were removed by
+The old general-purpose allocate and release verbs were removed by
 [ADR 0005](docs/docs/adr/0005-choreographed-release-via-kafka.md): a caller
 expresses ONE intent, placing an order, and this service internally
 attempts allocation-then-release automatically, right after intake and
-again on retry. The current `/release` route is ADR 0020's opt-in hold:
+again on retry. The current `/releases` route is ADR 0020's opt-in hold:
 `POST /orders` with `releaseOnAllocation: false` allocates and stops, and
 optional `requiredShipBy` constrains the promise to a window that meets
 that deadline (no `promiseDate` in the response means it cannot).
@@ -487,12 +492,17 @@ curl -s localhost:8080/healthz
 `PathSelectionPolicy` — the shortest-cycle-time eligible active path, or the
 default `pick` when no catalogue is configured, ADR 0021);
 `allowPartialShipment` defaults to `false` (ship-complete).
-This is the one route that creates a NEW resource with a
-server-generated id, so (with Postgres) it requires a caller-supplied `Idempotency-Key`
-header (ADR 0023): a retried request with the SAME key and the SAME body
-replays the original response instead of creating a second order; the
-same key with a DIFFERENT body is rejected with `422`; a missing key is
-rejected with `400`.
+This route creates a NEW resource with a server-generated id, so (with
+Postgres) it requires a caller-supplied `Idempotency-Key` header (ADR 0023,
+ADR 0048), as does every other `POST` of this API: a retried request with the
+SAME key, method, path and body replays the original response (status, body
+and headers, plus `Idempotency-Replayed: true`) instead of creating a second
+order; the same key with a DIFFERENT method, path or body is rejected with
+`409` `idempotency-key-reused`; a missing key is rejected with `400`
+`idempotency-key-required` and a key that is not 1-128 printable ASCII
+characters with `400` `idempotency-key-invalid`. 2xx and 4xx answers are
+stored; a 5xx is rolled back with the order and never stored, so the retry
+re-executes.
 
 ```bash
 curl -s -X POST localhost:8080/orders \
@@ -518,7 +528,7 @@ curl -s -X POST localhost:8080/orders \
 A `409` from inventory-storage backorders that one line instead — a
 business fact, not a call failure — and, per BR3, a ship-complete order
 with any backordered line stays `Backordered` and releases nothing until
-`retry-allocation` clears it:
+an allocation retry (`POST /orders/{id}/allocation-retries`) clears it:
 
 ```bash
 # {"id":"ord-...","status":"Backordered","allowPartialShipment":false,
@@ -537,7 +547,8 @@ curl -s localhost:8080/orders/$ORDER_ID
 then releases whatever it newly clears:
 
 ```bash
-curl -s -X POST localhost:8080/orders/$ORDER_ID/retry-allocation
+curl -s -X POST localhost:8080/orders/$ORDER_ID/allocation-retries \
+  -H 'Idempotency-Key: 9c1d7b52-....'
 # 200 OK — status becomes Released (or PartiallyReleased) once every
 # backorder clears and BR3 permits release
 ```

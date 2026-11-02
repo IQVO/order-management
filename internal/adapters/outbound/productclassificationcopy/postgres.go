@@ -31,6 +31,7 @@ import (
 
 	"github.com/claudioed/order-management/internal/application/ports"
 	"github.com/claudioed/order-management/internal/pgtx"
+	"github.com/claudioed/order-management/internal/pkg/logsanitize"
 )
 
 // querier is the subset of pgx both *pgxpool.Pool and pgx.Tx satisfy.
@@ -79,7 +80,7 @@ func (s *PostgresStore) GetClassification(ctx context.Context, sku string) (port
 		return ports.ProductClassification{SKU: sku, Known: false}, nil
 	case err != nil:
 		if s.logger != nil {
-			s.logger.WarnContext(ctx, "product classification copy unreadable; treating the SKU as unclassified", "sku", sku, "error", err)
+			s.logger.WarnContext(ctx, "product classification copy unreadable; treating the SKU as unclassified", "sku", logsanitize.Sanitize(sku), "error", err)
 		}
 		return ports.ProductClassification{SKU: sku, Known: false}, nil
 	}

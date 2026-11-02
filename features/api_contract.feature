@@ -8,7 +8,7 @@
 #   - read-only pathId .............. components.schemas.OrderLine.pathId
 #                                     (.claude/rules/domain-model.md,
 #                                     "pathId is internal-only (ADR-0005)")
-#   - no-backordered-lines guard .... paths./orders/{id}/retry-allocation.post
+#   - no-backordered-lines guard .... paths./orders/{id}/allocation-retries.post
 #                                     responses."409"
 Feature: REST contract edge paths
   Documented corners of the REST surface the lifecycle features do not

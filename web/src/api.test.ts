@@ -21,13 +21,13 @@ describe("apiPost", () => {
   it("sends no Idempotency-Key header when none is given", async () => {
     let present = true;
     server.use(
-      http.post(`${ORDER_API_BASE}/orders/ord-1/release`, ({ request }) => {
+      http.post(`${ORDER_API_BASE}/orders/ord-1/releases`, ({ request }) => {
         present = request.headers.has("Idempotency-Key");
         return new HttpResponse(null, { status: 204 });
       }),
     );
 
-    await apiPost("/orders/ord-1/release", {});
+    await apiPost("/orders/ord-1/releases", {});
 
     expect(present).toBe(false);
   });

@@ -38,7 +38,7 @@ flowchart TB
         MFE["<b>order-mgmt-mfe</b><br/>(this repo's web/)"]
     end
 
-    NF ==>|"HTTP POST /orders (held, requiredShipBy)<br/>POST /orders/{id}/release<br/>DELETE /orders/{id}"| OM
+    NF ==>|"HTTP POST /orders (held, requiredShipBy)<br/>POST /orders/{id}/releases<br/>DELETE /orders/{id}"| OM
     OM ==>|"HTTP POST /reservations<br/>DELETE /reservations/{id}"| INV
     PM -.->|"warehouse.product-master.events (opt-in)<br/>ProductClassified"| OM
     OM -->|"warehouse.order-management.events<br/>OrderAllocated · OrderPartiallyAllocated"| WP
@@ -91,7 +91,7 @@ flowchart LR
   FE -->|"U PL -> D ACL<br/>Kafka task.TaskCPTMissed, package.PackageManifested"| OM
   WPL -.->|"U PL -> D ACL, opt-in<br/>Kafka capacityplan.CapacityPlan*"| OM
   OM -->|"U PL -> D CF<br/>Kafka order.OrderAllocated, order.OrderPartiallyAllocated"| WP
-  OM -->|"U OHS -> D C/S<br/>REST POST /orders, POST /orders/id/release, DELETE /orders/id"| NF
+  OM -->|"U OHS -> D C/S<br/>REST POST /orders, POST /orders/id/releases, DELETE /orders/id"| NF
   OM -->|"U OHS -> D CF<br/>REST GET /orders/id, MCP get_order"| CON
 ```
 
@@ -116,7 +116,7 @@ parameters.
 | wes-work-planning | order-management | Published Language | Anti-Corruption Layer (confirmation of a release; reads only `reference` and `line_no`) | Kafka `warehouse.work-planning.events`, `WorkUnitCreated` | opt-in, off by default: `RELEASE_CONFIRMATION_MODE=kafka` + `RELEASE_CONFIRMATION_CONSUMER_GROUP` | `inbound/kafka/release_confirmation_consumer.go` (ADR 0043) |
 | fulfillment-execution | order-management | Published Language | Anti-Corruption Layer | Kafka `warehouse.fulfillment.events` | live whenever `KAFKA_BROKERS` is set | `inbound/kafka/repromise_consumer.go` |
 | warehouse-planning | order-management | Published Language | Anti-Corruption Layer (local read model) | Kafka `warehouse.warehouse-planning.events` | opt-in, `PLANNED_CAPACITY_CONSUMER_GROUP` | `inbound/kafka/planned_capacity_consumer.go` |
-| order-management | network-fulfillment | Open Host Service (`apis/openapi.yaml`) | Customer/Supplier; network-fulfillment is the ACL to the external network | REST `POST /orders`, `POST /orders/{id}/release`, `DELETE /orders/{id}` | live | ADR 0020 |
+| order-management | network-fulfillment | Open Host Service (`apis/openapi.yaml`) | Customer/Supplier; network-fulfillment is the ACL to the external network | REST `POST /orders`, `POST /orders/{id}/releases`, `DELETE /orders/{id}` | live | ADR 0020 |
 | order-management | warehouse-ops-agent, order-mgmt-mfe | Open Host Service | Conformist | REST, MCP `get_order` | live | ADR 0007, ADR 0010 |
 | order-management | wes-work-planning (synchronous) | — | — | REST `POST /paths/{pathId}/work-units` | deliberately absent since ADR 0005 | ADR 0005 |
 
@@ -235,7 +235,7 @@ fulfillment network. Its `internal/adapters/outbound/ordermanagement`
 client raises a **held** order (`releaseOnAllocation: false`,
 `allowPartialShipment: false`, `requiredShipBy` = the network's deadline)
 via `POST /orders`, reads an absent `promiseDate` as "cannot meet the
-deadline", and later commits with `POST /orders/{id}/release` or rejects
+deadline", and later commits with `POST /orders/{id}/releases` or rejects
 with `DELETE /orders/{id}`. Network vocabulary (PO, ASIN, acknowledgement)
 and customer PII stay on its side of the boundary — see
 [ADR 0020](/docs/adr/0020-network-originated-demand-hold-and-deadline-feasibility).

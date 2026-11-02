@@ -1,8 +1,8 @@
 # Derived from: apis/openapi.yaml
 #   - components.responses.OrderNotFound on paths./orders/{id}.delete (cancelOrder)
-#     and paths./orders/{id}/release.post (releaseHeldOrder)
+#     and paths./orders/{id}/releases.post (releaseHeldOrder)
 #   - components.responses.DownstreamUnavailable on
-#     paths./orders/{id}/retry-allocation.post and paths./orders/{id}.delete
+#     paths./orders/{id}/allocation-retries.post and paths./orders/{id}.delete
 #     ("never papered over with a 2xx"; a failed revoke "fails the whole
 #     cancellation and leaves the order untouched, so retrying is safe")
 #   - apis problem types: internal/adapters/inbound/http/errors.go

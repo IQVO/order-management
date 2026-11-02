@@ -16,27 +16,11 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/claudioed/order-management/internal/application/ports"
 	"github.com/claudioed/order-management/internal/domain/order"
 	"github.com/claudioed/order-management/internal/domain/shared"
 )
-
-// maxCauseLen bounds OrderAllocationPartiallyFailed.Cause so a verbose
-// upstream error (or an accidentally-embedded response body) never turns a
-// visibility event into an unbounded log payload.
-const maxCauseLen = 500
-
-// truncateCause defensively bounds an error string for safe logging. It
-// never returns more than maxCauseLen runes.
-func truncateCause(s string) string {
-	r := []rune(s)
-	if len(r) <= maxCauseLen {
-		return s
-	}
-	return string(r[:maxCauseLen]) + "…"
-}
 
 // allocationOutcome counts what one allocation pass achieved.
 type allocationOutcome struct {
@@ -121,119 +105,6 @@ func allocateLines(
 	}
 
 	return outcome, nil
-}
-
-// publishOrderAllocationOutcome emits the order-level event that matches
-// the aggregate's derived status after an allocation-then-release pass. A
-// fully backordered order emits no order-level event: its per-line
-// OrderLineBackordered facts already carry the whole story.
-//
-// StatusReleased/StatusPartiallyReleased are included alongside
-// StatusAllocated/StatusPartiallyAllocated because allocateAndRelease runs
-// release in the SAME pass, right after allocation succeeds: by the time
-// this function reads o.Status(), a ship-complete order that just became
-// fully allocated has typically already been carried through to
-// StatusReleased, and a partial-shipment order to StatusPartiallyReleased.
-// OrderAllocated/OrderPartiallyAllocated are the SAME facts as before,
-// just now additionally carrying the lines released in this pass — they
-// are not renamed, because from an integration consumer's point of view
-// "this order's allocation pass concluded, and here is what was released
-// as part of it" is exactly the same milestone as pre-redesign
-// OrderAllocated, just enriched.
-func publishOrderAllocationOutcome(
-	ctx context.Context,
-	events ports.EventPublisher,
-	clock ports.Clock,
-	o *order.Order,
-	outcome allocationOutcome,
-	released []shared.ReleasedLine,
-) error {
-	// Nothing to say only when this pass neither changed allocation NOR
-	// released anything. A held order's release (ADR 0020) re-enters with
-	// every line already Allocated -- allocated == 0 -- but releases them;
-	// wes-work-planning learns about released lines only from this event's
-	// Lines, so suppressing it left released held orders with no work ever
-	// created (they never shipped).
-	if outcome.allocated == 0 && outcome.backordered == 0 && len(released) == 0 {
-		return nil
-	}
-
-	var promiseDate time.Time
-	if d := o.PromiseDate(); d != nil {
-		promiseDate = *d
-	}
-	var promiseCptId string
-	if id := o.PromiseCptId(); id != nil {
-		promiseCptId = *id
-	}
-	var promiseBasis string
-	if b := o.PromiseBasis(); b != nil {
-		promiseBasis = b.String()
-	}
-
-	switch o.Status() {
-	case order.StatusAllocated, order.StatusReleased:
-		return events.Publish(ctx, shared.NewOrderAllocatedWithPromise(clock.Now(), o.ID(), promiseDate, promiseCptId, promiseBasis, released))
-	case order.StatusPartiallyAllocated, order.StatusPartiallyReleased:
-		return events.Publish(ctx, shared.NewOrderPartiallyAllocatedWithPromise(
-			clock.Now(), o.ID(), outcome.allocated, outcome.backordered, promiseDate, promiseCptId, promiseBasis, released,
-		))
-	default:
-		return nil
-	}
-}
-
-// publishReleasePassEvents publishes everything a release-on-allocation pass
-// announces once the aggregate is saved: the order-level outcome event
-// (OrderAllocated/OrderPartiallyAllocated, carrying the released lines for
-// wes-work-planning) followed by the analytics release facts.
-func publishReleasePassEvents(
-	ctx context.Context,
-	deps allocationDeps,
-	o *order.Order,
-	outcome allocationOutcome,
-	released []shared.ReleasedLine,
-) error {
-	if err := publishOrderAllocationOutcome(ctx, deps.Events, deps.Clock, o, outcome, released); err != nil {
-		return err
-	}
-	return publishReleaseFacts(ctx, deps.Events, deps.Clock, o, released)
-}
-
-// publishReleaseFacts raises the release facts for the lines released in
-// THIS pass — the real Allocated -> Released transition performed by
-// releaseAllocatedLines. One OrderLineReleased per line released now (never
-// for a line released in an earlier pass), then OrderReleased when that pass
-// left every line of the order Released. Both are analytics-only (the
-// integration topic still carries just OrderAllocated/OrderPartiallyAllocated/
-// OrderRepromised) and feed the Order Funnel's linesReleased/ordersReleased
-// (ADR 0006). They are published inside the same atomically() scope as the
-// aggregate Save, so with the transactional outbox they commit with it.
-//
-// released is empty — and nothing is raised — when the release leg did not
-// run or released nothing: a BR3-blocked ship-complete order, a held order, or
-// a held order whose reconfirm lost a reservation.
-func publishReleaseFacts(
-	ctx context.Context,
-	events ports.EventPublisher,
-	clock ports.Clock,
-	o *order.Order,
-	released []shared.ReleasedLine,
-) error {
-	if len(released) == 0 {
-		return nil
-	}
-	for _, rl := range released {
-		if err := events.Publish(ctx, shared.NewOrderLineReleased(
-			clock.Now(), o.ID(), rl.LineNo, rl.PathID, WorkUnitID(o.ID(), rl.LineNo),
-		)); err != nil {
-			return err
-		}
-	}
-	if o.Status() == order.StatusReleased {
-		return events.Publish(ctx, shared.NewOrderReleased(clock.Now(), o.ID()))
-	}
-	return nil
 }
 
 // allocationDeps bundles the outbound dependencies allocateAndRelease
@@ -331,14 +202,6 @@ func allocatedLineNos(o *order.Order) []int {
 		}
 	}
 	return out
-}
-
-// publishActiveDemand emits an ACTIVE projection only for lines allocated in
-// the current pass, each with its OWN promise-group cutoff as due_at. It
-// runs after the aggregate Save but inside the same UnitOfWork, so the
-// order mutation and its outbox rows commit together.
-func publishActiveDemand(ctx context.Context, deps allocationDeps, o *order.Order, lines []*order.OrderLine) error {
-	return deps.DemandProjection.publishForGroups(ctx, deps.Events, deps.Clock.Now(), o, lines, shared.SiteSkuDemandActive)
 }
 
 // promiseGroupByLine indexes o.PromiseGroups() (ADR 0014 §3 / ADR 0017)
@@ -539,80 +402,6 @@ func linesWithStatus(lines []*order.OrderLine, status order.LineStatus) []*order
 	return out
 }
 
-// salvageAllocationFailure persists the partial allocation that genuinely
-// happened before a hard (non-business) allocation failure, so a real
-// upstream reservation is never stranded with nothing in this context able
-// to revoke it, and publishes OrderAllocationPartiallyFailed for
-// visibility. It returns nil when the partial progress was persisted —
-// the hard failure itself travels to the caller via allocateAndRelease's
-// reportErr, letting the transaction COMMIT the progress — and any save
-// or publish failure is returned joined onto allocErr so
-// errors.Is(err, allocErr) still holds.
-func salvageAllocationFailure(ctx context.Context, deps allocationDeps, o *order.Order, outcome allocationOutcome, allocErr error) error {
-	deps.setPromiseDate(o)
-	if saveErr := deps.Orders.Save(ctx, o); saveErr != nil {
-		return errors.Join(allocErr, saveErr)
-	}
-	// The genuinely-allocated lines carry site demand exactly as a clean
-	// pass would; suppressing the projection here would hide real
-	// reservations from the site. Joined like every other best-effort
-	// step below so errors.Is(err, allocErr) still holds.
-	newlyAllocated := linesWithStatus(o.Lines(), order.LineAllocated)
-	if projErr := publishActiveDemand(ctx, deps, o, newlyAllocated); projErr != nil {
-		return errors.Join(allocErr, projErr)
-	}
-	// Best-effort visibility: a failure publishing this event must never
-	// mask or replace allocErr, the real failure — it is joined in
-	// exactly like the saveErr case above so errors.Is(err, allocErr)
-	// still holds.
-	remaining := len(o.LinesWithStatus(order.LinePending))
-	if pubErr := deps.Events.Publish(ctx, shared.NewOrderAllocationPartiallyFailed(
-		deps.Clock.Now(), o.ID(), outcome.allocated, remaining, truncateCause(allocErr.Error()),
-	)); pubErr != nil {
-		return errors.Join(allocErr, pubErr)
-	}
-	return nil
-}
-
-// releaseAllocatedLines performs allocateAndRelease's release leg: when
-// the aggregate passes the BR3 gate (o.EnsureReleasable), every line it
-// currently reports Allocated is released via the pure domain transition
-// o.Release, and its released-line detail — attributed to the specific
-// PromiseGroup the line belongs to (ADR 0014 §3 / ADR 0017) — is
-// collected for the integration event payload.
-//
-// A nil slice with a nil error means release did not run or had nothing
-// to release: EnsureReleasable refusing a ship-complete order that still
-// has unallocated lines is a gate, not a failure.
-func releaseAllocatedLines(o *order.Order, promiseByLine map[int]order.PromiseGroup) ([]shared.ReleasedLine, error) {
-	if err := o.EnsureReleasable(); err != nil {
-		return nil, nil
-	}
-	class := o.FulfillmentClass().String()
-	var released []shared.ReleasedLine
-	for _, line := range o.LinesWithStatus(order.LineAllocated) {
-		if err := o.Release(line.LineNo()); err != nil {
-			return nil, err
-		}
-		rl := shared.ReleasedLine{
-			LineNo: line.LineNo(), SKU: line.SKU(), PathID: line.PathID(), GiftWrap: line.GiftWrap(),
-			FulfillmentClass: class,
-		}
-		if g, ok := promiseByLine[line.LineNo()]; ok {
-			cutoffAt := g.Promise.CutoffAt
-			basis := g.Promise.Basis.String()
-			rl.PromiseCutoffAt = &cutoffAt
-			rl.PromiseBasis = &basis
-			if g.Promise.CptId != "" {
-				cptId := g.Promise.CptId
-				rl.PromiseCptId = &cptId
-			}
-		}
-		released = append(released, rl)
-	}
-	return released, nil
-}
-
 // WorkUnitID builds the deterministic, deliberately-never-transmitted id
 // (order_id, line_no) => work unit reference this context and
 // wes-work-planning's Kafka consumer BOTH independently derive from the
@@ -675,82 +464,4 @@ func ParseWorkUnitID(workUnitID string) (orderID shared.OrderId, lineNo int, ok 
 		return "", 0, false
 	}
 	return shared.OrderId(orderPart), n, true
-}
-
-// reconfirmAllocatedLines re-reserves every Allocated line NOT in justReserved
-// right before release. inventory-storage reservations expire (30 min TTL by
-// default), so a line allocated long ago -- an order that sat Backordered or
-// held -- may no longer hold any stock. Re-reserving is idempotent while the
-// reservation is still active (inventory-storage hands back the same one for
-// the same demandRef, SKU and quantity) and takes a fresh one if it lapsed.
-// If the stock is gone the line goes back to Backordered. It returns how many
-// lines lost their reservation.
-//
-// Observed live (warehouse-day order #003): a ship-complete order waited
-// Backordered for longer than the TTL; retry-allocation re-reserved only
-// the backordered line and released all three, two of them on EXPIRED
-// reservations, so the floor picked stock nothing held.
-func reconfirmAllocatedLines(
-	ctx context.Context,
-	inventory ports.InventoryReservationClient,
-	events ports.EventPublisher,
-	clock ports.Clock,
-	o *order.Order,
-	justReserved []*order.OrderLine,
-) (int, error) {
-	skip := make(map[int]bool, len(justReserved))
-	for _, l := range justReserved {
-		skip[l.LineNo()] = true
-	}
-	lost := 0
-	for _, line := range o.LinesWithStatus(order.LineAllocated) {
-		if skip[line.LineNo()] {
-			continue
-		}
-		result, err := inventory.Reserve(ctx, ports.ReservationRequest{
-			SKU:       line.SKU(),
-			Quantity:  line.Quantity(),
-			DemandRef: o.ID(),
-			LineNo:    line.LineNo(),
-			Attempt:   o.Version(),
-		})
-		switch {
-		case err == nil:
-			if err := o.ReconfirmReservation(line.LineNo(), result.ReservationID); err != nil {
-				return lost, err
-			}
-		case errors.Is(err, ports.ErrInsufficientStock):
-			if err := o.LoseReservation(line.LineNo()); err != nil {
-				return lost, err
-			}
-			lost++
-			if err := events.Publish(ctx, shared.NewOrderLineBackordered(
-				clock.Now(), o.ID(), line.LineNo(), line.SKU(), line.Quantity(),
-			)); err != nil {
-				return lost, err
-			}
-		default:
-			return lost, err
-		}
-	}
-	return lost, nil
-}
-
-// reconfirmBeforeRelease runs reconfirmAllocatedLines and, when a
-// ship-complete order lost a reservation, saves and publishes the
-// re-backordered state instead of releasing. blocked reports that the
-// caller must stop (release is not allowed this pass).
-func reconfirmBeforeRelease(ctx context.Context, deps allocationDeps, o *order.Order, justReserved []*order.OrderLine, outcome *allocationOutcome) (bool, error) {
-	lost, err := reconfirmAllocatedLines(ctx, deps.Inventory, deps.Events, deps.Clock, o, justReserved)
-	if err != nil {
-		return true, err
-	}
-	outcome.backordered += lost
-	if lost == 0 || o.AllowPartialShipment() {
-		return false, nil
-	}
-	if err := deps.Orders.Save(ctx, o); err != nil {
-		return true, err
-	}
-	return true, publishOrderAllocationOutcome(ctx, deps.Events, deps.Clock, o, *outcome, nil)
 }

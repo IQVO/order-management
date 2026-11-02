@@ -6,3 +6,4 @@
 coverage.out
 .schemathesis/
 .claude/settings.local.json
+__pycache__/
