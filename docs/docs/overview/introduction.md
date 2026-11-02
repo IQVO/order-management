@@ -166,3 +166,7 @@ analysis, including exactly which fields cross each wire.
 | read the funnel report | [Order Funnel & Allocation Health](/docs/analytics/order-funnel-report) |
 | call the REST API | [API Reference](/docs/api-reference) (generated from `apis/openapi.yaml`) |
 | know why it is built this way | [Domain vision](/docs/business-context/domain-vision), [ADRs](/docs/adr) |
+
+:::note[Disclaimer]
+This project is a domain-driven design study. It is not associated with, endorsed by or affiliated with any company, and it uses no company's code, data, logos or trademarks. All names, figures and examples are illustrative or synthetic.
+:::
