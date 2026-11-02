@@ -196,12 +196,12 @@ paths:
     explicitly OUT: they live in `network-fulfillment`, and `arch-go`
     cannot catch a vocabulary leak — that check is human. Known gap
     recorded: nothing here sweeps an orphaned hold, which sits on real
-    inventory reservations. Shipped: `POST /orders/{id}/release`
+    inventory reservations. Shipped: `POST /orders/{id}/releases`
     (`releaseHeldOrder`), `releaseOnAllocation`/`requiredShipBy` on
     `POST /orders`, `ErrOrderNotHeld` -> 409 `order-not-held`, migrations
     `0005_release_on_allocation`/`0006_required_ship_by`. The caller is
     `network-fulfillment` (its own order-management outbound adapter, in
-    that repo: `POST /orders`, `POST /orders/{id}/release`, `DELETE /orders/{id}`).
+    that repo: `POST /orders`, `POST /orders/{id}/releases`, `DELETE /orders/{id}`).
 
 **0026 — ACCEPTED: per-workload HorizontalPodAutoscaler and pgxpool
 MaxConns/statement_timeout tuning (Phase 3 scalability).** An
@@ -333,7 +333,7 @@ Other ADR-adjacent facts worth knowing without opening every file:
   `POST /orders`.** Route-scoped `RequireIdempotencyKey` opens the outer
   transaction, inserts into `idempotency_keys`, joins `ReceiveOrder`'s
   `UnitOfWork` via `internal/pgtx`, and replays the stored response for a
-  repeated key (422 `idempotency-key-reused` on a different body, 400
+  repeated key (409 `idempotency-key-reused` on a different body, 400
   `idempotency-key-required` when absent). Only active with Postgres.
 - **0024 — ACCEPTED: optimistic concurrency.** `orders.version` (migration
   0009); `OrderRepo.Save` is `UPDATE ... WHERE id AND version`, a lost
