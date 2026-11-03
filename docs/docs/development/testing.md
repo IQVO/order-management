@@ -205,7 +205,7 @@ flags a known-bad fixture.
 | Level | Tests | What |
 | --- | --- | --- |
 | E1 governance | `TestEval_InputSchemasResolveAndConstrain`, `TestEval_ParametersAreDescribed`, `TestEval_ToolRegistryMatchesGolden`, `TestEval_FleetToolNamesAreGloballyUnique` | Schemas resolve, every parameter has a description, the registry matches `tool_registry.golden`, tool names are unique across the fleet snapshot. |
-| E2 conformance | nine `TestEvalConformance_*` tests | Handshake, unknown tool, wrong-typed and extra arguments, no resources or prompts advertised, session close. |
+| E2 conformance | nine `TestEvalConformance_*` tests | Handshake, unknown tool, wrong-typed and extra arguments, exactly one resource template and one prompt advertised (ADR 0049), session close. |
 | E3 behaviour | `TestMCPEvalSuite` | 13 scenarios in `testdata/features/mcp_tools.feature`, run through godog with `Strict: true`. |
 
 ## Frontend (`web/`)

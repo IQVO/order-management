@@ -108,6 +108,7 @@ Typos, broken links and formatting are of course fair game.
 | [0046](./0046-a2a-inbound-adapter.md) | A2A inbound adapter (third driving adapter, read-only) | Accepted |
 | [0047](./0047-promise-at-the-orders-own-fulfillment-site.md) | An order is promised against its own fulfillment site | Accepted; amends 0044, 0014 step A and 0031 §5 |
 | [0048](./0048-adopt-fleet-rest-api-guideline.md) | Adopt the fleet REST API guideline | Accepted; amends 0023 and 0038 |
+| [0049](./0049-agent-authority-levels-and-complete-mcp-surface.md) | Agent authority levels and the complete MCP surface | Accepted; extends 0010 and 0046 |
 
 Each of these reconstructs a decision that is actually visible in this
 repository's `CLAUDE.md` and code — none is a generic placeholder.
