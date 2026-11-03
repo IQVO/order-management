@@ -402,7 +402,13 @@ two read-only tools over Streamable HTTP on `MCP_ADDR` (default `:8090`):
 `get_order` (the `GetOrder` use case) and `get_promise_health` (the
 analytics report store). There is no write tool and, since
 [ADR 0012](docs/docs/adr/0012-remove-rest-mcp-bearer-auth.md), no
-authentication.
+authentication. Every tool and A2A skill declares its agent authority
+level (`com.warehouse/authority`, `L1` here — the surface is read-only),
+the handler is stateless (it also answers the 2026-07-28 protocol
+revision), and the server offers one resource
+(`warehouse://order-management/orders/{orderId}`, the order read model)
+and one prompt (`investigate_order`, the operator SOP) —
+[ADR 0049](docs/docs/adr/0049-agent-authority-levels-and-complete-mcp-surface.md).
 
 ## A2A agent
 

@@ -19,8 +19,11 @@ Since ADR 0012 there is no authentication.
 | Transport | Streamable HTTP only (`github.com/modelcontextprotocol/go-sdk` v1.8.0) |
 | Endpoint | every path under `MCP_ADDR` (default `:8090`): the handler is mounted on the chi pattern `/*`, which also matches `/`. In the cluster: `http://order-management-mcp.<ns>.svc.cluster.local:8090/` |
 | Server info | name `order-management-mcp`, version `1.0.0` |
-| Capabilities | `tools` (with `listChanged`), `logging`; no resources, no prompts |
-| Sessions | in process memory, keyed by the `Mcp-Session-Id` response header of `initialize`; run one replica |
+| Capabilities | `tools` (with `listChanged`), `logging`, `resources` (one template), `prompts` (one SOP) |
+| Sessions | none (stateless, Agentic Standard v2 ADR 0049): no `Mcp-Session-Id` is issued, the server answers the 2026-07-28 per-request handshake (`server/discover`) and legacy `initialize` clients alike |
+| Authority | every tool declares `com.warehouse/authority` in `tools/list` `_meta`: `get_order` = `L1`, `get_promise_health` = `L1` (the surface is read-only; ADR 0049) |
+| Resource | `warehouse://order-management/orders/{orderId}` — the order read model (same `GetOrder` use case as `get_order`), one order, JSON text |
+| Prompt | `investigate_order` — the operator SOP: read the order, interpret statuses, check promise health, escalate policy calls to a human |
 | Telemetry | one span `mcp.tool <name>` per call; `http.server.request.duration` and `http.server.active_requests` |
 | Backing data | `get_order`: the OLTP database (`DATABASE_URL`, in-memory when unset). `get_promise_health`: the analytical database (`ANALYTICS_DATABASE_URL`, an empty store when unset) |
 
@@ -30,7 +33,7 @@ to every input, so an unknown argument is rejected.
 
 ## `get_order`
 
-Annotations: `readOnlyHint: true`, `idempotentHint: false`.
+Annotations: `readOnlyHint: true`, `idempotentHint: false`. Authority: `L1` (`com.warehouse/authority`, ADR 0049).
 
 > Return one order's current state by id: status, allow-partial-shipment
 > flag, promise date, and every line's
@@ -59,7 +62,7 @@ empty`.
 
 ## `get_promise_health`
 
-Annotations: `readOnlyHint: true`, `idempotentHint: false`.
+Annotations: `readOnlyHint: true`, `idempotentHint: false`. Authority: `L1` (`com.warehouse/authority`, ADR 0049).
 
 > Return promise-health KPIs for a time window (and optional process-path
 > filter) from the Order Funnel & Allocation Health data product.
