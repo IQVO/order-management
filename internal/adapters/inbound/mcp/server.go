@@ -7,27 +7,26 @@ import (
 )
 
 // NewServer builds the MCP server for this bounded context with the
-// get_order read tool registered.
+// get_order and get_promise_health read tools, the order resource template
+// and the investigate_order prompt registered.
 //
-// order-management exposes no resource or prompt: its only meaningful
-// read is a single order looked up by id, which the get_order tool
-// already covers directly -- a resource template would just be the same
-// lookup behind a second, redundant surface, and there is no multi-step
-// workflow here worth a prompt's operational SOP. No write tool is
-// registered either: CancelOrder, ReceiveOrder, Allocate and
-// RetryAllocate are all order-lifecycle commands with real business
-// invariants (see internal/domain/order's own EnsureCancellable/
-// EnsureReleasable), not decisions an MCP-calling agent should make on
-// this context's behalf.
+// order-management exposes no write use case over MCP: CancelOrder,
+// ReceiveOrder, Allocate and RetryAllocate are all order-lifecycle
+// commands with real business invariants (EnsureCancellable,
+// EnsureReleasable) that this context's own domain enforces -- none of
+// them is a decision an MCP-calling agent should make on this context's
+// behalf, so none is wired here.
 func NewServer(deps Deps) *mcp.Server {
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "order-management-mcp", Version: "1.0.0"},
 		&mcp.ServerOptions{
-			Instructions: "Read-only access to order-management: look up one order's current state (status, lines, allocation/release/cancellation progress) by id.",
+			Instructions: "Read-only access to order-management: look up one order's current state (status, lines, allocation/release/cancellation progress) by id, and read promise-health KPIs for a window. Start with the investigate_order prompt.",
 		},
 	)
 
 	deps.registerTools(server)
+	deps.registerResources(server)
+	deps.registerPrompts(server)
 
 	return server
 }
