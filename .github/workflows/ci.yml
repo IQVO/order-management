@@ -585,29 +585,33 @@ jobs:
           tags: order-management:scan
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: "Trivy scan (SARIF, always uploaded)"
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      # The trivy-action's bundled installer downloads the tarball through the
+      # get-trivy redirector with a single un-retried curl; during the
+      # 2026-11-03 CDN/DNS outage every run died there (curl exit 6) before a
+      # single scan executed. Install the same pinned version directly from
+      # the GitHub release with retries instead; scan flags are unchanged
+      # (the action's vuln-type os,library default == --scanners vuln).
+      - name: Install Trivy { v0.70.0, direct release download }
+        run: |
+          set -euxo pipefail
+          v=0.70.0
+          base="https://github.com/aquasecurity/trivy/releases/download/v${v}/trivy_${v}_Linux-64bit"
+          curl --retry 10 --retry-delay 15 --retry-all-errors -fsSL -o /tmp/trivy.tgz "${base}.tar.gz"
+          curl --retry 10 --retry-delay 15 --retry-all-errors -fsSL -o /tmp/trivy.tgz.sha256 "${base}.tar.gz.sha256"
+          cd /tmp && shasum -a 256 -c trivy.tgz.sha256
+          tar -xzf /tmp/trivy.tgz -C /tmp trivy
+          sudo install -m755 /tmp/trivy /usr/local/bin/trivy
+          trivy --version
+      - name: Trivy scan (SARIF, always uploaded)
         if: always()
-        with:
-          image-ref: 'order-management:scan'
-          format: 'sarif'
-          output: 'trivy-results.sarif'
-          severity: 'CRITICAL,HIGH,MEDIUM'
-          ignore-unfixed: true
+        run: trivy image --scanners vuln --format sarif --output trivy-results.sarif --severity CRITICAL,HIGH,MEDIUM --ignore-unfixed "order-management:scan"
       - name: Upload Trivy SARIF to Security tab
         uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
         if: always()
         with:
           sarif_file: 'trivy-results.sarif'
       - name: "Trivy scan (blocking gate: CRITICAL/HIGH with a fix available)"
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: 'order-management:scan'
-          format: 'table'
-          exit-code: '1'
-          ignore-unfixed: true
-          vuln-type: 'os,library'
-          severity: 'CRITICAL,HIGH'
+        run: trivy image --scanners vuln --format table --exit-code 1 --ignore-unfixed --severity CRITICAL,HIGH "order-management:scan"
 
   # ============================================================
   # CLASSIFICATION: PUBLISH (Docker image) -- push-to-main only
