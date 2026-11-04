@@ -161,3 +161,23 @@ func testGetOrderAllocatedAndBackorderedLines(t *testing.T) {
 		t.Fatalf("unexpected backordered line %+v", backordered)
 	}
 }
+
+// TestAuthorityConstantsPinTheFleetContract pins the authority vocabulary
+// (Agentic Standard v2, contracts G1/G2): exactly the strings L1..L4 under
+// the one _meta key, produced by the one helper. No tool of this read-only
+// context uses L2..L4 today (both tools read facts, so both are L1); the
+// constants stay because the fleet's declaration shape pins them (ADR 0049)
+// and any future write or recommendation tool must use them, never a literal.
+func TestAuthorityConstantsPinTheFleetContract(t *testing.T) {
+	if authorityMetaKey != "com.warehouse/authority" {
+		t.Fatalf("authorityMetaKey = %q, want com.warehouse/authority", authorityMetaKey)
+	}
+	for level, want := range map[string]string{"L1": authorityL1, "L2": authorityL2, "L3": authorityL3, "L4": authorityL4} {
+		if want != level {
+			t.Errorf("level constant for %s = %q", level, want)
+		}
+	}
+	if got := authorityMeta(authorityL3); got[authorityMetaKey] != "L3" {
+		t.Fatalf("authorityMeta(L3) = %v, want the key to carry L3", got)
+	}
+}
