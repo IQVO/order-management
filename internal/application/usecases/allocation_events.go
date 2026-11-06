@@ -73,13 +73,23 @@ func publishOrderAllocationOutcome(
 		promiseBasis = b.String()
 	}
 
+	// ADR 0050: stamp the order's caller-assigned fulfillment site (ADR
+	// 0044) onto the allocation events so the integration payload can
+	// carry it as the optional top-level site_id. Empty for an order
+	// without one — the published bytes then stay identical to
+	// pre-ADR-0050 bytes.
+	var site shared.FulfillmentSiteID
+	if s := o.FulfillmentSiteID(); s != nil {
+		site = *s
+	}
+
 	switch o.Status() {
 	case order.StatusAllocated, order.StatusReleased:
-		return events.Publish(ctx, shared.NewOrderAllocatedWithPromise(clock.Now(), o.ID(), promiseDate, promiseCptId, promiseBasis, released))
+		return events.Publish(ctx, shared.NewOrderAllocatedWithPromise(clock.Now(), o.ID(), promiseDate, promiseCptId, promiseBasis, released).WithSite(site))
 	case order.StatusPartiallyAllocated, order.StatusPartiallyReleased:
 		return events.Publish(ctx, shared.NewOrderPartiallyAllocatedWithPromise(
 			clock.Now(), o.ID(), outcome.allocated, outcome.backordered, promiseDate, promiseCptId, promiseBasis, released,
-		))
+		).WithSite(site))
 	default:
 		return nil
 	}
