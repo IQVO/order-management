@@ -125,11 +125,20 @@ type releasedLineData struct {
 // omitempty so a LeadTime-basis promise's empty CptId does not add noise
 // to the wire, and so wes-work-planning's existing consumer (which does
 // not read these fields yet) is unaffected either way.
+//
+// site_id is ADR 0050's additive field: the order's caller-assigned
+// fulfillment site (ADR 0044), sourced from Order.fulfillmentSite and
+// stamped on the events by the raise site. omitempty so an order without
+// a site publishes bytes byte-identical to the pre-ADR-0050 payload —
+// ADR 0044 §7's freeze is superseded additively, never broken: consumers
+// that ignore unknown fields (wes-work-planning's decoder today) are
+// unaffected. The site is order-level; per-line sites are Phase 2.
 type allocationData struct {
 	OrderID      string             `json:"order_id"`
 	PromiseDate  string             `json:"promise_date"`
 	PromiseCptId string             `json:"promise_cpt_id,omitempty"`
 	PromiseBasis string             `json:"promise_basis,omitempty"`
+	SiteID       string             `json:"site_id,omitempty"`
 	Lines        []releasedLineData `json:"lines"`
 }
 
@@ -256,6 +265,7 @@ func encodeEvent(event shared.DomainEvent) (out encodedEvent, ok bool, err error
 			PromiseDate:  e.PromiseDate.UTC().Format(time.RFC3339),
 			PromiseCptId: e.PromiseCptId,
 			PromiseBasis: e.PromiseBasis,
+			SiteID:       e.SiteID.String(),
 			Lines:        toReleasedLineData(e.Lines),
 		}
 	case shared.OrderPartiallyAllocated:
@@ -265,6 +275,7 @@ func encodeEvent(event shared.DomainEvent) (out encodedEvent, ok bool, err error
 			PromiseDate:  e.PromiseDate.UTC().Format(time.RFC3339),
 			PromiseCptId: e.PromiseCptId,
 			PromiseBasis: e.PromiseBasis,
+			SiteID:       e.SiteID.String(),
 			Lines:        toReleasedLineData(e.Lines),
 		}
 	case shared.OrderRepromised:

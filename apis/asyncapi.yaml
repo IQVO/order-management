@@ -42,8 +42,8 @@ info:
     that is not a valid CloudEvent is dead-lettered (repromise consumer)
     or logged at WARN and skipped (local-cache consumers, projector).
 
-    ## Integration contract (frozen for OrderAllocated/OrderPartiallyAllocated;
-    additive for OrderRepromised)
+    ## Integration contract (frozen for OrderAllocated/OrderPartiallyAllocated
+    apart from additive optional members; additive for OrderRepromised)
 
     `OrderAllocated`, `OrderPartiallyAllocated`, and — since ADR 0014 §5 /
     ADR 0018 — `OrderRepromised` are published to
@@ -52,8 +52,10 @@ info:
     events cross-context. The `data.lines[]` entry shape on the first two
     is shared verbatim with wes-work-planning's Kafka consumer and MUST
     NOT change without coordinating both sides. `fulfillment_class` is
-    additive (ADR 0008). `OrderRepromised` is the fleet's "your delivery
-    is delayed" trigger, raised by the new `RepromiseOrder` consumer
+    additive (ADR 0008); the top-level `site_id` is additive (ADR 0050,
+    omitempty — absent for an order without a caller-assigned site).
+    `OrderRepromised` is the fleet's "your delivery is
+    delayed" trigger, raised by the new `RepromiseOrder` consumer
     (ADR 0018) reacting to fulfillment-execution's `TaskCPTMissed`/
     `PackageManifested` on `warehouse.fulfillment.events`.
   contact:
@@ -398,6 +400,27 @@ components:
                   path_id: pick
                   gift_wrap: true
                   fulfillment_class: SAME_SKU_MULTI
+        - name: orderAllocatedWithSite
+          summary: ADR 0050 — same allocation at a caller-assigned site (site_id present).
+          payload:
+            specversion: "1.0"
+            id: 5e2d8b9f-0c48-4d7a-9e1b-7f3a6c8d9e01
+            source: /warehouse/order-management
+            type: com.warehouse.wes.order-management.order.OrderAllocated
+            subject: ord-8d0f7791-6e8b-4c28-a3d7-04c1b5e2f9a3
+            time: "2026-11-05T10:01:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:order-management:events:OrderAllocated:v1"
+            data:
+              order_id: ord-8d0f7791-6e8b-4c28-a3d7-04c1b5e2f9a3
+              promise_date: "2026-11-07T10:01:00Z"
+              site_id: WH2
+              lines:
+                - line_no: 1
+                  sku: SKU-TOY-0042
+                  path_id: pick
+                  gift_wrap: false
+                  fulfillment_class: SINGLE
 
     OrderPartiallyAllocatedIntegration:
       name: OrderPartiallyAllocated
@@ -441,6 +464,27 @@ components:
               lines:
                 - line_no: 1
                   sku: SKU-TOY-0042
+                  path_id: pick
+                  gift_wrap: false
+                  fulfillment_class: MULTI_LINE_MULTI
+        - name: orderPartiallyAllocatedWithSite
+          summary: ADR 0050 — same partial pass at a caller-assigned site (site_id present).
+          payload:
+            specversion: "1.0"
+            id: 9b4e7c22-63a8-5e1d-8f25-4a6b7c8d9e12
+            source: /warehouse/order-management
+            type: com.warehouse.wes.order-management.order.OrderPartiallyAllocated
+            subject: ord-2c3a4f5b-8d90-4e67-8a1c-9d0e1f2a3b4c
+            time: "2026-11-05T10:02:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:order-management:events:OrderPartiallyAllocated:v1"
+            data:
+              order_id: ord-2c3a4f5b-8d90-4e67-8a1c-9d0e1f2a3b4c
+              promise_date: "2026-11-07T10:02:00Z"
+              site_id: DC7
+              lines:
+                - line_no: 1
+                  sku: SKU-BOOK-0001
                   path_id: pick
                   gift_wrap: false
                   fulfillment_class: MULTI_LINE_MULTI
@@ -1622,6 +1666,17 @@ components:
             service, and is a separate bucket in the analytics promise-
             basis distribution (ADR 0019). Absent on events published
             before this ADR.
+        site_id:
+          type: string
+          pattern: '^[A-Z0-9]+$'
+          description: >-
+            ADR 0050's additive member: the order's caller-assigned
+            fulfillment site (ADR 0044), the site this order's work is
+            to be done at. Optional and omitted (omitempty) when the
+            order carries no site — such payloads are byte-identical to
+            the pre-ADR-0050 wire. Order-level: one site per order;
+            per-line sites are a future, separately-decided extension.
+            Consumers that ignore unknown fields are unaffected.
         lines:
           type: array
           description: Exactly the lines released in this pass (may be empty).

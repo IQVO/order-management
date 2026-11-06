@@ -182,11 +182,14 @@ func TestOrderWithoutSite_StaysWithoutOneThroughTheLifecycle(t *testing.T) {
 	assertStoredSite(t, f, o.ID(), "")
 }
 
-// The frozen OrderAllocated / OrderPartiallyAllocated / OrderRepromised
-// contracts (shared with wes-work-planning) must not change by a byte
-// because an order carries a site: every non-demand event is DeepEqual
-// to the one an identical order WITHOUT a site produces.
-func TestOrderSite_DoesNotChangeAnyFrozenEvent(t *testing.T) {
+// ADR 0050 additively supersedes ADR 0044 §7's freeze: the allocation
+// events now DO carry the order's site, and nothing else may differ. An
+// identical order without a site produces events whose only difference is
+// the SiteID member ("" vs the site) on OrderAllocated /
+// OrderPartiallyAllocated — every other event is DeepEqual, and the
+// no-site events still encode to byte-identical pre-ADR-0050 payloads
+// (pinned by the kafka package's golden tests).
+func TestOrderSite_ChangesOnlyTheAllocationEventsSite(t *testing.T) {
 	run := func(site *shared.FulfillmentSiteID) []shared.DomainEvent {
 		f := newFixture()
 		receiveWithSite(t, f, usecases.DemandProjectionPolicy{}, site, true, line("SKU-1", 2, "pick"), line("SKU-2", 1, "singles"))
@@ -201,7 +204,97 @@ func TestOrderSite_DoesNotChangeAnyFrozenEvent(t *testing.T) {
 		return out
 	}
 	with, without := run(siteID(t, "WH2")), run(nil)
-	if len(with) == 0 || !reflect.DeepEqual(with, without) {
-		t.Fatalf("non-demand events differ with a site:\nwith:    %+v\nwithout: %+v", with, without)
+	if len(with) == 0 || len(with) != len(without) {
+		t.Fatalf("event counts differ with a site:\nwith:    %+v\nwithout: %+v", with, without)
+	}
+	for i := range with {
+		assertAllocationEventsDifferOnlyBySite(t, i, with[i], without[i])
+	}
+}
+
+// assertAllocationEventsDifferOnlyBySite checks one same-position event
+// pair from the sited/unsited runs: allocation events may differ in
+// SiteID only, every other event must be DeepEqual.
+func assertAllocationEventsDifferOnlyBySite(t *testing.T, i int, with, without shared.DomainEvent) {
+	t.Helper()
+	switch a := with.(type) {
+	case shared.OrderAllocated:
+		b, ok := without.(shared.OrderAllocated)
+		if !ok {
+			t.Fatalf("event %d type differs: %T vs %T", i, with, without)
+		}
+		if a.SiteID != "WH2" || b.SiteID != "" {
+			t.Fatalf("allocation site = %q/%q, want WH2/\"\"", a.SiteID, b.SiteID)
+		}
+		a.SiteID, b.SiteID = "", ""
+		if !reflect.DeepEqual(a, b) {
+			t.Fatalf("OrderAllocated differs beyond the site:\nwith:    %+v\nwithout: %+v", a, b)
+		}
+	case shared.OrderPartiallyAllocated:
+		b, ok := without.(shared.OrderPartiallyAllocated)
+		if !ok {
+			t.Fatalf("event %d type differs: %T vs %T", i, with, without)
+		}
+		if a.SiteID != "WH2" || b.SiteID != "" {
+			t.Fatalf("partial site = %q/%q, want WH2/\"\"", a.SiteID, b.SiteID)
+		}
+		a.SiteID, b.SiteID = "", ""
+		if !reflect.DeepEqual(a, b) {
+			t.Fatalf("OrderPartiallyAllocated differs beyond the site:\nwith:    %+v\nwithout: %+v", a, b)
+		}
+	default:
+		if !reflect.DeepEqual(with, without) {
+			t.Fatalf("event %d (%T) differs with a site:\nwith:    %+v\nwithout: %+v", i, with, with, without)
+		}
+	}
+}
+
+// ADR 0050: a partial pass carries the site too — a partial-shipment
+// order with one backordered line publishes OrderPartiallyAllocated with
+// the order's site, and the retry that allocates the rest publishes
+// OrderAllocated with the same site.
+func TestOrderSite_PartialAndRetryAllocationCarryTheSite(t *testing.T) {
+	f := newFixture()
+	f.inventory.reserveErrBySKU["SKU-2"] = ports.ErrInsufficientStock
+	uc := f.receiveOrder()
+	o, err := uc.ExecuteWithSite(context.Background(),
+		[]usecases.NewLine{line("SKU-1", 1, "pick"), line("SKU-2", 1, "pick")}, true, true, nil, siteID(t, "WH2"))
+	if err != nil {
+		t.Fatalf("ExecuteWithSite: %v", err)
+	}
+
+	var partial *shared.OrderPartiallyAllocated
+	f.events.mu.Lock()
+	for _, e := range f.events.events {
+		if p, ok := e.(shared.OrderPartiallyAllocated); ok {
+			partial = &p
+		}
+	}
+	f.events.mu.Unlock()
+	if partial == nil {
+		t.Fatal("expected an OrderPartiallyAllocated event")
+	}
+	if partial.SiteID != "WH2" {
+		t.Fatalf("OrderPartiallyAllocated.SiteID = %q, want WH2", partial.SiteID)
+	}
+
+	f.events.reset()
+	delete(f.inventory.reserveErrBySKU, "SKU-2")
+	if _, err := f.retryAllocation().Execute(context.Background(), o.ID()); err != nil {
+		t.Fatalf("RetryAllocation: %v", err)
+	}
+	var full *shared.OrderAllocated
+	f.events.mu.Lock()
+	for _, e := range f.events.events {
+		if a, ok := e.(shared.OrderAllocated); ok {
+			full = &a
+		}
+	}
+	f.events.mu.Unlock()
+	if full == nil {
+		t.Fatal("expected an OrderAllocated event from the retry pass")
+	}
+	if full.SiteID != "WH2" {
+		t.Fatalf("OrderAllocated.SiteID = %q, want WH2 (retry pass)", full.SiteID)
 	}
 }

@@ -115,7 +115,10 @@ envelope, no dual-read, no `schema_version`, no envelope toggle.
 - `OrderAllocated` / `OrderPartiallyAllocated` messages (frozen —
   `data.lines[]` entry shape is shared verbatim with
   `wes-work-planning`'s consumer and MUST NOT change without
-  coordinating both sides; `fulfillment_class` is additive, ADR-0008)
+  coordinating both sides; `fulfillment_class` is additive, ADR-0008;
+  the top-level `site_id` is additive, ADR-0050 — omitempty, sourced
+  from the order's caller-assigned `fulfillmentSite`, absent for orders
+  without one so pre-0050 consumers see identical bytes)
   plus — since ADR-0018 — `OrderRepromised`, the fleet's "your delivery
   is delayed" trigger, raised by the new `RepromiseOrder` use case.
   Consumer today: `wes-work-planning` (`OrderAllocated`/
