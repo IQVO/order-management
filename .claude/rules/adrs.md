@@ -400,6 +400,17 @@ Other ADR-adjacent facts worth knowing without opening every file:
   with no schedule falls back to LeadTime, never to another site's windows.
   Frozen events, env vars and chart values unchanged.
 
+- **0050 — ACCEPTED: the allocation events carry the order's fulfillment
+  site.** Additively supersedes 0044 §7's freeze. `OrderAllocated` /
+  `OrderPartiallyAllocated` gain the optional top-level `site_id`
+  (`allocationData.SiteID`, `omitempty`), stamped by
+  `publishOrderAllocationOutcome` from `Order.fulfillmentSite` (never
+  inferred/defaulted). An order without a site publishes bytes
+  byte-identical to pre-0050 (raw-member golden tests pin this);
+  wes-work-planning's decoder ignores the field until its consumer PR
+  threads it. `dataschema`/types stay v1; per-line sites are Phase 2;
+  `OrderRepromised` and the analytics topic are untouched.
+
 - Gateway API `HTTPRoute` chart template exists (`charts/order-management`
   `values.yaml` `gatewayApi:` block, `enabled: false` by default) —
   it is not itself the subject of a numbered ADR in this list; check the

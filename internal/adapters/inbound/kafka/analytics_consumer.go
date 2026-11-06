@@ -123,10 +123,10 @@ func (c *AnalyticsConsumer) Run(ctx context.Context) error {
 		if err := c.Handle(ctx, msg); err != nil {
 			if errors.Is(err, cloudevents.ErrNotCloudEvent) {
 				c.Logger.WarnContext(ctx, "skipping non-CloudEvents analytics message",
-					"topic", msg.Topic, "partition", msg.Partition, "offset", msg.Offset, "error", err)
+					logKeyTopic, msg.Topic, logKeyPartition, msg.Partition, logKeyOffset, msg.Offset, logKeyError, err)
 				continue
 			}
-			c.Logger.ErrorContext(ctx, "analytics message handling failed", "error", err)
+			c.Logger.ErrorContext(ctx, "analytics message handling failed", logKeyError, err)
 		}
 	}
 }

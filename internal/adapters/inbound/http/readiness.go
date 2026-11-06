@@ -50,8 +50,8 @@ func (g *Readiness) Ready() bool {
 // not wired one.
 func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	if !s.Readiness.Ready() {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{statusKey: "not_ready"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	writeJSON(w, http.StatusOK, map[string]string{statusKey: "ready"})
 }

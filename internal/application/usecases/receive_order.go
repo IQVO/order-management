@@ -216,7 +216,7 @@ func (uc *ReceiveOrder) ExecuteWithSite(ctx context.Context, lines []NewLine, al
 	// genuine progress was made before the failure, so this is never a
 	// silent swallow — just never surfaced as a ReceiveOrder failure.
 	deps := allocationDeps{Orders: uc.Orders, Inventory: uc.Inventory, Events: uc.Events, Clock: uc.Clock, Promise: uc.Promise, DemandProjection: uc.DemandProjection, UnitOfWork: uc.UnitOfWork, ReleaseConfirmations: uc.ReleaseConfirmations}
-	if _, err := allocateAndRelease(ctx, deps, o, o.LinesWithStatus(order.LinePending), false, releaseOnAllocation); err != nil {
+	if err := allocateAndRelease(ctx, deps, o, o.LinesWithStatus(order.LinePending), false, releaseOnAllocation); err != nil {
 		return uc.orderAfterAllocationFailure(ctx, o)
 	}
 	return o, nil

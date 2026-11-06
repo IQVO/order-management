@@ -118,12 +118,19 @@ type ReleasedLine struct {
 // (Capability or LeadTime). PromiseDate itself is unchanged — it is the
 // promise's CutoffAt either way, kept on the wire for backward
 // compatibility.
+//
+// SiteID is ADR 0050's additive field: the order's caller-assigned
+// fulfillment site (ADR 0044), stamped by the raise site so the Kafka
+// payload can carry it as the optional top-level site_id. Empty for an
+// order without one — the published bytes are then identical to
+// pre-ADR-0050 bytes. Per-line sites are Phase 2; the site is order-level.
 type OrderAllocated struct {
 	base
 	OrderID      OrderId
 	PromiseDate  time.Time
 	PromiseCptId string
 	PromiseBasis string
+	SiteID       FulfillmentSiteID
 	Lines        []ReleasedLine
 }
 
@@ -143,6 +150,16 @@ func NewOrderAllocatedWithPromise(occurredAt time.Time, orderID OrderId, promise
 	}
 }
 
+// WithSite returns a copy of the event carrying ADR 0050's additive
+// fulfillment site (see the struct's doc comment). A separate mutator
+// rather than another widened constructor, so every existing call site
+// and test keeps compiling unchanged — the same reasoning as
+// NewOrderAllocatedWithPromise's doc comment.
+func (e OrderAllocated) WithSite(site FulfillmentSiteID) OrderAllocated {
+	e.SiteID = site
+	return e
+}
+
 // OrderPartiallyAllocated: some lines allocated, some backordered, on an
 // order that allows partial shipment. Lines carries only the lines
 // released THIS pass (i.e. o.LinesWithStatus(LineAllocated) restricted to
@@ -152,7 +169,10 @@ func NewOrderAllocatedWithPromise(occurredAt time.Time, orderID OrderId, promise
 // integration section of CLAUDE.md.
 //
 // PromiseCptId/PromiseBasis are ADR 0014's additive fields — see
-// OrderAllocated's doc comment.
+// OrderAllocated's doc comment. SiteID is ADR 0050's additive field — see
+// OrderAllocated's doc comment: the same order-level fulfillment site the
+// fully-allocated event carries, so a partial pass's released lines can be
+// sited exactly like a full pass's.
 type OrderPartiallyAllocated struct {
 	base
 	OrderID          OrderId
@@ -161,6 +181,7 @@ type OrderPartiallyAllocated struct {
 	PromiseDate      time.Time
 	PromiseCptId     string
 	PromiseBasis     string
+	SiteID           FulfillmentSiteID
 	Lines            []ReleasedLine
 }
 
@@ -181,6 +202,13 @@ func NewOrderPartiallyAllocatedWithPromise(occurredAt time.Time, orderID OrderId
 		OrderID: orderID, AllocatedLines: allocated, BackorderedLines: backordered, PromiseDate: promiseDate,
 		PromiseCptId: promiseCptId, PromiseBasis: promiseBasis, Lines: lines,
 	}
+}
+
+// WithSite returns a copy of the event carrying ADR 0050's additive
+// fulfillment site — see OrderAllocated.WithSite's doc comment.
+func (e OrderPartiallyAllocated) WithSite(site FulfillmentSiteID) OrderPartiallyAllocated {
+	e.SiteID = site
+	return e
 }
 
 // OrderLineReleased: a line's work was enqueued onto a wes-work-planning
