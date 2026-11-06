@@ -411,6 +411,24 @@ Other ADR-adjacent facts worth knowing without opening every file:
   threads it. `dataschema`/types stay v1; per-line sites are Phase 2;
   `OrderRepromised` and the analytics topic are untouched.
 
+- **0051 — ACCEPTED: consume ShipmentConfirmed/PackageMissedLoad; the
+  Order ships.** Line gains terminal `Shipped` (`Ship`/`ShipAll`, only
+  from `Released`, `ErrLineNotReleased`/`ErrOrderNotShippable`); order
+  gains derived `Shipped`/`PartiallyShipped`. One consumer
+  (`outbound_shipping_consumer.go`) on
+  `warehouse.outbound-shipping.events` dispatches both full types under
+  `OUTBOUND_SHIPPING_CONSUMER_MODE=off|kafka` (dark launch, ADR-0043
+  shape). `ConfirmShipment` applies one event atomically for EVERY
+  order it names, gated on the raw CloudEvents id in
+  `shipment_processed_events` (migration 0014); unknown/not-shippable
+  orders are skip-and-log, never dead letters.
+  `PackageMissedLoad.source_order_id` is a BARE OrderId, so
+  `RepromiseOrder.ExecuteForMissedLoad` re-promises the order's whole
+  group breakdown through the ADR-0018 machinery (same gate, same
+  `OrderRepromised`, reason `PackageMissedLoad`). The three shipped
+  domain events are local-only for now (analytics gap recorded in the
+  ADR).
+
 - Gateway API `HTTPRoute` chart template exists (`charts/order-management`
   `values.yaml` `gatewayApi:` block, `enabled: false` by default) —
   it is not itself the subject of a numbered ADR in this list; check the

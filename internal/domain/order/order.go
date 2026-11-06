@@ -217,6 +217,11 @@ func (o *Order) Lines() []*OrderLine {
 // The derivation, in precedence order:
 //
 //   - every line Cancelled                  -> Cancelled
+//   - any line Shipped, all lines Shipped   -> Shipped
+//     (ADR 0051: "all released lines shipped". A cancelled line can never
+//     sit beside a shipped one — BR6 blocks cancellation at first release
+//     — so "all lines Shipped" is the whole rule)
+//   - any line Shipped, some line not       -> PartiallyShipped
 //   - any line Released, all lines Released -> Released
 //   - any line Released, some not           -> PartiallyReleased
 //   - any line Backordered, ship-complete   -> Backordered  (BR3: no line
@@ -229,7 +234,7 @@ func (o *Order) Lines() []*OrderLine {
 //   - some lines Allocated, rest Pending    -> PartiallyAllocated
 //   - otherwise                             -> Received
 func (o *Order) Status() Status {
-	var allocated, backordered, released, cancelled int
+	var allocated, backordered, released, cancelled, shipped int
 	for _, l := range o.lines {
 		switch l.status {
 		case LineAllocated:
@@ -238,6 +243,8 @@ func (o *Order) Status() Status {
 			backordered++
 		case LineReleased:
 			released++
+		case LineShipped:
+			shipped++
 		case LineCancelled:
 			cancelled++
 		}
@@ -250,6 +257,12 @@ func (o *Order) Status() Status {
 	// in status_test.go exercises all of them.
 	if cancelled == total {
 		return StatusCancelled
+	}
+	if shipped > 0 {
+		if shipped == total {
+			return StatusShipped
+		}
+		return StatusPartiallyShipped
 	}
 	if released == total {
 		return StatusReleased
