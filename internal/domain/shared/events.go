@@ -363,3 +363,58 @@ func NewSiteSkuDemandChanged(occurredAt time.Time, sourceOrderID OrderId, lineNo
 		DueAt: dueAt, State: state, AssignmentVersion: assignmentVersion,
 	}
 }
+
+// OrderLineShipped: one order line physically left the site on a
+// confirmed outbound load (ADR 0051). Raised by the ConfirmShipment use
+// case for every line a ShipmentConfirmed moved Released -> Shipped; a
+// re-delivered confirmation raises nothing.
+type OrderLineShipped struct {
+	base
+	OrderID OrderId
+	LineNo  int
+	// LoadID is the outbound-shipping load whose departure confirmed the
+	// shipment — the correlation back to the physical fact, straight from
+	// the consumed ShipmentConfirmed.
+	LoadID string
+}
+
+func NewOrderLineShipped(occurredAt time.Time, orderID OrderId, lineNo int, loadID string) OrderLineShipped {
+	return OrderLineShipped{
+		base: newBase("OrderLineShipped", occurredAt), OrderID: orderID, LineNo: lineNo, LoadID: loadID,
+	}
+}
+
+// OrderShipped: every released line of this order has now shipped — the
+// derived Status() reached Shipped (ADR 0051). Raised at most once per
+// order, by the ConfirmShipment handling whose transition completed the
+// last released line.
+type OrderShipped struct {
+	base
+	OrderID OrderId
+	// LoadID is the outbound-shipping load whose departure confirmed the
+	// shipment — the correlation back to the physical fact.
+	LoadID string
+}
+
+func NewOrderShipped(occurredAt time.Time, orderID OrderId, loadID string) OrderShipped {
+	return OrderShipped{base: newBase("OrderShipped", occurredAt), OrderID: orderID, LoadID: loadID}
+}
+
+// OrderPartiallyShipped: some lines of this order have shipped while
+// others have not (still Released, or never released: Allocated,
+// Backordered) — the derived Status() reached PartiallyShipped (ADR
+// 0051). Raised by the ConfirmShipment handling that moved at least one
+// line while a non-cancelled line remains unshipped.
+type OrderPartiallyShipped struct {
+	base
+	OrderID OrderId
+	// LoadID is the outbound-shipping load whose departure confirmed the
+	// shipment — the correlation back to the physical fact.
+	LoadID string
+}
+
+func NewOrderPartiallyShipped(occurredAt time.Time, orderID OrderId, loadID string) OrderPartiallyShipped {
+	return OrderPartiallyShipped{
+		base: newBase("OrderPartiallyShipped", occurredAt), OrderID: orderID, LoadID: loadID,
+	}
+}

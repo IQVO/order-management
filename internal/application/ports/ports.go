@@ -492,3 +492,21 @@ type ReleaseConfirmationMetrics interface {
 	// (order.release_confirmation.unconfirmed).
 	LineUnconfirmed(ctx context.Context)
 }
+
+// ShipmentProcessedEvents is ConfirmShipment's idempotency gate (ADR
+// 0051): it records which outbound-shipping ShipmentConfirmed CloudEvents
+// ids have already been applied, so the at-least-once redelivery the
+// producer's outbox relay can produce never re-ships an order. MarkProcessed
+// MUST be called inside the same UnitOfWork as the aggregate Saves it
+// guards, so a rolled-back handling un-claims the id and the redelivery is
+// processed rather than silently skipped. Its own table
+// (shipment_processed_events), like every other consumer's gate — one id
+// claimed here never collides with a repromise or release-confirmation id.
+//
+// The key is the raw CloudEvents id, with NO per-order scoping: ONE
+// ShipmentConfirmed names MANY orders (its orders[] list), and
+// ConfirmShipment applies the whole event in ONE transaction, so the claim
+// covers every order the event names at once — the deliberate difference
+// from RepromiseProcessedEvents' rationale, whose events each name one
+// order.
+type ShipmentProcessedEvents = ProcessedEventsGate

@@ -140,6 +140,24 @@ envelope, no dual-read, no `schema_version`, no envelope toggle.
   Stable shared consumer group `order-management-repromise`, gated on
   `KAFKA_BROKERS` alone.
 
+### Channel: `warehouse.outbound-shipping.events` (inbound, ADR-0051)
+
+- `subscribe` operationId `consumeOutboundShippingEvents`.
+  outbound-shipping's integration topic; this context reacts ONLY to
+  `com.warehouse.wms.outbound-shipping.outboundload.ShipmentConfirmed`
+  (the named orders' `Released` lines become `Shipped`, one atomic use
+  case per event, idempotency gate `shipment_processed_events`) and
+  `com.warehouse.wms.outbound-shipping.shippingpackage.PackageMissedLoad`
+  (the named order — `source_order_id` is a BARE `OrderId`, not a
+  `WorkUnitId` shape — is re-promised order-wide through the ADR-0018
+  machinery). Every other type is committed past; an unknown order or a
+  non-shippable order is skip-and-log (never a dead letter); only a
+  non-CloudEvents message or an undecodable payload is dead-lettered to
+  `<topic>.dlq`. Ships dark behind
+  `OUTBOUND_SHIPPING_CONSUMER_MODE=off|kafka`; kafka mode requires
+  `OUTBOUND_SHIPPING_CONSUMER_GROUP` (no default), `KAFKA_BROKERS` and
+  `DATABASE_URL`.
+
 ### Local-cache consumers (declared in `apis/asyncapi.yaml` as subscribe channels)
 
 Enabled only by `PATH_CATALOGUE_SOURCE=kafka` (default `none`); each uses
