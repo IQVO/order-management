@@ -71,54 +71,73 @@ func (uc *RepromiseOrder) ExecuteForMissedLoad(ctx context.Context, req Repromis
 			return nil
 		}
 
-		o, err := uc.Orders.FindByID(ctx, req.OrderId)
-		if err != nil {
+		o, freshGroups, moved, ok, err := uc.missedLoadMoves(ctx, req)
+		if err != nil || !ok {
 			return err
-		}
-		if o == nil {
-			uc.log("repromise: missed-load order not found, skipping",
-				"event_id", req.SourceEventId, "order_id", req.OrderId.String())
-			return nil
-		}
-
-		currentGroups := o.PromiseGroups()
-		if len(currentGroups) == 0 {
-			uc.log("repromise: missed-load order has no current promise groups, skipping",
-				"event_id", req.SourceEventId, "order_id", req.OrderId.String())
-			return nil
-		}
-
-		freshGroups, ok := uc.freshPromiseGroups(o)
-		if !ok {
-			uc.log("repromise: no fresh promise available for this order, skipping",
-				"event_id", req.SourceEventId, "order_id", req.OrderId.String())
-			return nil
-		}
-
-		moved := movedGroups(currentGroups, freshGroups)
-		if len(moved) == 0 {
-			uc.log("repromise: promise unchanged, no re-promise needed",
-				"event_id", req.SourceEventId, "order_id", req.OrderId.String())
-			return nil
 		}
 
 		o.SetPromiseGroups(freshGroups)
 		if err := uc.Orders.Save(ctx, o); err != nil {
 			return err
 		}
-		now := uc.Clock.Now()
-		for _, m := range moved {
-			if err := uc.publishMovedDemandFor(ctx, o, m.fresh); err != nil {
-				return err
-			}
-			if err := uc.Events.Publish(ctx, shared.NewOrderRepromised(
-				now, o.ID(), m.current.Promise.CptId, m.fresh.Promise.CptId, reasonPackageMissedLoad,
-			)); err != nil {
-				return err
-			}
-		}
-		return nil
+		return uc.publishMoved(ctx, o, moved)
 	})
+}
+
+// missedLoadMoves loads the missed-load order and recomputes its promise
+// groups, reporting whether ANY group's promise moved (ok) together with
+// the fresh breakdown to persist and the pairs to publish. Every
+// fail-soft skip (unknown order, no current groups, no feasible fresh
+// promise, nothing moved) is logged here and reports ok=false, nil.
+func (uc *RepromiseOrder) missedLoadMoves(ctx context.Context, req RepromiseMissedLoadRequest) (o *order.Order, fresh []order.PromiseGroup, moved []groupMove, ok bool, err error) {
+	o, err = uc.Orders.FindByID(ctx, req.OrderId)
+	if err != nil {
+		return nil, nil, nil, false, err
+	}
+	if o == nil {
+		uc.log("repromise: missed-load order not found, skipping",
+			"event_id", req.SourceEventId, "order_id", req.OrderId.String())
+		return nil, nil, nil, false, nil
+	}
+
+	currentGroups := o.PromiseGroups()
+	if len(currentGroups) == 0 {
+		uc.log("repromise: missed-load order has no current promise groups, skipping",
+			"event_id", req.SourceEventId, "order_id", req.OrderId.String())
+		return nil, nil, nil, false, nil
+	}
+
+	freshGroups, feasible := uc.freshPromiseGroups(o)
+	if !feasible {
+		uc.log("repromise: no fresh promise available for this order, skipping",
+			"event_id", req.SourceEventId, "order_id", req.OrderId.String())
+		return nil, nil, nil, false, nil
+	}
+
+	moved = movedGroups(currentGroups, freshGroups)
+	if len(moved) == 0 {
+		uc.log("repromise: promise unchanged, no re-promise needed",
+			"event_id", req.SourceEventId, "order_id", req.OrderId.String())
+		return nil, nil, nil, false, nil
+	}
+	return o, freshGroups, moved, true, nil
+}
+
+// publishMoved raises one OrderRepromised per moved group (and the
+// demand projection for each), still inside the caller's UnitOfWork.
+func (uc *RepromiseOrder) publishMoved(ctx context.Context, o *order.Order, moved []groupMove) error {
+	now := uc.Clock.Now()
+	for _, m := range moved {
+		if err := uc.publishMovedDemandFor(ctx, o, m.fresh); err != nil {
+			return err
+		}
+		if err := uc.Events.Publish(ctx, shared.NewOrderRepromised(
+			now, o.ID(), m.current.Promise.CptId, m.fresh.Promise.CptId, reasonPackageMissedLoad,
+		)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // groupMove is one promise group whose commitment moved: the group as it

@@ -249,30 +249,36 @@ func TestShippedStatusDerivation(t *testing.T) {
 			t.Fatalf("status = %q, want Released", o.Status())
 		}
 	})
-	t.Run("ship all of a released order lands on Shipped", func(t *testing.T) {
-		o := shipTestOrder(t, order.LineReleased, order.LineReleased)
-		if _, err := o.ShipAll(); err != nil {
-			t.Fatalf("ShipAll: %v", err)
-		}
-		if o.Status() != order.StatusShipped {
-			t.Fatalf("status = %q, want Shipped", o.Status())
-		}
-	})
-	t.Run("ship one of two released lands on PartiallyShipped then Shipped", func(t *testing.T) {
-		o := shipTestOrder(t, order.LineReleased, order.LineReleased)
-		if _, err := o.Ship(1); err != nil {
-			t.Fatalf("Ship(1): %v", err)
-		}
-		if o.Status() != order.StatusPartiallyShipped {
-			t.Fatalf("status = %q, want PartiallyShipped", o.Status())
-		}
-		if _, err := o.Ship(2); err != nil {
-			t.Fatalf("Ship(2): %v", err)
-		}
-		if o.Status() != order.StatusShipped {
-			t.Fatalf("status = %q, want Shipped", o.Status())
-		}
-	})
+}
+
+// TestShippedStatusWalksReleasedToShipped pins the derived status's
+// walk as one load's confirmations arrive: PartiallyShipped on the way,
+// Shipped at the end.
+func TestShippedStatusWalksReleasedToShipped(t *testing.T) {
+	o := shipTestOrder(t, order.LineReleased, order.LineReleased)
+	if o.Status() != order.StatusReleased {
+		t.Fatalf("start status = %q, want Released", o.Status())
+	}
+	if _, err := o.Ship(1); err != nil {
+		t.Fatalf("Ship(1): %v", err)
+	}
+	if o.Status() != order.StatusPartiallyShipped {
+		t.Fatalf("status = %q, want PartiallyShipped", o.Status())
+	}
+	if _, err := o.Ship(2); err != nil {
+		t.Fatalf("Ship(2): %v", err)
+	}
+	if o.Status() != order.StatusShipped {
+		t.Fatalf("status = %q, want Shipped", o.Status())
+	}
+	// ShipAll over the finished order is the idempotent no-op and the
+	// status does not regress.
+	if shipped, err := o.ShipAll(); err != nil || len(shipped) != 0 {
+		t.Fatalf("ShipAll on shipped order = %v, %v; want no move, no error", shipped, err)
+	}
+	if o.Status() != order.StatusShipped {
+		t.Fatalf("status = %q, want Shipped after re-delivery", o.Status())
+	}
 }
 
 // TestReleasedLineCannotBeReallocatedAfterShipping pins that Shipped is

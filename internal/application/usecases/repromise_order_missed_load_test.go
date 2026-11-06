@@ -2,6 +2,7 @@ package usecases_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -148,7 +149,7 @@ func TestExecuteForMissedLoad_InfrastructureErrorPropagates(t *testing.T) {
 	err := rf.repromiseOrder(rf.f.promise).ExecuteForMissedLoad(context.Background(), usecases.RepromiseMissedLoadRequest{
 		SourceEventId: "evt-miss-7", OrderId: o.ID(),
 	})
-	if err != errBoom && err == nil {
+	if !errors.Is(err, errBoom) {
 		t.Fatalf("err = %v, want the infrastructure failure", err)
 	}
 }
