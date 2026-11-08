@@ -180,9 +180,10 @@ Jaeger and Grafana alongside HTTP.
      Streamable HTTP handler — initialize handshake carries server info
      and non-empty instructions; unknown tools, wrong-typed arguments,
      unknown extra arguments, unknown resources and prompts are rejected;
-     resource templates and prompts are discoverable (here: the EMPTY
-     lists are the pinned contract — this server deliberately exposes
-     neither surface); a closed session fails loudly.
+     resource templates and prompts are discoverable (here: exactly ONE
+     resource template and ONE prompt are the pinned contract — ADR 0049;
+     the empty lists this charter used to pin were replaced with them); a
+     closed session fails loudly.
    - **E3 — behavioral evals** (`evalsuite_test.go` +
      `testdata/features/mcp_tools.feature`): Gherkin scenarios driving
      `tools/call` with model-realistic arguments (stray keys, wrong types,
@@ -214,11 +215,16 @@ Jaeger and Grafana alongside HTTP.
 ### Status in this repository
 
 `order-management-mcp` exposes 2 read-only tools (`get_order`,
-`get_promise_health`), and deliberately no resources, resource templates,
-or prompts (server.go's design note: the single-order read is already the
-`get_order` tool, and there is no multi-step SOP worth a prompt). No write
-tool is exposed by design (see `tools.go`'s Deps doc comment). Each tool
-call gets an OTel span (`mcp.tool <name>`).
+`get_promise_health`), one resource template
+(`warehouse://order-management/orders/{orderId}`, the order read model
+behind the same `GetOrder` use case) and one prompt (`investigate_order`,
+the operator SOP) — the complete agent surface of Agentic Standard v2,
+ADR 0049. No write tool is exposed by design (see `tools.go`'s Deps doc
+comment). Every tool and A2A skill declares its authority level
+(`com.warehouse/authority` / tag `authority:L1`; `L1` everywhere, because
+the surface is read-only), the Streamable HTTP handler is stateless (no
+`Mcp-Session-Id`; `server/discover` answers the 2026-07-28 revision), and
+each tool call gets an OTel span (`mcp.tool <name>`).
 
 ## 11. Changing this charter
 

@@ -147,9 +147,11 @@ func TestEval_ParametersAreDescribed(t *testing.T) {
 }
 
 // TestEval_ToolRegistryMatchesGolden pins the exact advertised surface
-// (names + write-intent annotations) to testdata/tool_registry.golden. Any
-// addition, removal, or annotation change must be a conscious golden-file
-// update reviewed against the charter's curation rules.
+// (names + write-intent annotations + declared authority level) to
+// testdata/tool_registry.golden. Any addition, removal, or annotation change
+// must be a conscious golden-file update reviewed against the charter's
+// curation rules; the authority column (Agentic Standard v2, ADR 0049) means
+// a level can only change through a reviewed golden edit.
 func TestEval_ToolRegistryMatchesGolden(t *testing.T) {
 	var got []string
 	for _, tool := range wireTools(t) {
@@ -161,7 +163,8 @@ func TestEval_ToolRegistryMatchesGolden(t *testing.T) {
 		if tool.Annotations != nil {
 			readOnly = tool.Annotations.ReadOnlyHint
 		}
-		got = append(got, fmt.Sprintf("%s\t%t\t%t", tool.Name, readOnly, destructive))
+		authority, _ := tool.Meta[authorityKey].(string)
+		got = append(got, fmt.Sprintf("%s\t%t\t%t\t%s", tool.Name, readOnly, destructive, authority))
 	}
 	sort.Strings(got)
 
