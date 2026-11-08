@@ -166,6 +166,39 @@ channels:
           - $ref: "#/components/messages/TaskCPTMissedInbound"
           - $ref: "#/components/messages/PackageManifestedInbound"
 
+  warehouse.outbound-shipping.events:
+    description: >-
+      outbound-shipping's integration topic (its merged apis/asyncapi.yaml,
+      the producer contract ADR 0051 pins). This context consumes it ONLY
+      for ShipmentConfirmed (the fleet's "this actually shipped" fact: the
+      named orders' Released lines become Shipped) and PackageMissedLoad (a
+      package not loaded by its cutoff: the named order is re-promised
+      order-wide through the ADR 0018 machinery). Every other event type on
+      this topic is silently skipped. outbound-shipping's Go code is never
+      imported — the messages below are this context's own
+      independently-declared copies of that service's real wire shapes.
+    subscribe:
+      operationId: consumeOutboundShippingEvents
+      summary: Ship confirmed orders; re-promise orders whose package missed its load.
+      description: >-
+        Dispatch is on the FULL CloudEvents type. The CloudEvents `id` is
+        the idempotency key: one ShipmentConfirmed claims its id once for
+        EVERY order it names (shipment_processed_events), and
+        PackageMissedLoad claims through the repromise gate. A
+        ShipmentConfirmed naming an order this context does not know, or an
+        order with no Released line, is skipped-and-logged and committed
+        past — never a dead letter (ADR 0051); only a non-CloudEvents
+        message or an undecodable payload is dead-lettered to
+        "<topic>.dlq". Runs under a STABLE shared consumer group (env
+        OUTBOUND_SHIPPING_CONSUMER_GROUP; the consumer itself ships dark
+        behind OUTBOUND_SHIPPING_CONSUMER_MODE=off|kafka).
+      tags:
+        - name: order-management
+      message:
+        oneOf:
+          - $ref: "#/components/messages/ShipmentConfirmedInbound"
+          - $ref: "#/components/messages/PackageMissedLoadInbound"
+
   warehouse.process-path-management.events:
     description: >-
       process-path-management's integration topic. Replayed from
@@ -726,6 +759,105 @@ components:
             data:
               package_id: pkg-99
               order_ref: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2-line-1
+
+    ShipmentConfirmedInbound:
+      name: ShipmentConfirmed
+      title: Shipment Confirmed (inbound, outbound-shipping)
+      summary: A closed load physically left the site on a trailer.
+      description: >-
+        Consumed from warehouse.outbound-shipping.events (ADR 0051). The
+        orders[] entries carry the DISTINCT source_order_id of the shipped
+        packages (a bare OrderId — the producer strips any -line-N suffix);
+        a package manifested without one is excluded by the producer. Only
+        load_id and orders[].order_id are read; every other member
+        (site_id, cpt_id, carrier, trailer_id, seal_number, departed_at,
+        version) is ignored by the fixed decode struct. One event ships
+        every named order's Released lines atomically.
+      tags:
+        - name: order-management
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/outbound-shipping }
+              type: { const: com.warehouse.wms.outbound-shipping.outboundload.ShipmentConfirmed }
+              dataschema: { const: "urn:warehouse:outbound-shipping:events:ShipmentConfirmed:v1" }
+              data:
+                $ref: "#/components/schemas/ShipmentConfirmedData"
+      examples:
+        - name: shipmentConfirmed
+          summary: A load carrying two orders departed the site.
+          payload:
+            specversion: "1.0"
+            id: 45e6f7a8-b9c0-4d1e-8f2a-3b4c5d6e7f80
+            source: /warehouse/outbound-shipping
+            type: com.warehouse.wms.outbound-shipping.outboundload.ShipmentConfirmed
+            subject: load-42
+            time: "2026-11-06T17:05:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:outbound-shipping:events:ShipmentConfirmed:v1"
+            data:
+              load_id: load-42
+              site_id: SITE1
+              cpt_id: sp1-1800
+              carrier: CARRIER-X
+              trailer_id: trailer-9
+              seal_number: seal-4
+              departed_at: "2026-11-06T17:05:00Z"
+              orders:
+                - order_id: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
+                - order_id: ord-0d1e2f3a-4b5c-6d7e-8f9a-0b1c2d3e4f5a
+              version: 3
+
+    PackageMissedLoadInbound:
+      name: PackageMissedLoad
+      title: Package Missed Load (inbound, outbound-shipping)
+      summary: A package was not loaded by its cutoff.
+      description: >-
+        Consumed from warehouse.outbound-shipping.events (ADR 0051).
+        source_order_id is a BARE OrderId (not the WorkUnitId shape
+        fulfillment-execution's events carry), so this event drives the
+        ORDER-WIDE re-promise (RepromiseOrder.ExecuteForMissedLoad), not
+        the per-line one. cutoff is decoded for logging only; the fresh
+        promise comes from current inputs. A payload without
+        source_order_id is skipped-and-logged (nothing to join on).
+      tags:
+        - name: order-management
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/outbound-shipping }
+              type: { const: com.warehouse.wms.outbound-shipping.shippingpackage.PackageMissedLoad }
+              dataschema: { const: "urn:warehouse:outbound-shipping:events:PackageMissedLoad:v1" }
+              data:
+                $ref: "#/components/schemas/PackageMissedLoadData"
+      examples:
+        - name: packageMissedLoad
+          summary: A package for one order missed its load's cutoff.
+          payload:
+            specversion: "1.0"
+            id: 56f7a8b9-c0d1-4e2f-9a3b-4c5d6e7f8a90
+            source: /warehouse/outbound-shipping
+            type: com.warehouse.wms.outbound-shipping.shippingpackage.PackageMissedLoad
+            subject: pkg-101
+            time: "2026-11-06T16:05:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:outbound-shipping:events:PackageMissedLoad:v1"
+            data:
+              package_id: pkg-101
+              load_id: load-42
+              site_id: SITE1
+              source_order_id: ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2
+              cutoff: "2026-11-06T16:00:00Z"
+              detected_at: "2026-11-06T16:05:00Z"
+              version: 2
 
     OrderReceivedAnalytics:
       name: OrderReceived
@@ -1624,6 +1756,54 @@ components:
         order_ref:
           type: string
           description: A WorkUnitId-shaped reference (`{orderId}-line-{lineNo}`), NOT a bare OrderId.
+
+    ShipmentConfirmedData:
+      type: object
+      description: >-
+        outbound-shipping's real, shipped ShipmentConfirmed payload (its
+        merged apis/asyncapi.yaml) — decoded independently here, never
+        imported. Only load_id and orders[].order_id are read by
+        order-management (ADR 0051); the other members are decoded-and-
+        ignored so additive producer fields stay forward-compatible.
+      required: [load_id, site_id, cpt_id, carrier, trailer_id, seal_number, departed_at, orders, version]
+      properties:
+        load_id: { type: string }
+        site_id: { type: string }
+        cpt_id: { type: string }
+        carrier: { type: string }
+        trailer_id: { type: string }
+        seal_number: { type: string }
+        departed_at: { type: string, format: date-time }
+        orders:
+          type: array
+          description: Distinct source_order_id of the shipped packages; a package manifested without one is excluded by the producer.
+          items:
+            type: object
+            required: [order_id]
+            properties:
+              order_id:
+                type: string
+                description: A bare OrderId — the order whose Released lines this confirmation ships.
+        version: { type: integer, minimum: 1 }
+
+    PackageMissedLoadData:
+      type: object
+      description: >-
+        outbound-shipping's real, shipped PackageMissedLoad payload —
+        decoded independently here, never imported. source_order_id (a
+        bare OrderId) drives the order-wide re-promise; cutoff is for
+        logging; the rest is decoded-and-ignored (ADR 0051).
+      required: [package_id, load_id, site_id, source_order_id, cutoff, detected_at, version]
+      properties:
+        package_id: { type: string }
+        load_id: { type: string }
+        site_id: { type: string }
+        source_order_id:
+          type: string
+          description: A bare OrderId, not a WorkUnitId-shaped reference.
+        cutoff: { type: string, format: date-time }
+        detected_at: { type: string, format: date-time }
+        version: { type: integer, minimum: 1 }
 
     AllocationData:
       type: object

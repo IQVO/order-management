@@ -49,5 +49,10 @@ Kafka key are the order id. Consumed types (exact):
 `warehouse.warehouse-planning.events`, key/subject = plan id),
 `com.warehouse.wms.product-master.product.ProductClassified` (ADR-0036,
 topic `warehouse.product-master.events`, key/subject = SKU; other
-product-master types ignored), plus this
+product-master types ignored),
+`com.warehouse.wms.outbound-shipping.outboundload.ShipmentConfirmed`
+and
+`com.warehouse.wms.outbound-shipping.shippingpackage.PackageMissedLoad`
+(ADR-0051, topic `warehouse.outbound-shipping.events`, key/subject =
+load/package id; other outbound-shipping types ignored), plus this
 service's own analytics types (projector).

@@ -17,13 +17,18 @@ paths:
 - **OrderLine** — `SKU`, `Quantity`, `PathId` (internal-only, resolved by
   `PathSelectionPolicy` since ADR-0005/0021 — never caller-settable, see below), `GiftWrap
   bool`, `LineStatus` (`Pending`/`Allocated`/`Backordered`/`Released`/
-  `Cancelled`), `ReservationId *string` (set once allocated; needed to
+  `Shipped`/`Cancelled`), `ReservationId *string` (set once allocated; needed to
   cancel).
 - **Status** (order-level, ALWAYS derived from line statuses — never a
   redundant field that can drift out of sync): `Received` →
   `Allocated` | `PartiallyAllocated` | `Backordered` → `Released` |
-  `PartiallyReleased` → `Cancelled` (only reachable from a pre-release
-  state).
+  `PartiallyReleased` → `Shipped` | `PartiallyShipped` (ADR-0051, from
+  outbound-shipping's `ShipmentConfirmed`; `Shipped` = all lines shipped,
+  `PartiallyShipped` = some) → `Cancelled` (only reachable from a pre-release
+  state). `Ship`/`ShipAll` only accept a `Released` line
+  (`ErrLineNotReleased`); an order with no `Released`/`Shipped` line is
+  not shippable (`ErrOrderNotShippable`) and the consumer skip-and-logs
+  it.
 - **Allocation** — reserving stock for one line via inventory-storage's
   `POST /reservations`. This service does NOT model a local Reservation
   aggregate — it only stores the `ReservationId` reference.
@@ -124,6 +129,8 @@ paths:
 | `OrderAllocated` | Every line `Allocated`, eligible lines released in the same pass | **Yes** — enriched `lines[]` |
 | `OrderPartiallyAllocated` | Some lines allocated/released, some backordered, `AllowPartialShipment=true` | **Yes** — enriched `lines[]` |
 | `OrderAllocationPartiallyFailed` | Hard (non-409) failure mid-allocation; already-succeeded lines kept | No — operational visibility only |
+| `OrderLineShipped` | `ConfirmShipment` (ADR-0051) moves a line Released -> Shipped on an inbound `ShipmentConfirmed` (one per line moved; re-deliveries raise nothing) | No — local concern for now (see ADR-0051 known gaps) |
+| `OrderShipped` / `OrderPartiallyShipped` | `ConfirmShipment` (ADR-0051): the derived status reached `Shipped` / `PartiallyShipped`; carry the confirming `load_id` | No — local concern for now (see ADR-0051 known gaps) |
 | `OrderLineReleased` | `allocateAndRelease` moves a line Allocated -> Released (one per line released in that pass; ADR-0034) | No — analytics topic only |
 | `OrderReleased` | That pass leaves every line of the order Released (ADR-0034) | No — analytics topic only |
 | `OrderCancelled` | `CancelOrder` succeeds | No |

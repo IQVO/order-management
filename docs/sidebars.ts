@@ -155,6 +155,7 @@ const sidebars: SidebarsConfig = {
         'adr/0047-promise-at-the-orders-own-fulfillment-site',
         'adr/0048-adopt-fleet-rest-api-guideline',
         'adr/0050-allocation-events-carry-the-orders-fulfillment-site',
+        'adr/0051-consume-shipment-confirmed-and-package-missedload',
       ],
     },
   ],

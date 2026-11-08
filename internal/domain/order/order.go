@@ -217,6 +217,11 @@ func (o *Order) Lines() []*OrderLine {
 // The derivation, in precedence order:
 //
 //   - every line Cancelled                  -> Cancelled
+//   - any line Shipped, all lines Shipped   -> Shipped
+//     (ADR 0051: "all released lines shipped". A cancelled line can never
+//     sit beside a shipped one — BR6 blocks cancellation at first release
+//     — so "all lines Shipped" is the whole rule)
+//   - any line Shipped, some line not       -> PartiallyShipped
 //   - any line Released, all lines Released -> Released
 //   - any line Released, some not           -> PartiallyReleased
 //   - any line Backordered, ship-complete   -> Backordered  (BR3: no line
@@ -229,47 +234,69 @@ func (o *Order) Lines() []*OrderLine {
 //   - some lines Allocated, rest Pending    -> PartiallyAllocated
 //   - otherwise                             -> Received
 func (o *Order) Status() Status {
-	var allocated, backordered, released, cancelled int
-	for _, l := range o.lines {
-		switch l.status {
-		case LineAllocated:
-			allocated++
-		case LineBackordered:
-			backordered++
-		case LineReleased:
-			released++
-		case LineCancelled:
-			cancelled++
-		}
-	}
+	c := o.countLineStatuses()
 	total := len(o.lines)
 
 	// Written as an if-chain, not a switch: coverage profiles do not
 	// attribute mutants on `case` expressions, so a switch here reports
 	// every arm as NOT COVERED to the mutation gate even when the table
 	// in status_test.go exercises all of them.
-	if cancelled == total {
+	if c.cancelled == total {
 		return StatusCancelled
 	}
-	if released == total {
+	if c.shipped > 0 {
+		if c.shipped == total {
+			return StatusShipped
+		}
+		return StatusPartiallyShipped
+	}
+	if c.released == total {
 		return StatusReleased
 	}
-	if released > 0 {
+	if c.released > 0 {
 		return StatusPartiallyReleased
 	}
-	if backordered > 0 {
-		if o.allowPartialShipment && allocated > 0 {
+	if c.backordered > 0 {
+		if o.allowPartialShipment && c.allocated > 0 {
 			return StatusPartiallyAllocated
 		}
 		return StatusBackordered
 	}
-	if allocated == total {
+	if c.allocated == total {
 		return StatusAllocated
 	}
-	if allocated > 0 {
+	if c.allocated > 0 {
 		return StatusPartiallyAllocated
 	}
 	return StatusReceived
+}
+
+// lineStatusCounts is the per-status line tally Status derives from.
+type lineStatusCounts struct {
+	allocated, backordered, released, cancelled, shipped int
+}
+
+// countLineStatuses tallies the order's line statuses in one pass. The
+// switch here is counting, not branching on business meaning: every
+// status's effect on the derived Status is decided in Status's own
+// if-chain, whose arms the mutation gate can attribute.
+func (o *Order) countLineStatuses() lineStatusCounts {
+	var c lineStatusCounts
+	for _, l := range o.lines {
+		switch l.status {
+		case LineAllocated:
+			c.allocated++
+		case LineBackordered:
+			c.backordered++
+		case LineReleased:
+			c.released++
+		case LineShipped:
+			c.shipped++
+		case LineCancelled:
+			c.cancelled++
+		}
+	}
+	return c
 }
 
 // Allocate records inventory-storage's reservation against a Pending line.
