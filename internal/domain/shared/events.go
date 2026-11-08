@@ -118,12 +118,19 @@ type ReleasedLine struct {
 // (Capability or LeadTime). PromiseDate itself is unchanged — it is the
 // promise's CutoffAt either way, kept on the wire for backward
 // compatibility.
+//
+// SiteID is ADR 0050's additive field: the order's caller-assigned
+// fulfillment site (ADR 0044), stamped by the raise site so the Kafka
+// payload can carry it as the optional top-level site_id. Empty for an
+// order without one — the published bytes are then identical to
+// pre-ADR-0050 bytes. Per-line sites are Phase 2; the site is order-level.
 type OrderAllocated struct {
 	base
 	OrderID      OrderId
 	PromiseDate  time.Time
 	PromiseCptId string
 	PromiseBasis string
+	SiteID       FulfillmentSiteID
 	Lines        []ReleasedLine
 }
 
@@ -143,6 +150,16 @@ func NewOrderAllocatedWithPromise(occurredAt time.Time, orderID OrderId, promise
 	}
 }
 
+// WithSite returns a copy of the event carrying ADR 0050's additive
+// fulfillment site (see the struct's doc comment). A separate mutator
+// rather than another widened constructor, so every existing call site
+// and test keeps compiling unchanged — the same reasoning as
+// NewOrderAllocatedWithPromise's doc comment.
+func (e OrderAllocated) WithSite(site FulfillmentSiteID) OrderAllocated {
+	e.SiteID = site
+	return e
+}
+
 // OrderPartiallyAllocated: some lines allocated, some backordered, on an
 // order that allows partial shipment. Lines carries only the lines
 // released THIS pass (i.e. o.LinesWithStatus(LineAllocated) restricted to
@@ -152,7 +169,10 @@ func NewOrderAllocatedWithPromise(occurredAt time.Time, orderID OrderId, promise
 // integration section of CLAUDE.md.
 //
 // PromiseCptId/PromiseBasis are ADR 0014's additive fields — see
-// OrderAllocated's doc comment.
+// OrderAllocated's doc comment. SiteID is ADR 0050's additive field — see
+// OrderAllocated's doc comment: the same order-level fulfillment site the
+// fully-allocated event carries, so a partial pass's released lines can be
+// sited exactly like a full pass's.
 type OrderPartiallyAllocated struct {
 	base
 	OrderID          OrderId
@@ -161,6 +181,7 @@ type OrderPartiallyAllocated struct {
 	PromiseDate      time.Time
 	PromiseCptId     string
 	PromiseBasis     string
+	SiteID           FulfillmentSiteID
 	Lines            []ReleasedLine
 }
 
@@ -181,6 +202,13 @@ func NewOrderPartiallyAllocatedWithPromise(occurredAt time.Time, orderID OrderId
 		OrderID: orderID, AllocatedLines: allocated, BackorderedLines: backordered, PromiseDate: promiseDate,
 		PromiseCptId: promiseCptId, PromiseBasis: promiseBasis, Lines: lines,
 	}
+}
+
+// WithSite returns a copy of the event carrying ADR 0050's additive
+// fulfillment site — see OrderAllocated.WithSite's doc comment.
+func (e OrderPartiallyAllocated) WithSite(site FulfillmentSiteID) OrderPartiallyAllocated {
+	e.SiteID = site
+	return e
 }
 
 // OrderLineReleased: a line's work was enqueued onto a wes-work-planning
@@ -333,5 +361,60 @@ func NewSiteSkuDemandChanged(occurredAt time.Time, sourceOrderID OrderId, lineNo
 		base: newBase("SiteSkuDemandChanged", occurredAt), SourceOrderID: sourceOrderID,
 		LineNo: lineNo, SiteID: siteID, SKU: sku, DemandedUnits: demandedUnits,
 		DueAt: dueAt, State: state, AssignmentVersion: assignmentVersion,
+	}
+}
+
+// OrderLineShipped: one order line physically left the site on a
+// confirmed outbound load (ADR 0051). Raised by the ConfirmShipment use
+// case for every line a ShipmentConfirmed moved Released -> Shipped; a
+// re-delivered confirmation raises nothing.
+type OrderLineShipped struct {
+	base
+	OrderID OrderId
+	LineNo  int
+	// LoadID is the outbound-shipping load whose departure confirmed the
+	// shipment — the correlation back to the physical fact, straight from
+	// the consumed ShipmentConfirmed.
+	LoadID string
+}
+
+func NewOrderLineShipped(occurredAt time.Time, orderID OrderId, lineNo int, loadID string) OrderLineShipped {
+	return OrderLineShipped{
+		base: newBase("OrderLineShipped", occurredAt), OrderID: orderID, LineNo: lineNo, LoadID: loadID,
+	}
+}
+
+// OrderShipped: every released line of this order has now shipped — the
+// derived Status() reached Shipped (ADR 0051). Raised at most once per
+// order, by the ConfirmShipment handling whose transition completed the
+// last released line.
+type OrderShipped struct {
+	base
+	OrderID OrderId
+	// LoadID is the outbound-shipping load whose departure confirmed the
+	// shipment — the correlation back to the physical fact.
+	LoadID string
+}
+
+func NewOrderShipped(occurredAt time.Time, orderID OrderId, loadID string) OrderShipped {
+	return OrderShipped{base: newBase("OrderShipped", occurredAt), OrderID: orderID, LoadID: loadID}
+}
+
+// OrderPartiallyShipped: some lines of this order have shipped while
+// others have not (still Released, or never released: Allocated,
+// Backordered) — the derived Status() reached PartiallyShipped (ADR
+// 0051). Raised by the ConfirmShipment handling that moved at least one
+// line while a non-cancelled line remains unshipped.
+type OrderPartiallyShipped struct {
+	base
+	OrderID OrderId
+	// LoadID is the outbound-shipping load whose departure confirmed the
+	// shipment — the correlation back to the physical fact.
+	LoadID string
+}
+
+func NewOrderPartiallyShipped(occurredAt time.Time, orderID OrderId, loadID string) OrderPartiallyShipped {
+	return OrderPartiallyShipped{
+		base: newBase("OrderPartiallyShipped", occurredAt), OrderID: orderID, LoadID: loadID,
 	}
 }
