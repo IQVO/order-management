@@ -218,7 +218,7 @@ func (c *RepromiseConsumer) handleUntilDone(ctx context.Context, policy backoff.
 		if ctx.Err() != nil {
 			return false
 		}
-		if !c.waitToRecover(ctx, policy, "handle", err, "partition", msg.Partition, "offset", msg.Offset) {
+		if !c.waitToRecover(ctx, policy, "handle", err, logKeyPartition, msg.Partition, logKeyOffset, msg.Offset) {
 			return false
 		}
 	}
@@ -229,7 +229,7 @@ func (c *RepromiseConsumer) handleUntilDone(ctx context.Context, policy backoff.
 func (c *RepromiseConsumer) waitToRecover(ctx context.Context, policy backoff.BackOff, stage string, err error, args ...any) bool {
 	wait := policy.NextBackOff()
 	c.log(ctx, "repromise: kafka unavailable, retrying",
-		append([]any{"stage", stage, "retry_in", wait.String(), "error", err}, args...)...)
+		append([]any{logKeyStage, stage, logKeyRetryIn, wait.String(), logKeyError, err}, args...)...)
 	select {
 	case <-ctx.Done():
 		return false
@@ -298,8 +298,8 @@ func (c *RepromiseConsumer) handleMessage(ctx context.Context, msg kafkago.Messa
 		// other shape, never block the partition.
 		recordSpanError(span, decodeErr)
 		c.log(msgCtx, "repromise: non-CloudEvents message, sending to dead-letter topic",
-			"topic", topic, "partition", msg.Partition, "offset", msg.Offset,
-			"dlq_topic", topic+dlqTopicSuffix, "error", decodeErr)
+			logKeyTopic, topic, logKeyPartition, msg.Partition, logKeyOffset, msg.Offset,
+			logKeyDlqTopic, topic+dlqTopicSuffix, logKeyError, decodeErr)
 		if dlqErr := c.dlqPublish(ctx, msg, decodeErr); dlqErr != nil {
 			return fmt.Errorf("repromise: publish to dead-letter topic: %w", dlqErr)
 		}
@@ -336,8 +336,8 @@ func (c *RepromiseConsumer) handleMessage(ctx context.Context, msg kafkago.Messa
 	// one, so the "uncommitted for redelivery" message was never actually
 	// redelivered (ADR-0024).
 	c.log(msgCtx, "repromise: exhausted retries, sending to dead-letter topic",
-		"topic", topic, "dlq_topic", topic+dlqTopicSuffix,
-		"ce_id", e.ID(), "ce_type", e.Type(), "attempts", maxHandlerAttempts, "error", err)
+		logKeyTopic, topic, logKeyDlqTopic, topic+dlqTopicSuffix,
+		logKeyCeID, e.ID(), logKeyCeType, e.Type(), "attempts", maxHandlerAttempts, logKeyError, err)
 	if dlqErr := c.dlqPublish(ctx, msg, err); dlqErr != nil {
 		return fmt.Errorf("repromise: publish to dead-letter topic: %w", dlqErr)
 	}
@@ -376,7 +376,7 @@ func (c *RepromiseConsumer) handleFulfillmentEvent(ctx context.Context, e ce.Eve
 	orderID, lineNo, ok := usecases.ParseWorkUnitID(orderRef)
 	if !ok {
 		c.log(ctx, "repromise: order_ref does not parse as a WorkUnitId, skipping",
-			"ce_id", e.ID(), "ce_type", e.Type(), "order_ref", orderRef)
+			logKeyCeID, e.ID(), logKeyCeType, e.Type(), "order_ref", orderRef)
 		return nil
 	}
 

@@ -17,7 +17,25 @@ import (
 // get their own matching "<topic>.dlq", exactly mirroring how
 // NewRepromiseConsumerForTopic already lets tests isolate the source
 // topic/group without touching production names.
-const dlqTopicSuffix = ".dlq"
+const (
+	dlqTopicSuffix = ".dlq"
+
+	// DLQ record headers carrying the error context (see dlqPublish).
+	dlqHeaderSourceTopic = "x-dlq-source-topic"
+	dlqHeaderError       = "x-dlq-error"
+	dlqHeaderFailedAt    = "x-dlq-failed-at"
+
+	// Structured-log keys shared by the consumers' retry/DLQ records.
+	logKeyError     = "error"
+	logKeyOffset    = "offset"
+	logKeyStage     = "stage"
+	logKeyRetryIn   = "retry_in"
+	logKeyTopic     = "topic"
+	logKeyPartition = "partition"
+	logKeyDlqTopic  = "dlq_topic"
+	logKeyCeID      = "ce_id"
+	logKeyCeType    = "ce_type"
+)
 
 // newDLQWriter builds the dead-letter writer for topic. It MUST set
 // AllowAutoTopicCreation: the fleet creates every business topic on
@@ -87,9 +105,9 @@ func (c *RepromiseConsumer) dlqPublish(ctx context.Context, msg kafkago.Message,
 	}
 	headers := append([]kafkago.Header{}, msg.Headers...)
 	headers = append(headers,
-		kafkago.Header{Key: "x-dlq-source-topic", Value: []byte(c.reader.Config().Topic)},
-		kafkago.Header{Key: "x-dlq-error", Value: []byte(cause.Error())},
-		kafkago.Header{Key: "x-dlq-failed-at", Value: []byte(time.Now().UTC().Format(time.RFC3339))},
+		kafkago.Header{Key: dlqHeaderSourceTopic, Value: []byte(c.reader.Config().Topic)},
+		kafkago.Header{Key: dlqHeaderError, Value: []byte(cause.Error())},
+		kafkago.Header{Key: dlqHeaderFailedAt, Value: []byte(time.Now().UTC().Format(time.RFC3339))},
 	)
 	return writeDLQ(ctx, c.dlqWriter, kafkago.Message{
 		Key:     msg.Key,

@@ -9,6 +9,7 @@ package order
 //	Pending -> Backordered (inventory-storage answered 409: no usable stock)
 //	Backordered -> Allocated (ONLY via RetryAllocation)
 //	Allocated -> Released (ReleaseOrder, once wes-work-planning accepts work)
+//	Released -> Shipped (Ship, once outbound-shipping confirms the load left; ADR 0051)
 //	any pre-release state -> Cancelled (CancelOrder)
 type LineStatus string
 
@@ -17,6 +18,7 @@ const (
 	LineAllocated   LineStatus = "Allocated"
 	LineBackordered LineStatus = "Backordered"
 	LineReleased    LineStatus = "Released"
+	LineShipped     LineStatus = "Shipped"
 	LineCancelled   LineStatus = "Cancelled"
 )
 
@@ -32,5 +34,7 @@ const (
 	StatusBackordered        Status = "Backordered"
 	StatusReleased           Status = "Released"
 	StatusPartiallyReleased  Status = "PartiallyReleased"
+	StatusShipped            Status = "Shipped"
+	StatusPartiallyShipped   Status = "PartiallyShipped"
 	StatusCancelled          Status = "Cancelled"
 )

@@ -130,11 +130,11 @@ func (p *PostgresProjection) applyAllocationOutcome(
 
 		var basisCapability, basisLeadTime, basisNetwork int
 		switch basis {
-		case "Capability":
+		case promiseBasisCapability:
 			basisCapability = 1
-		case "LeadTime":
+		case promiseBasisLeadTime:
 			basisLeadTime = 1
-		case "Network":
+		case promiseBasisNetwork:
 			// A promise dictated by an external deadline (ADR 0020): its own
 			// bucket, never folded into Capability/LeadTime (ADR 0019), and
 			// excluded from the promise-to-cutoff gap below.
@@ -148,7 +148,7 @@ func (p *PostgresProjection) applyAllocationOutcome(
 
 		var gapSeconds float64
 		var gapSamples int
-		if basis == "Capability" && cutoffAt != nil {
+		if basis == promiseBasisCapability && cutoffAt != nil {
 			gapSeconds = cutoffAt.Sub(at).Seconds()
 			gapSamples = 1
 		}

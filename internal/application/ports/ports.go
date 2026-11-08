@@ -325,16 +325,23 @@ type ProductClassificationCopy interface {
 	Upsert(ctx context.Context, rec ProductClassificationRecord) (applied bool, err error)
 }
 
+// ProcessedEventsGate is the shared shape of every consumer's
+// idempotency gate on the CloudEvents id: one interface because the
+// contract is one, while every consumer keeps its OWN implementation and
+// own table so ids never collide across consumers. The per-consumer names
+// below alias this type.
+type ProcessedEventsGate interface {
+	// MarkProcessed records eventId if absent, returning true iff this
+	// call newly recorded it.
+	MarkProcessed(ctx context.Context, eventId string) (bool, error)
+}
+
 // ProductClassificationProcessedEvents is ApplyProductClassification's
 // idempotency gate on the CloudEvents id. MarkProcessed MUST be called
 // inside the same UnitOfWork as the Upsert it guards, so a rolled-back
 // handling un-claims the id. Its own table
 // (product_classification_processed_events), like every other consumer's.
-type ProductClassificationProcessedEvents interface {
-	// MarkProcessed records eventId if absent, returning true iff this
-	// call newly recorded it.
-	MarkProcessed(ctx context.Context, eventId string) (bool, error)
-}
+type ProductClassificationProcessedEvents = ProcessedEventsGate
 
 // PathCapacity is the read-only outbound port for remaining capacity per
 // (path, CPT) bucket. Two implementations exist: UnknownPathCapacity
@@ -387,11 +394,7 @@ type PathCapacity interface {
 // same event_id, and the SAME event_id always refers to the SAME
 // order. This simplification is documented explicitly, not silently
 // substituted — see the RepromiseOrder ADR.
-type RepromiseProcessedEvents interface {
-	// MarkProcessed records eventId if absent, returning true iff this
-	// call newly recorded it.
-	MarkProcessed(ctx context.Context, eventId string) (bool, error)
-}
+type RepromiseProcessedEvents = ProcessedEventsGate
 
 // PlannedCapacityRepo is order-management's LOCAL read model of
 // warehouse-planning's CapacityPlans (ADR 0031): a mirror of the events
@@ -420,11 +423,7 @@ type PlannedCapacityRepo interface {
 // rather than silently skipped. Its own table
 // (planned_capacity_processed_events) so it never collides with
 // RepromiseProcessedEvents.
-type PlannedCapacityProcessedEvents interface {
-	// MarkProcessed records eventId if absent, returning true iff this
-	// call newly recorded it.
-	MarkProcessed(ctx context.Context, eventId string) (bool, error)
-}
+type PlannedCapacityProcessedEvents = ProcessedEventsGate
 
 // ReleaseConfirmations is the process-manager table of ADR 0043: one row per
 // released order line, tracking whether wes-work-planning confirmed the
@@ -458,11 +457,7 @@ type ReleaseConfirmations interface {
 // un-claims the id and the redelivery is processed rather than silently
 // skipped. Its own table (release_confirmation_processed_events), so it never
 // collides with the other consumers' gates.
-type ReleaseConfirmationProcessedEvents interface {
-	// MarkProcessed records eventId if absent, returning true iff this
-	// call newly recorded it.
-	MarkProcessed(ctx context.Context, eventId string) (bool, error)
-}
+type ReleaseConfirmationProcessedEvents = ProcessedEventsGate
 
 // ReleaseConfirmationOutcome is what handling one WorkUnitCreated came to.
 // Its string value is the `outcome` attribute of the
@@ -497,3 +492,21 @@ type ReleaseConfirmationMetrics interface {
 	// (order.release_confirmation.unconfirmed).
 	LineUnconfirmed(ctx context.Context)
 }
+
+// ShipmentProcessedEvents is ConfirmShipment's idempotency gate (ADR
+// 0051): it records which outbound-shipping ShipmentConfirmed CloudEvents
+// ids have already been applied, so the at-least-once redelivery the
+// producer's outbox relay can produce never re-ships an order. MarkProcessed
+// MUST be called inside the same UnitOfWork as the aggregate Saves it
+// guards, so a rolled-back handling un-claims the id and the redelivery is
+// processed rather than silently skipped. Its own table
+// (shipment_processed_events), like every other consumer's gate — one id
+// claimed here never collides with a repromise or release-confirmation id.
+//
+// The key is the raw CloudEvents id, with NO per-order scoping: ONE
+// ShipmentConfirmed names MANY orders (its orders[] list), and
+// ConfirmShipment applies the whole event in ONE transaction, so the claim
+// covers every order the event names at once — the deliberate difference
+// from RepromiseProcessedEvents' rationale, whose events each name one
+// order.
+type ShipmentProcessedEvents = ProcessedEventsGate

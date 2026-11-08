@@ -91,7 +91,7 @@ func (uc *ReleaseHeldOrder) Execute(ctx context.Context, id shared.OrderId) (*or
 	}
 
 	deps := allocationDeps{Orders: uc.Orders, Inventory: uc.Inventory, Events: uc.Events, Clock: uc.Clock, Promise: uc.Promise, UnitOfWork: uc.UnitOfWork, ReleaseConfirmations: uc.ReleaseConfirmations}
-	if _, err := allocateAndRelease(ctx, deps, o, nil, false, true); err != nil {
+	if err := allocateAndRelease(ctx, deps, o, nil, false, true); err != nil {
 		return nil, err
 	}
 	return o, nil

@@ -196,78 +196,86 @@ func (p *AnalyticsPublisher) firstReleasedLinePath(ctx context.Context, orderID 
 // message key (the OrderId), and snake_case JSON payload (which always carries
 // the enriched path_id). The bool return is false for an event type outside
 // the analytics contract, so Publish can skip it.
+// Attribute keys of the analytics data-product payloads (snake_case wire
+// contract; publisher.go's struct tags use the same names).
+const (
+	attrOrderID = "order_id"
+	attrPathID  = "path_id"
+	attrLineNo  = "line_no"
+)
+
 func (p *AnalyticsPublisher) marshalData(ctx context.Context, e shared.DomainEvent) (eventType, key string, data json.RawMessage, ok bool) {
 	switch ev := e.(type) {
 	case shared.OrderReceived:
 		return "OrderReceived", ev.OrderID.String(), mustMarshal(map[string]any{
-			"order_id":   ev.OrderID.String(),
-			"path_id":    p.orderPath(ctx, ev.OrderID),
+			attrOrderID:  ev.OrderID.String(),
+			attrPathID:   p.orderPath(ctx, ev.OrderID),
 			"line_count": ev.LineCount,
 		}), true
 	case shared.OrderAllocated:
 		return "OrderAllocated", ev.OrderID.String(), mustMarshal(p.promiseAllocationData(ctx, map[string]any{
-			"order_id": ev.OrderID.String(),
-			"path_id":  p.firstReleasedLinePath(ctx, ev.OrderID, ev.Lines),
+			attrOrderID: ev.OrderID.String(),
+			attrPathID:  p.firstReleasedLinePath(ctx, ev.OrderID, ev.Lines),
 		}, ev.OrderID, ev.PromiseBasis, ev.PromiseDate)), true
 	case shared.OrderPartiallyAllocated:
 		return "OrderPartiallyAllocated", ev.OrderID.String(), mustMarshal(p.promiseAllocationData(ctx, map[string]any{
-			"order_id":          ev.OrderID.String(),
-			"path_id":           p.firstReleasedLinePath(ctx, ev.OrderID, ev.Lines),
+			attrOrderID:         ev.OrderID.String(),
+			attrPathID:          p.firstReleasedLinePath(ctx, ev.OrderID, ev.Lines),
 			"allocated_lines":   ev.AllocatedLines,
 			"backordered_lines": ev.BackorderedLines,
 		}, ev.OrderID, ev.PromiseBasis, ev.PromiseDate)), true
 	case shared.OrderAllocationPartiallyFailed:
 		return "OrderAllocationPartiallyFailed", ev.OrderID.String(), mustMarshal(map[string]any{
-			"order_id":        ev.OrderID.String(),
-			"path_id":         p.orderPath(ctx, ev.OrderID),
+			attrOrderID:       ev.OrderID.String(),
+			attrPathID:        p.orderPath(ctx, ev.OrderID),
 			"allocated_lines": ev.AllocatedLines,
 			"remaining_lines": ev.RemainingLines,
 		}), true
 	case shared.OrderReleased:
 		return "OrderReleased", ev.OrderID.String(), mustMarshal(map[string]any{
-			"order_id": ev.OrderID.String(),
-			"path_id":  p.orderPath(ctx, ev.OrderID),
+			attrOrderID: ev.OrderID.String(),
+			attrPathID:  p.orderPath(ctx, ev.OrderID),
 		}), true
 	case shared.OrderCancelled:
 		return "OrderCancelled", ev.OrderID.String(), mustMarshal(map[string]any{
-			"order_id":             ev.OrderID.String(),
-			"path_id":              p.orderPath(ctx, ev.OrderID),
+			attrOrderID:            ev.OrderID.String(),
+			attrPathID:             p.orderPath(ctx, ev.OrderID),
 			"revoked_reservations": ev.RevokedReservations,
 		}), true
 	case shared.OrderLineAllocated:
 		return "OrderLineAllocated", ev.OrderID.String(), mustMarshal(map[string]any{
-			"order_id": ev.OrderID.String(),
-			"line_no":  ev.LineNo,
-			"path_id":  p.linePath(ctx, ev.OrderID, ev.LineNo),
-			"sku":      ev.SKU.String(),
+			attrOrderID: ev.OrderID.String(),
+			attrLineNo:  ev.LineNo,
+			attrPathID:  p.linePath(ctx, ev.OrderID, ev.LineNo),
+			"sku":       ev.SKU.String(),
 		}), true
 	case shared.OrderLineBackordered:
 		return "OrderLineBackordered", ev.OrderID.String(), mustMarshal(map[string]any{
-			"order_id": ev.OrderID.String(),
-			"line_no":  ev.LineNo,
-			"path_id":  p.linePath(ctx, ev.OrderID, ev.LineNo),
-			"sku":      ev.SKU.String(),
+			attrOrderID: ev.OrderID.String(),
+			attrLineNo:  ev.LineNo,
+			attrPathID:  p.linePath(ctx, ev.OrderID, ev.LineNo),
+			"sku":       ev.SKU.String(),
 		}), true
 	case shared.OrderLineReleased:
 		return "OrderLineReleased", ev.OrderID.String(), mustMarshal(map[string]any{
-			"order_id":     ev.OrderID.String(),
-			"line_no":      ev.LineNo,
-			"path_id":      ev.PathID.String(),
+			attrOrderID:    ev.OrderID.String(),
+			attrLineNo:     ev.LineNo,
+			attrPathID:     ev.PathID.String(),
 			"work_unit_id": ev.WorkUnitID,
 		}), true
 	case shared.OrderReleaseUnconfirmed:
 		// ADR 0043: an analytics-only fact. The path travels on the event (the
 		// confirmation row stored it), so no order lookup is needed.
 		return "OrderReleaseUnconfirmed", ev.OrderID.String(), mustMarshal(map[string]any{
-			"order_id":     ev.OrderID.String(),
-			"line_no":      ev.LineNo,
-			"path_id":      ev.PathID.String(),
+			attrOrderID:    ev.OrderID.String(),
+			attrLineNo:     ev.LineNo,
+			attrPathID:     ev.PathID.String(),
 			"work_unit_id": ev.WorkUnitID,
 			"released_at":  ev.ReleasedAt.UTC().Format(time.RFC3339Nano),
 		}), true
 	case shared.OrderRepromised:
 		return "OrderRepromised", ev.OrderID.String(), mustMarshal(map[string]any{
-			"order_id":   ev.OrderID.String(),
+			attrOrderID:  ev.OrderID.String(),
 			"cpt_id_old": ev.CptIdOld,
 			"cpt_id_new": ev.CptIdNew,
 			"reason":     ev.Reason,

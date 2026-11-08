@@ -87,8 +87,9 @@ func readIntegrationTopic(ctx context.Context, t *testing.T, brokers []string, w
 // the real use cases over the real OrderRepo / UnitOfWork / outbox, relays
 // the outbox to a real Kafka broker and reads the wire back: an order with
 // a caller-assigned site yields order-site-v1 at THAT site, one without
-// falls back to the static site, and the frozen OrderAllocated payload is
-// shaped identically for both (the site never leaks into it).
+// falls back to the static site, and — since ADR 0050 — the with-site
+// OrderAllocated payload is the without-site one plus exactly the additive
+// top-level site_id (absent, omitempty, for the order without a site).
 func TestFulfillmentSite_ProjectsThroughRealPostgresOutboxToRealKafka(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -184,12 +185,34 @@ func TestFulfillmentSite_ProjectsThroughRealPostgresOutboxToRealKafka(t *testing
 		t.Fatalf("held order: demand = %+v, want ACTIVE then REMOVED at DC7 order-site-v1", got)
 	}
 	a, b := allocatedKeys[withSite.ID().String()], allocatedKeys[without.ID().String()]
-	if len(a) == 0 || len(a) != len(b) {
-		t.Fatalf("OrderAllocated payload keys differ: with site %v, without %v", a, b)
+	if len(b) == 0 {
+		t.Fatalf("no OrderAllocated payload keys read")
+	}
+	// ADR 0050: the with-site payload is the without-site payload plus
+	// exactly one additive member, site_id=WH2; the without-site payload
+	// keeps the pre-ADR-0050 key set (site_id absent — omitempty).
+	want := append([]string{}, b...)
+	want = append(want, "site_id")
+	sort.Strings(want)
+	if len(a) != len(want) {
+		t.Fatalf("OrderAllocated payload keys differ: with site %v, without %v (+site_id)", a, b)
 	}
 	for i := range a {
-		if a[i] != b[i] {
-			t.Fatalf("OrderAllocated payload keys differ: with site %v, without %v", a, b)
+		if a[i] != want[i] {
+			t.Fatalf("OrderAllocated payload keys differ: with site %v, without %v (+site_id)", a, b)
+		}
+	}
+	for _, e := range events {
+		if e.Type == "com.warehouse.wes.order-management.order.OrderAllocated" && e.Subject == withSite.ID().String() {
+			var m struct {
+				SiteID string `json:"site_id"`
+			}
+			if err := json.Unmarshal(e.Data, &m); err != nil {
+				t.Fatalf("allocated data: %v", err)
+			}
+			if m.SiteID != "WH2" {
+				t.Fatalf("with-site OrderAllocated site_id = %q, want WH2", m.SiteID)
+			}
 		}
 	}
 }

@@ -21,6 +21,10 @@ site is no longer read by the demand projection only — the CPT promise (intake
 every re-promise) and the planned-capacity annotation use it too, falling back to
 `DEFAULT_SITE_ID` / `PLANNED_CAPACITY_SITE_ID`. The "assigned, never inferred" rule
 below is unchanged.
+**Additively superseded by [ADR 0050](./0050-allocation-events-carry-the-orders-fulfillment-site.md):**
+§7's freeze is lifted for exactly one additive member — `OrderAllocated` /
+`OrderPartiallyAllocated` now carry the optional top-level `site_id` (omitempty;
+an order without a site still publishes byte-identical bytes).
 
 ## Context
 

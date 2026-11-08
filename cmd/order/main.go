@@ -80,6 +80,13 @@ func run() error {
 		return err
 	}
 
+	// ADR 0051: validate OUTBOUND_SHIPPING_* before anything else is
+	// built, so kafka mode without its prerequisites fails boot first.
+	outboundShippingCfg, err := outboundShippingConfigFromEnv()
+	if err != nil {
+		return err
+	}
+
 	orders, publisher, dbPool, uow, relay, closeAdapters, err := buildRepoAdapters(ctx, db.url, db.migrationsURL, db.migrationsPath, getenv("EVENT_PUBLISHER", "log"), logger)
 	if err != nil {
 		return err
@@ -114,6 +121,11 @@ func run() error {
 	// wes-work-planning's WorkUnitCreated runs for the process lifetime; off
 	// (the default) starts nothing.
 	defer startReleaseConfirmationConsumer(releaseConfirmationCfg, dbPool, clock, logger, deaths)()
+
+	// ADR 0051: with OUTBOUND_SHIPPING_CONSUMER_MODE=kafka the consumer
+	// of outbound-shipping's ShipmentConfirmed/PackageMissedLoad runs for
+	// the process lifetime; off (the default) starts nothing.
+	defer startOutboundShippingConsumer(outboundShippingCfg, dbPool, orders, publisher, uow, clock, promise, repromiseProcessed, buildDemandProjection(logger), logger, deaths)()
 
 	// ADR 0031 planned capacity: a nil value (consumer-group env unset)
 	// leaves everything below exactly as before.

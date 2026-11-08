@@ -26,6 +26,9 @@ const tracerName = "github.com/claudioed/order-management/internal/adapters/inbo
 const (
 	skillOrderStatus   = "order_status"
 	skillPromiseHealth = "promise_health"
+
+	// mediaTypeJSON is the one content type every A2A skill speaks.
+	mediaTypeJSON = "application/json"
 )
 
 var (
