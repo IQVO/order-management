@@ -18,8 +18,8 @@ wes-work-planning or fulfillment-execution — see
 | --- | --- | --- |
 | **Order** | The aggregate root: one customer's demand, its lines, its delivery promise and its hold/deadline intent. | `order.Order` |
 | **Order line** | One requested SKU and quantity within an order, with its resolved process path, gift-wrap flag, line status and (once allocated) reservation id. | `order.OrderLine` |
-| **Order status** | Derived on every read from line statuses, never stored: `Received`, `Allocated`, `PartiallyAllocated`, `Backordered`, `Released`, `PartiallyReleased`, `Cancelled`. | `order.Status`, `Order.Status()` |
-| **Line status** | `Pending`, `Allocated`, `Backordered`, `Released`, `Cancelled`. | `order.LineStatus` |
+| **Order status** | Derived on every read from line statuses, never stored: `Received`, `Allocated`, `PartiallyAllocated`, `Backordered`, `Released`, `PartiallyReleased`, `Shipped`, `PartiallyShipped`, `Cancelled`. | `order.Status`, `Order.Status()` |
+| **Line status** | `Pending`, `Allocated`, `Backordered`, `Released`, `Shipped`, `Cancelled`. | `order.LineStatus` |
 | **Allocation** | Reserving stock for one line through inventory-storage's `POST /reservations`. No local `Reservation` model — only the id is kept. | `usecases.allocateLines` |
 | **Backordered** | A line inventory-storage answered `409` for (insufficient usable stock). A business fact, unlike a transport or 5xx error, which fails the pass instead (BR2, fail closed). | `order.LineStatusBackordered`, `ports.ErrInsufficientStock` |
 | **Retry allocation** | The only path from `Backordered` back to `Allocated`. | `usecases.RetryAllocation`, `Order.RetryAllocate` |

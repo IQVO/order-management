@@ -106,6 +106,7 @@ const sidebars: SidebarsConfig = {
       label: 'Architecture Decision Records',
       link: {type: 'doc', id: 'adr/about'},
       items: [
+        'adr/index',
         'adr/0001-hexagonal-ports-and-adapters',
         'adr/0002-http-consumer-of-inventory-and-wes-not-shared-code',
         'adr/0003-ship-complete-default-and-fail-closed-allocation',

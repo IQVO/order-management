@@ -2,7 +2,7 @@
 title: Domain Message Flow
 sidebar_label: Domain Message Flow
 sidebar_position: 5
-description: "ddd-crew Domain Message Flow Modelling: four business scenarios across contexts, every arrow a real REST route, MCP tool or Kafka CloudEvents type, prefixed cmd, evt or qry."
+description: "ddd-crew Domain Message Flow Modelling: five business scenarios across contexts, every arrow a real REST route, MCP tool or Kafka CloudEvents type, prefixed cmd, evt or qry."
 ---
 
 # Domain Message Flow
@@ -13,7 +13,7 @@ Participants are bounded contexts, actors and external systems; every
 arrow is a real message, prefixed `cmd:` (command), `evt:` (event) or
 `qry:` (query). Kafka arrows use the event name; the full CloudEvents type
 is `com.warehouse.<tier>.<context>.<entity>.<EventName>` — `wms` for
-product-master, `wes` for every other context on this page — see
+product-master and outbound-shipping, `wes` for every other context on this page — see
 [Domain Events](./domain-events.md).
 
 ## 1. Customer order to released work
@@ -153,3 +153,38 @@ Source: `internal/adapters/inbound/kafka/planned_capacity_consumer.go`,
 `BottleneckDetected` (ignored), DRAFT vs PUBLISHED precedence, and the MCP
 response (it does not carry the capacity annotation). Planned capacity
 never moves a promise (ADR 0031).
+
+## 5. A load ships, or a package misses its load
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant OS as outbound-shipping
+  participant OM as order-management
+  actor Console as Console or MCP host
+
+  OS-)OM: evt: ShipmentConfirmed with load_id and orders[]
+  Note over OM: OUTBOUND_SHIPPING_CONSUMER_MODE=kafka, off by default (ADR 0051)
+  alt first time this CloudEvents id is seen
+    Note over OM: one unit of work claims the id in shipment_processed_events, then ships each named order's Released lines
+    Note over OM: OrderLineShipped per line and OrderShipped or OrderPartiallyShipped per order are raised locally, not published
+  else duplicate id
+    Note over OM: no effect
+  end
+  Console->>OM: qry: GET /orders/id
+  OM-->>Console: order with its derived status, Shipped or PartiallyShipped once a line shipped
+  OS-)OM: evt: PackageMissedLoad with source_order_id and cutoff
+  Note over OM: order-wide re-promise through the ADR 0018 machinery, every promise group recomputed from current inputs
+  Note over OM: each group whose promise moved publishes OrderRepromised on warehouse.order-management.events
+```
+
+Source: `internal/adapters/inbound/kafka/outbound_shipping_consumer.go`,
+`internal/application/usecases/confirm_shipment.go`,
+`internal/application/usecases/repromise_order_missed_load.go`,
+`internal/domain/order/ship.go`, `cmd/order/outbound_shipping.go`. Omits: the
+skip-and-log outcomes (an unknown order or one with no `Released` line is
+committed past, the other orders in the event still ship), the DLQ, and the
+`no_change` outcome for an already shipped order. One `ShipmentConfirmed`
+ships the order's whole `Released` remainder, because `orders[]` carries order
+ids and no per-package detail ([ADR 0051](/docs/adr/0051-consume-shipment-confirmed-and-package-missedload),
+known gaps).

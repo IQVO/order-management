@@ -110,6 +110,7 @@ Typos, broken links and formatting are of course fair game.
 | [0048](./0048-adopt-fleet-rest-api-guideline.md) | Adopt the fleet REST API guideline | Accepted; amends 0023 and 0038 |
 | [0049](./0049-agent-authority-levels-and-complete-mcp-surface.md) | Agent authority levels and the complete MCP surface | Accepted; extends 0010 and 0046 |
 | [0050](./0050-allocation-events-carry-the-orders-fulfillment-site.md) | OrderAllocated/OrderPartiallyAllocated carry the order's fulfillment site | Accepted; additively supersedes 0044 §7's freeze |
+| [0051](./0051-consume-shipment-confirmed-and-package-missedload.md) | Consume ShipmentConfirmed/PackageMissedLoad: the Order ships | Accepted |
 
 Each of these reconstructs a decision that is actually visible in this
 repository's `CLAUDE.md` and code — none is a generic placeholder.
@@ -123,7 +124,7 @@ repository's `CLAUDE.md` and code — none is a generic placeholder.
    the decision feel inevitable, the context is incomplete — or the
    decision is wrong.
 4. Fill in *Consequences* honestly, including the ones you dislike.
-5. Add it to the table above and to `sidebars.ts`.
+5. Add it to the table above, to [the ADR index](./index.md) and to `sidebars.ts`.
 6. Raise it as a pull request; the discussion belongs on the PR, not
    inside the record.
 7. On merge, flip the status to **Accepted**.
