@@ -67,6 +67,7 @@ classDiagram
     Allocated
     Backordered
     Released
+    Shipped
     Cancelled
   }
   class Status {
@@ -77,6 +78,8 @@ classDiagram
     Backordered
     Released
     PartiallyReleased
+    Shipped
+    PartiallyShipped
     Cancelled
   }
   class FulfillmentClass {
