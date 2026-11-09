@@ -10,7 +10,7 @@ description: "Final Postgres schema of order-management (OLTP and analytics data
 Two databases, two migration sets, both applied by golang-migrate on boot
 (`postgres.RunMigrations`):
 
-- **OLTP** (`DATABASE_URL`, migrations `migrations/0001`–`0012`), migrated
+- **OLTP** (`DATABASE_URL`, migrations `migrations/0001`–`0014`), migrated
   by `cmd/order` and by `cmd/mcp` (through `MIGRATIONS_DATABASE_URL`,
   ADR 0029).
 - **Analytics** (`ANALYTICS_DATABASE_URL`, migrations
@@ -34,6 +34,7 @@ erDiagram
     BOOLEAN release_on_allocation "default true, 0005"
     TIMESTAMPTZ required_ship_by "nullable, 0006"
     INTEGER version "default 1, 0009"
+    TEXT fulfillment_site_id "nullable, 0013"
   }
   order_lines {
     TEXT order_id PK,FK
@@ -102,6 +103,10 @@ erDiagram
     TEXT event_id PK "CloudEvents id, 0012"
     TIMESTAMPTZ processed_at
   }
+  shipment_processed_events {
+    TEXT event_id PK "CloudEvents id, 0014"
+    TIMESTAMPTZ processed_at
+  }
   outbox_events {
     BIGSERIAL id PK
     TEXT topic
@@ -134,7 +139,7 @@ erDiagram
   orders ||--o{ order_promise_groups : "promised as"
 ```
 
-Source: `migrations/0001_init.up.sql` … `migrations/0012_release_confirmations.up.sql`;
+Source: `migrations/0001_init.up.sql` … `migrations/0014_shipment_processed_events.up.sql`;
 `schema_migrations` is golang-migrate's own bookkeeping table
 (`internal/adapters/outbound/postgres/migrate.go`). Omits: secondary
 indexes (`idx_order_lines_sku`, `idx_order_lines_status`,
@@ -162,9 +167,15 @@ deliberately unlinked:
   not a relation.
 - `repromise_processed_events.event_id`,
   `planned_capacity_processed_events.event_id`,
-  `product_classification_processed_events.event_id` and
-  `release_confirmation_processed_events.event_id` hold **inbound**
-  CloudEvents ids from other contexts.
+  `product_classification_processed_events.event_id`,
+  `release_confirmation_processed_events.event_id` and
+  `shipment_processed_events.event_id` hold **inbound**
+  CloudEvents ids from other contexts. `shipment_processed_events` (migration
+  0014, ADR 0051) is keyed by the raw `ShipmentConfirmed` id with no per-order
+  scoping: one event names many orders and is applied in one transaction. It
+  stays empty while `OUTBOUND_SHIPPING_CONSUMER_MODE=off`.
+- `orders.fulfillment_site_id` (migration 0013, ADR 0044) is the optional,
+  caller-assigned site; it is written only by the `INSERT` of a new order.
 - `product_classification_copy.sku` is a product-master SKU (ADR 0036): a
   local copy, never joined to `order_lines.sku` by a constraint.
 - `release_confirmations.(order_id, line_no)` names an order line but has no
@@ -240,6 +251,7 @@ database: every table is a projection or an idempotency ledger.
 | `product_classification_processed_events` | Infrastructure: inbound idempotency ledger | `ports.ProductClassificationProcessedEvents` |
 | `release_confirmations` | Process manager: whether wes-work-planning confirmed each released line (ADR 0043); deliberately outside the Order aggregate | none — `releaseconfirmation.Confirmation` / `ports.ReleaseConfirmations` |
 | `release_confirmation_processed_events` | Infrastructure: inbound idempotency ledger | `ports.ReleaseConfirmationProcessedEvents` |
+| `shipment_processed_events` | Infrastructure: inbound idempotency ledger of `ShipmentConfirmed` (ADR 0051) | `ports.ShipmentProcessedEvents` |
 | `outbox_events` | Infrastructure: transactional outbox (ADR 0022) | `postgres.OutboxPublisher` / `OutboxRelay` |
 | `idempotency_keys` | Infrastructure: HTTP request de-duplication (ADR 0023) | `inbound/http.RequireIdempotencyKey` |
 | `schema_migrations` | Infrastructure: golang-migrate | — |

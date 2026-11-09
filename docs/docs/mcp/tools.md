@@ -48,7 +48,7 @@ Output (structured content):
 | Field | Type | Notes |
 | --- | --- | --- |
 | `id` | string | |
-| `status` | string | derived order status (`Received`, `Allocated`, `PartiallyAllocated`, `Backordered`, `Released`, `PartiallyReleased`, `Cancelled`) |
+| `status` | string | derived order status (`Received`, `Allocated`, `PartiallyAllocated`, `Backordered`, `Released`, `PartiallyReleased`, `Shipped`, `PartiallyShipped`, `Cancelled`; `Shipped` and `PartiallyShipped` only with the outbound-shipping consumer on, ADR 0051) |
 | `allowPartialShipment` | boolean | |
 | `promiseDate` | string, RFC 3339 | omitted when no promise is set |
 | `lines[]` | array | `lineNo`, `sku`, `quantity`, `pathId`, `giftWrap`, `status`, `reservationId` (omitted when not allocated) |

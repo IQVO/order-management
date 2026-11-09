@@ -54,6 +54,9 @@ the startup probe fails until then. In order:
    `RELEASE_CONFIRMATION_MODE=kafka` a missing consumer group,
    `KAFKA_BROKERS`, `DATABASE_URL` or `EVENT_PUBLISHER=kafka` is a boot error
    that names the variable.
+   `OUTBOUND_SHIPPING_*` is validated the same way: with
+   `OUTBOUND_SHIPPING_CONSUMER_MODE=kafka` a missing consumer group,
+   `KAFKA_BROKERS` or `DATABASE_URL` is a boot error that names the variable.
 2. With `DATABASE_URL`: run the OLTP migrations against
    `MIGRATIONS_DATABASE_URL`, open the pool and ping it. Both steps are
    retried by `internal/bootretry` (5 attempts, 1+2+4+8 s backoff, about
@@ -92,7 +95,8 @@ On SIGTERM `cmd/order`:
    and offset commit;
 5. lets the outbox relay finish its last pass;
 6. stops the planned-capacity, product-classification and (when
-   `RELEASE_CONFIRMATION_MODE=kafka`) release-confirmation consumers (up
+   `RELEASE_CONFIRMATION_MODE=kafka`) release-confirmation consumers and, when
+   `OUTBOUND_SHIPPING_CONSUMER_MODE=kafka`, the outbound-shipping consumer (up
    to 10 s each) and the catalogue caches, then the housekeeping sweeper,
    and finally closes the Postgres pool.
 
@@ -103,7 +107,7 @@ consumer (projector) and shut the HTTP server down within 10 s.
 
 | Database | Directory | Applied by | Connection |
 | --- | --- | --- | --- |
-| OLTP | `migrations/` (`0001_init` … `0012_release_confirmations`) | `cmd/order` **and** `cmd/mcp`, at every boot, through golang-migrate | `MIGRATIONS_DATABASE_URL`, falling back to `DATABASE_URL` |
+| OLTP | `migrations/` (`0001_init` … `0014_shipment_processed_events`) | `cmd/order` **and** `cmd/mcp`, at every boot, through golang-migrate | `MIGRATIONS_DATABASE_URL`, falling back to `DATABASE_URL` |
 | Analytical | `migrations/analytics/` (`0001_report` … `0003_promise_basis_network`) | `cmd/order-projector`, at every boot | `ANALYTICS_DATABASE_URL` |
 
 - There is no separate migrate Job and no `migrate` make target. A
@@ -123,7 +127,10 @@ OLTP tables: `orders`, `order_lines`, `order_promise_groups`,
 `planned_capacity_windows`, `planned_capacity_processed_events`,
 `product_classification_copy`, `product_classification_processed_events`,
 `release_confirmations`, `release_confirmation_processed_events` (migration
-`0012`, ADR 0043; both stay empty while `RELEASE_CONFIRMATION_MODE=off`).
+`0012`, ADR 0043; both stay empty while `RELEASE_CONFIRMATION_MODE=off`),
+`shipment_processed_events` (migration `0014`, ADR 0051; stays empty while
+`OUTBOUND_SHIPPING_CONSUMER_MODE=off`). Migration `0013` adds the nullable
+column `orders.fulfillment_site_id` (ADR 0044).
 Analytical tables: `analytics_processed_events`,
 `analytics_consumed_events`, `funnel_rollup`, `repromise_rollup`.
 
@@ -157,6 +164,7 @@ first write with 8 partitions.
 | `warehouse.process-path-management.events` | catalogue cache and CPT-schedule cache (`cmd/order`) | per process: `order-management-process-path-catalogue-<host>-<pid>-<nanos>` and `order-management-cpt-schedule-<host>-<pid>-<nanos>` | `…process-path-management.processpath.ProcessPathCreated`, `…ProcessPathUpdated`, `…ProcessPathDeactivated`, `…process-path-management.cptschedule.CPTScheduleChanged` | `PATH_CATALOGUE_SOURCE=kafka` |
 | `warehouse.work-planning.events` | path-capacity cache (`cmd/order`) | per process: `order-management-path-capacity-<host>-<pid>-<nanos>` | `com.warehouse.wes.work-planning.workpool.PathCapacityChanged` | `PATH_CATALOGUE_SOURCE=kafka` |
 | `warehouse.work-planning.events` | release-confirmation consumer (`cmd/order`) | `RELEASE_CONFIRMATION_CONSUMER_GROUP` (stable, no default in the binary; the chart renders `order-management-release-confirmation` when `releaseConfirmation.mode=kafka`) | `com.warehouse.wes.work-planning.workunit.WorkUnitCreated` (reads only `reference` and `line_no`) | `RELEASE_CONFIRMATION_MODE=kafka` (**off by default**) |
+| `warehouse.outbound-shipping.events` | outbound-shipping consumer (`cmd/order`) | `OUTBOUND_SHIPPING_CONSUMER_GROUP` (stable, no default in the binary; the chart renders none) | `com.warehouse.wms.outbound-shipping.outboundload.ShipmentConfirmed`, `com.warehouse.wms.outbound-shipping.shippingpackage.PackageMissedLoad` | `OUTBOUND_SHIPPING_CONSUMER_MODE=kafka` (ADR 0051; off by default) |
 | `warehouse.order-management.analytics` | analytics consumer (`cmd/order-projector`) | `order-management-analytics` (fixed in code), starts at the earliest offset | the ten analytics types above (it ignores `OrderReleaseUnconfirmed`) | always (projector) |
 
 The three caches replay their topic from the start under a new group on
@@ -198,6 +206,7 @@ order. The relay runs inside `cmd/order`:
 | planned-capacity | `warehouse.warehouse-planning.events.dlq` | not a CloudEvent, undecodable or invalid payload (immediately); transient failures after the bounded retry | bounded, in process |
 | product-classification | none | invalid messages are logged at WARN and committed; the next `ProductClassified` for the SKU repairs the copy. Transient failures retry the same message until they succeed | unbounded |
 | release-confirmation (`RELEASE_CONFIRMATION_MODE=kafka` only) | `warehouse.work-planning.events.dlq` | not a CloudEvent, or a `WorkUnitCreated` whose `data` cannot be decoded at all (for example a `line_no` that is a string); transient failures after the bounded retry. A `WorkUnitCreated` with no `reference`/`line_no`, or for a line this service never released, is **not** dead-lettered: it is committed and counted (`ignored_no_reference`, `ignored_unknown_line`) | 3 attempts (100 ms to 2 s jittered backoff) |
+| outbound-shipping (`OUTBOUND_SHIPPING_CONSUMER_MODE=kafka` only) | `warehouse.outbound-shipping.events.dlq` | not a CloudEvent, or a payload whose `data` cannot be decoded at all (immediately); transient failures after the bounded retry. A `ShipmentConfirmed` naming an unknown or non-shippable order is not poison: it is logged at WARN and committed past | bounded, in process |
 | analytics (projector) | none | invalid messages are logged and skipped; unknown types are acknowledged | n/a |
 
 A DLQ message is the raw original value and key with three headers:
@@ -244,8 +253,8 @@ exactly once.
 Nothing sweeps `repromise_processed_events`,
 `planned_capacity_processed_events`,
 `product_classification_processed_events`,
-`release_confirmation_processed_events`, `analytics_processed_events`
-or `analytics_consumed_events`. They grow by one row per consumed event.
+`release_confirmation_processed_events`, `shipment_processed_events`,
+`analytics_processed_events` or `analytics_consumed_events`. They grow by one row per consumed event.
 
 ## Scaling
 
@@ -320,8 +329,9 @@ DLQ messages keep their original value and key. After fixing the cause,
 produce the value back onto the source topic with the same key (for
 example with `kafka-console-producer` and `--property parse.key=true`).
 The consumers' idempotency tables (`repromise_processed_events`,
-`planned_capacity_processed_events`, and for the release-confirmation
-consumer `release_confirmation_processed_events`) make a replay of an
+`planned_capacity_processed_events`, for the release-confirmation
+consumer `release_confirmation_processed_events` and for the outbound-shipping
+consumer `shipment_processed_events`) make a replay of an
 already-applied event a no-op, because the CloudEvents `id` is unchanged. The consumers
 decode only the message value (`cloudevents.Decode`), so a replay without
 the `content-type` header is still accepted.
@@ -445,9 +455,8 @@ Off is the default and changes nothing. To switch it on:
 2. Set `RELEASE_CONFIRMATION_MODE=kafka` and a stable
    `RELEASE_CONFIRMATION_CONSUMER_GROUP`. The pod also needs `DATABASE_URL`,
    `KAFKA_BROKERS` and `EVENT_PUBLISHER=kafka`; a missing one is a boot error
-   that names it. The Helm chart has no dedicated values for these settings
-   yet (no `releaseConfirmation.*`, nothing in its ConfigMap): set them through
-   `extraEnv`.
+   that names it. The Helm chart renders them from `releaseConfirmation.*`
+   (see [Configuration](/docs/operations/configuration)).
 3. Set `HOUSEKEEPING_INTERVAL` to about `5m`, so a line is flagged soon after
    its timeout instead of up to 1 h 15 m later.
 4. Expect coverage to start at enablement: lines released before the switch
@@ -459,6 +468,30 @@ Off is the default and changes nothing. To switch it on:
 
 To switch it off, set the mode back to `off` and restart. The tables stay in
 place and inert; rows still `PENDING` are no longer swept or confirmed.
+
+### Turn the outbound-shipping consumer on or off
+
+Off is the default and changes nothing: no order ever leaves `Released`.
+To switch it on:
+
+1. Set `OUTBOUND_SHIPPING_CONSUMER_MODE=kafka` and a stable
+   `OUTBOUND_SHIPPING_CONSUMER_GROUP`. The pod also needs `KAFKA_BROKERS` and
+   `DATABASE_URL`; a missing one is a boot error that names it. The Helm chart
+   has no dedicated values for these two variables and
+   `warehouse-infra`'s `helm-values/order-management.yaml` does not set them
+   (develop, `02bf9b7`): set them through `extraEnv`.
+2. Expect it to start with the oldest retained message: a new consumer group
+   has no committed offset, so kafka-go starts at the earliest offset and the
+   group re-reads the whole retained `warehouse.outbound-shipping.events`
+   topic. Each `ShipmentConfirmed` ships every named order's `Released`
+   lines, so historical loads ship orders at enablement time.
+3. Watch for WARN lines `shipment confirmation names an unknown order,
+   skipping` and `shipment confirmation names an order with no released lines,
+   skipping`: they are expected for orders this service never held or has not
+   released, and are never dead-lettered.
+
+To switch it off, set the mode back to `off` and restart. `Shipped` lines stay
+`Shipped`; `shipment_processed_events` stays in place and inert.
 
 ### Rebuild the analytics read model
 
@@ -488,13 +521,15 @@ enabled `-projector` and `-reports`.
 ### Change a consumer group
 
 `PLANNED_CAPACITY_CONSUMER_GROUP`,
-`PRODUCT_CLASSIFICATION_CONSUMER_GROUP` and
-`RELEASE_CONFIRMATION_CONSUMER_GROUP` must stay fixed. A new value has
+`PRODUCT_CLASSIFICATION_CONSUMER_GROUP`,
+`RELEASE_CONFIRMATION_CONSUMER_GROUP` and `OUTBOUND_SHIPPING_CONSUMER_GROUP`
+must stay fixed. A new value has
 no committed offset, and kafka-go then starts at the **earliest** offset
 (its `StartOffset` default, which these readers do not override), so the
 new group re-reads the whole retained topic. That is safe, because each
 event id is claimed once in `planned_capacity_processed_events`,
-`product_classification_processed_events` or
-`release_confirmation_processed_events`, but it takes time and load.
+`product_classification_processed_events`,
+`release_confirmation_processed_events` or `shipment_processed_events`, but it
+takes time and load.
 Never share a group with another environment: the replicas would split
 partitions with it.

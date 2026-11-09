@@ -7,9 +7,9 @@ description: Every event order-management publishes and consumes — full CloudE
 
 # Domain Events
 
-This context declares **twelve** past-tense domain events in
-`internal/domain/shared/events.go` and consumes **twelve** CloudEvents types
-from five sibling contexts. Every Kafka message, in and out, is a
+This context declares **fifteen** past-tense domain events in
+`internal/domain/shared/events.go` and consumes **fourteen** CloudEvents types
+from six sibling contexts. Every Kafka message, in and out, is a
 CloudEvents 1.0 event in **structured** content mode
 ([ADR 0030](/docs/adr/0030-cloudevents-mandatory-event-envelope)), built and
 parsed only by `internal/adapters/kafka/cloudevents`:
@@ -63,6 +63,9 @@ integration-only).
 | OrderLineReleased | `com.warehouse.wes.order-management.order.OrderLineReleased` | analytics | allocation pass, once per line released in that pass | order-projector |
 | OrderReleased | `com.warehouse.wes.order-management.order.OrderReleased` | analytics | allocation pass, when that pass leaves every line `Released` | order-projector |
 | OrderReleaseUnconfirmed | `com.warehouse.wes.order-management.order.OrderReleaseUnconfirmed` | analytics | `FlagUnconfirmedReleases`, the release-confirmation timeout inside the housekeeping sweep, once per line, only while `RELEASE_CONFIRMATION_MODE=kafka` ([ADR 0043](/docs/adr/0043-release-confirmation-from-workunitcreated)) | none: the order-projector ignores the type |
+| OrderLineShipped | `com.warehouse.wes.order-management.order.OrderLineShipped` | none: raised through the events port, then skipped by both publishers (outside their contracts) | `ConfirmShipment`, once per line moved `Released` -> `Shipped` ([ADR 0051](/docs/adr/0051-consume-shipment-confirmed-and-package-missedload)), only while `OUTBOUND_SHIPPING_CONSUMER_MODE=kafka` | none |
+| OrderShipped | `com.warehouse.wes.order-management.order.OrderShipped` | none (as above) | `ConfirmShipment`, when the order ends `Shipped`; carries the `load_id` | none |
+| OrderPartiallyShipped | `com.warehouse.wes.order-management.order.OrderPartiallyShipped` | none (as above) | `ConfirmShipment`, when some lines shipped and the order is not `Shipped`; carries the `load_id` | none |
 | SiteSkuDemandChanged | `com.warehouse.wes.order-management.siteskudemand.SiteSkuDemandChanged` | integration | allocation pass (intake/retry), RepromiseOrder's moved group, CancelOrder — for an order carrying a caller-assigned site ([ADR 0044](/docs/adr/0044-caller-assigned-fulfillment-site-on-the-order)) or while `DEMAND_PROJECTION_SITE_ID` is set ([ADR 0035](/docs/adr/0035-site-sku-demand-projection-event)) | site-level planning consumers (none in this fleet yet) |
 
 Topics: integration = `warehouse.order-management.events`, analytics =
@@ -78,6 +81,13 @@ feed the funnel's `linesReleased`/`ordersReleased`. Nothing is raised when
 the release leg releases nothing (BR3-blocked ship-complete order, held
 order, a reservation lost at reconfirm), and a line is announced only in the
 pass that releases it.
+
+`OrderLineShipped`, `OrderShipped` and `OrderPartiallyShipped` are local
+domain facts: ADR 0051 adds them to the events port but changes neither the
+integration contract nor the analytics contract, so both publishers skip them
+and the funnel still ends at `Released`. The aggregate gains the matching line
+status `Shipped` and the derived order statuses `Shipped` and
+`PartiallyShipped`, reachable only through the outbound-shipping consumer.
 
 `OrderReleaseUnconfirmed` is the one event not raised by an allocation pass.
 It is an analytics-only **fact** that a released line was never confirmed by
@@ -180,6 +190,8 @@ from the first offset), which de-duplicates on the CloudEvents `id`; see
 | process-path-management | `com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged` | same | `site_id`, `timezone`, `cutoffs[]` (`cpt_id`, `local_time`, `days_of_week`, `ship_method`, `eligible_path_ids`) | `outbound/kafkacptschedule`, per-process group `order-management-cpt-schedule-*` | replace site CPT schedule |
 | wes-work-planning | `com.warehouse.wes.work-planning.workpool.PathCapacityChanged` | `warehouse.work-planning.events` | `path_id`, `cutoff_at`, `remaining_units`, `known` | `outbound/kafkapathcapacity`, per-process group `order-management-path-capacity-*` | remaining capacity keyed by path and cutoff |
 | wes-work-planning | `com.warehouse.wes.work-planning.workunit.WorkUnitCreated` | `warehouse.work-planning.events` | the optional `reference` (the order id) and `line_no`; `path_id` and `work_unit_id` are not read | `inbound/kafka.ReleaseConfirmationConsumer`, stable group from `RELEASE_CONFIRMATION_CONSUMER_GROUP` (only with `RELEASE_CONFIRMATION_MODE=kafka`; off by default) | ConfirmRelease: the matching `PENDING` or `UNCONFIRMED` `release_confirmations` row becomes `CONFIRMED` (ADR 0043) |
+| outbound-shipping | `com.warehouse.wms.outbound-shipping.outboundload.ShipmentConfirmed` | `warehouse.outbound-shipping.events` | `load_id` and `orders[].order_id` (the distinct source order ids); `site_id`, `cpt_id`, `carrier`, `trailer_id`, `seal_number`, `departed_at` and `version` are not read | `inbound/kafka.OutboundShippingConsumer`, stable group from `OUTBOUND_SHIPPING_CONSUMER_GROUP` (no default) | ConfirmShipment: ship every named order's `Released` lines in one unit of work |
+| outbound-shipping | `com.warehouse.wms.outbound-shipping.shippingpackage.PackageMissedLoad` | same | `source_order_id` (a bare order id) and `cutoff` (logged, not used as the new promise); `package_id`, `load_id`, `site_id`, `detected_at` and `version` are not read | same | RepromiseOrder.ExecuteForMissedLoad: re-promise every group of that order |
 | warehouse-planning | `com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanCreated` | `warehouse.warehouse-planning.events` | `plan_id`, `warehouse_id`, `location`, `path_id`, `window_start`, `window_end`, `assigned_demand`, `capacity_over_window`, `shortage`, `bottleneck_step` | `inbound/kafka.PlannedCapacityConsumer`, group from `PLANNED_CAPACITY_CONSUMER_GROUP` | upsert window as `DRAFT` |
 | warehouse-planning | `com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanPublished` | same | same | same | upsert window as `PUBLISHED` |
 | warehouse-planning | `com.warehouse.wes.warehouse-planning.capacityplan.CapacityShortageDetected` | same | same | same | upsert window as `PUBLISHED` |
@@ -213,6 +225,20 @@ Delivery guarantees by consumer:
   `PATH_CATALOGUE_SOURCE=kafka`, each under a fresh per-process group that
   replays from the first offset; `cmd/order` waits up to 60s for each to
   catch up before serving. Undecodable messages are logged and skipped.
+- **OutboundShippingConsumer** (ADR 0051; runs only with
+  `OUTBOUND_SHIPPING_CONSUMER_MODE=kafka`, off by default) — stable shared
+  group from `OUTBOUND_SHIPPING_CONSUMER_GROUP` (no default). `ShipmentConfirmed`
+  is idempotent on the raw CloudEvents `id` in `shipment_processed_events`,
+  claimed once for every order the event names, in the same transaction as the
+  state changes; a re-delivery under a new id for an already shipped order is a
+  `no_change` outcome. `PackageMissedLoad` goes through the existing
+  `repromise_processed_events` gate. It dispatches on the two full types only;
+  every other type on the topic is committed past. A `ShipmentConfirmed` naming
+  an unknown order or an order with no `Released` line is logged at WARN and
+  skipped (the other orders in the event still ship), never dead-lettered. A
+  non-CloudEvents message or an undecodable `data` goes to
+  `warehouse.outbound-shipping.events.dlq`; a transient failure retries in
+  process and is then dead-lettered. Shutdown never dead-letters a message.
 - **ReleaseConfirmationConsumer** (ADR 0043; runs only with
   `RELEASE_CONFIRMATION_MODE=kafka`, off by default) — stable shared group
   from `RELEASE_CONFIRMATION_CONSUMER_GROUP` (no default), idempotent on the
@@ -252,6 +278,7 @@ flowchart LR
   RP["RepromiseOrder"] --> E9["OrderRepromised"]
   RP --> E13["SiteSkuDemandChanged (ACTIVE, fresh cutoff)"]
   FU["FlagUnconfirmedReleases<br/>(housekeeping sweep, ADR 0043)"] --> E14["OrderReleaseUnconfirmed"]
+  CS["ConfirmShipment<br/>(ADR 0051)"] --> E15["OrderLineShipped, OrderShipped, OrderPartiallyShipped<br/>(local, not published)"]
 
   E1 & E2 & E3 & E4 & E5 & E6 & E7 & E8 & E9 & E10 & E14 --> AN["warehouse.order-management.analytics"]
   E4 & E5 & E9 --> INT["warehouse.order-management.events"]
@@ -261,7 +288,7 @@ flowchart LR
 
   classDef ev fill:#f6a04d,stroke:#9a5b1c,color:#1f1300;
   classDef topic fill:#38bdf8,stroke:#0369a1,color:#0f172a;
-  class E1,E2,E3,E4,E5,E6,E7,E8,E9,E10,E11,E12,E13,E14 ev;
+  class E1,E2,E3,E4,E5,E6,E7,E8,E9,E10,E11,E12,E13,E14,E15 ev;
   class AN,INT topic;
 ```
 
@@ -272,7 +299,9 @@ Source: `internal/application/usecases/*.go`,
 conditional on `DEMAND_PROJECTION_SITE_ID`
 ([ADR 0035](/docs/adr/0035-site-sku-demand-projection-event)), and
 `OrderReleaseUnconfirmed` on `RELEASE_CONFIRMATION_MODE=kafka`
-([ADR 0043](/docs/adr/0043-release-confirmation-from-workunitcreated)).
+([ADR 0043](/docs/adr/0043-release-confirmation-from-workunitcreated)), and
+the three shipped facts on `OUTBOUND_SHIPPING_CONSUMER_MODE=kafka`
+([ADR 0051](/docs/adr/0051-consume-shipment-confirmed-and-package-missedload)).
 
 ## Naming and payload shape
 

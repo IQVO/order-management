@@ -244,6 +244,8 @@ Release no longer calls any Supplier synchronously — see
 | `RELEASE_CONFIRMATION_CONSUMER_GROUP` | *(unset)* | Stable consumer group of that consumer on `warehouse.work-planning.events`; **required** when the mode is `kafka`, no default on purpose (ADR 0043). |
 | `RELEASE_CONFIRMATION_TIMEOUT` | `15m` | A `PENDING` line older than this becomes `UNCONFIRMED` in the housekeeping sweep and raises the analytics-only `OrderReleaseUnconfirmed`; `0` disables the sweep (ADR 0043). |
 | `RELEASE_CONFIRMATION_RETENTION` | `168h` | Age (by `confirmed_at`) after which `CONFIRMED` rows are swept; `0` keeps them. `PENDING` and `UNCONFIRMED` rows are never swept (ADR 0043). |
+| `OUTBOUND_SHIPPING_CONSUMER_MODE` | `off` | `off` or `kafka` (anything else fails boot). `kafka` runs a consumer of outbound-shipping's `ShipmentConfirmed` (the named orders' `Released` lines become `Shipped`) and `PackageMissedLoad` (an order-wide re-promise) on `warehouse.outbound-shipping.events` (ADR 0051). Available, off by default: `off` changes nothing. Needs `KAFKA_BROKERS`, `DATABASE_URL` and the consumer group below, or boot fails naming the missing one. |
+| `OUTBOUND_SHIPPING_CONSUMER_GROUP` | *(unset)* | Stable consumer group of that consumer; **required** when the mode is `kafka`, no default on purpose (ADR 0051). |
 | `PLANNED_CAPACITY_CONSUMER_GROUP` | *(unset)* | Stable consumer group for warehouse-planning's capacity plans; unset ⇒ the feature is off and `GET /planned-capacity` is not registered (ADR 0031). |
 | `PLANNED_CAPACITY_SITE_ID` | `DEFAULT_SITE_ID` | Site whose planned-capacity windows annotate an order without a `fulfillmentSiteId` (ADR 0031); an order that carries one is matched on its own site (ADR 0047). |
 | `DEMAND_PROJECTION_SITE_ID` | *(unset)* | Static demand-site scope for the additive, PII-free `SiteSkuDemandChanged` integration event (keyed `<order_id>/line/<line_no>`, assignment_version `static-site-v1`); unset ⇒ the projection is off for orders without a caller-assigned `fulfillmentSiteId` (ADR 0035); an order that carries one projects to its own site, `order-site-v1` (ADR 0044). |
@@ -322,6 +324,9 @@ subscriber) consumes independently:
   `PATH_CATALOGUE_SOURCE=kafka`; the same `warehouse.work-planning.events`
   topic (`WorkUnitCreated`) feeds the release-confirmation consumer when
   `RELEASE_CONFIRMATION_MODE=kafka` (ADR 0043);
+  `warehouse.outbound-shipping.events` (`ShipmentConfirmed`,
+  `PackageMissedLoad`) feeds the outbound-shipping consumer when
+  `OUTBOUND_SHIPPING_CONSUMER_MODE=kafka` (ADR 0051, off by default);
   `warehouse.fulfillment.events`
   (`TaskCPTMissed`, `PackageManifested`) drives the re-promise consumer
   (group `order-management-repromise`) whenever `KAFKA_BROKERS` is set;
@@ -844,6 +849,10 @@ GitHub Pages on every push to `main` that touches `docs/**`, publishing to
 43. [0043 — Confirm an order-line release from WorkUnitCreated, and flag OrderReleaseUnconfirmed](docs/docs/adr/0043-release-confirmation-from-workunitcreated.md) (amends 0005's no-confirmation-loop decision)
 46. [0046 — A2A inbound adapter (read-only third driving adapter)](docs/docs/adr/0046-a2a-inbound-adapter.md)
 47. [0047 — An order is promised against its own fulfillment site](docs/docs/adr/0047-promise-at-the-orders-own-fulfillment-site.md) (amends 0044, 0014 step A and 0031 §5)
+48. [0048 — Adopt the fleet REST API guideline](docs/docs/adr/0048-adopt-fleet-rest-api-guideline.md) (amends 0023 and 0038)
+49. [0049 — Agent authority levels and the complete MCP surface](docs/docs/adr/0049-agent-authority-levels-and-complete-mcp-surface.md) (extends 0010 and 0046)
+50. [0050 — OrderAllocated/OrderPartiallyAllocated carry the order's fulfillment site](docs/docs/adr/0050-allocation-events-carry-the-orders-fulfillment-site.md)
+51. [0051 — Consume ShipmentConfirmed/PackageMissedLoad: the Order ships](docs/docs/adr/0051-consume-shipment-confirmed-and-package-missedload.md)
 
 ## License
 
