@@ -62,6 +62,8 @@ Sources live in `cmd/order/` unless stated otherwise.
 | `RELEASE_CONFIRMATION_CONSUMER_GROUP` | unset, no default on purpose | yes, when mode is `kafka` (**boot error** otherwise) | Stable consumer group of the release-confirmation consumer. A locally run process must not join a live group, so the binary names none. `kafka` mode also needs `KAFKA_BROKERS`, `DATABASE_URL` and `EVENT_PUBLISHER=kafka` (without it nothing reaches wes-work-planning, so no confirmation could arrive); each missing one is a boot error that names it. | `release_confirmation.go` |
 | `RELEASE_CONFIRMATION_TIMEOUT` | `15m` | no | A `PENDING` line released longer ago than this becomes `UNCONFIRMED` in the housekeeping sweep and raises the analytics-only `OrderReleaseUnconfirmed`. `0` disables the sweep (confirmations still work). An unparsable or negative value logs `ignoring invalid duration env var` and uses `15m`. An operational parameter, not a business rule. | `release_confirmation.go` |
 | `RELEASE_CONFIRMATION_RETENTION` | `168h` | no | Age after which `CONFIRMED` `release_confirmations` rows are deleted, by `confirmed_at`. `0` keeps them. `PENDING` and `UNCONFIRMED` rows are never deleted. | `housekeeping.go` |
+| `OUTBOUND_SHIPPING_CONSUMER_MODE` | `off` | no | `off` or `kafka` (case-insensitive; anything else is a **boot error**). `kafka` runs a consumer of outbound-shipping's `ShipmentConfirmed` and `PackageMissedLoad` on `warehouse.outbound-shipping.events`: the named orders' `Released` lines become `Shipped`, and a missed load re-promises the order (ADR 0051). **Available, off by default:** `off` consumes nothing, so no order ever leaves `Released`. | `outbound_shipping.go` |
+| `OUTBOUND_SHIPPING_CONSUMER_GROUP` | unset, no default on purpose | yes, when mode is `kafka` (**boot error** otherwise) | Stable consumer group of the outbound-shipping consumer. A locally run process must not join a live group, so the binary names none. `kafka` mode also needs `KAFKA_BROKERS` and `DATABASE_URL` (the `shipment_processed_events` gate lives in Postgres); each missing one is a boot error that names it. The re-promise half reuses the re-promise wiring and its `repromise_processed_events` gate. | `outbound_shipping.go` |
 | `DEMAND_PROJECTION_SITE_ID` | unset | no | Turns on the `SiteSkuDemandChanged` projection (ADR 0035): every allocated, re-allocated, re-promised or cancelled line emits one event for this static site, with `assignment_version` `static-site-v1`. Unset means the event is never emitted for orders that carry no fulfillment site; an order whose caller assigned a `fulfillmentSiteId` projects to that site with `assignment_version` `order-site-v1` regardless (ADR 0044). | `config.go` |
 
 ### Downstream dependencies and promise policy
@@ -171,6 +173,11 @@ rolls the api pods through the `checksum/config` annotation.
 - The chart never renders `ANALYTICS_DATABASE_URL` for the MCP container.
   Unless it is added through `mcp.extraEnv`, `get_promise_health` in a chart
   deployment always reports zeros.
+- The outbound-shipping consumer (ADR 0051) has no chart value: `charts/order-management` renders neither `OUTBOUND_SHIPPING_CONSUMER_MODE` nor
+  `OUTBOUND_SHIPPING_CONSUMER_GROUP`, and `warehouse-infra`'s
+  `helm-values/order-management.yaml` (develop, 02bf9b7) does not set them in `extraEnv`. Through the
+  chart the consumer stays off, so orders stay `Released`; setting both variables through `extraEnv`
+  is the only way to turn it on today.
 - The release-confirmation loop (ADR 0043) is off in the chart unless
   `releaseConfirmation.mode` is `kafka`; with the mode empty nothing is
   rendered. With `kafka` the ConfigMap carries `RELEASE_CONFIRMATION_MODE`,

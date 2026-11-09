@@ -64,16 +64,17 @@ stateDiagram-v2
     Allocated --> Allocated: ReconfirmReservation
     Allocated --> Backordered: LoseReservation
     Allocated --> Released: Release
+    Released --> Shipped: Ship (ADR 0051)
     Pending --> Cancelled: Cancel
     Backordered --> Cancelled: Cancel
     Allocated --> Cancelled: Cancel
-    Released --> [*]
+    Shipped --> [*]
     Cancelled --> [*]
 ```
 
 Source: `internal/domain/order/order.go` (`Allocate`, `RetryAllocate`,
 `ReconfirmReservation`, `LoseReservation`, `MarkBackordered`, `Release`,
-`Cancel`), `internal/domain/order/status.go`, `internal/domain/order/order_line.go`.
+`Cancel`, and `Ship`/`ShipAll` in `ship.go`), `internal/domain/order/status.go`, `internal/domain/order/order_line.go`.
 Omits: the error returned by each illegal transition (listed under
 invariants below). `Cancel` moves **every** line at once and is refused if
 any line is `Released`.
@@ -98,7 +99,10 @@ stateDiagram-v2
     Allocated --> Cancelled: CancelOrder
     PartiallyAllocated --> Cancelled: CancelOrder
     Backordered --> Cancelled: CancelOrder
-    Released --> [*]
+    Released --> Shipped: every line Shipped (ADR 0051)
+    PartiallyReleased --> PartiallyShipped: released lines Shipped (ADR 0051)
+    PartiallyShipped --> Shipped: remaining lines Released, then Shipped
+    Shipped --> [*]
     Cancelled --> [*]
 ```
 
@@ -119,6 +123,7 @@ status — it reads `Allocated` until `ReleaseHeldOrder` runs (ADR 0020).
 | Only a `Pending` line is allocated by the first pass — a `Backordered` line comes back only through retry | `Order.Allocate` | `order.ErrLineNotPending` |
 | Only a `Backordered` line can be retried | `Order.RetryAllocate` | `order.ErrLineNotBackordered` |
 | Only an `Allocated` line can be released, reconfirmed or lose its reservation | `Order.Release`, `Order.ReconfirmReservation`, `Order.LoseReservation` | `order.ErrLineNotAllocated` |
+| Only a `Released` line can ship; a `Shipped` line is terminal, and an order with no `Released` or `Shipped` line is not shippable (ADR 0051) | `Order.Ship`, `Order.ShipAll` | `order.ErrLineNotReleased`, `order.ErrOrderNotShippable` |
 | **BR3** — a ship-complete order releases nothing while any line is unallocated | `Order.EnsureReleasable` | `order.ErrShipCompleteBlocked` |
 | **BR6** — no cancellation once any line is `Released` | `Order.EnsureCancellable`, `Order.Cancel` | `order.ErrOrderAlreadyReleased` |
 | A held order must be ship-complete (ADR 0020) | `order.ValidateIntakeIntent` | `order.ErrHeldOrderMustBeShipComplete` |
@@ -212,6 +217,7 @@ ship-complete flow (`OrderReceived`, one `OrderLineAllocated` per line —
 the reconfirm step writes no event — and one `OrderAllocated`), plus one
 `OrderLineBackordered` per 409, one `OrderRepromised` per moved promise and
 one `OrderCancelled` if withdrawn. Lifetime runs from intake to `Released`
+(`Shipped` once the opt-in outbound-shipping consumer, ADR 0051, confirms the load)
 or `Cancelled` — minutes to hours for a released order; a held order lives
 until its caller releases or cancels it (no sweeper, see above).
 

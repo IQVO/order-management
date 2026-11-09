@@ -26,6 +26,7 @@ flowchart TB
     subgraph WMS["WMS tier"]
         INV["<b>inventory-storage</b><br/>Core subdomain"]
         PM["<b>product-master</b><br/>Supporting subdomain"]
+        OS["<b>outbound-shipping</b>"]
     end
     subgraph WES["WES tier"]
         PPM["<b>process-path-management</b><br/>Generic subdomain"]
@@ -46,6 +47,7 @@ flowchart TB
     WP -->|"warehouse.work-planning.events<br/>PathCapacityChanged"| OM
     WP -.->|"warehouse.work-planning.events (opt-in)<br/>WorkUnitCreated"| OM
     FE -->|"warehouse.fulfillment.events<br/>TaskCPTMissed · PackageManifested"| OM
+    OS -.->|"warehouse.outbound-shipping.events (opt-in)<br/>ShipmentConfirmed · PackageMissedLoad"| OM
     WPL -.->|"warehouse.warehouse-planning.events (opt-in)<br/>CapacityPlan* · CapacityShortageDetected"| OM
     BFF -.->|"HTTP GET /orders/{id}"| OM
     MFE -.->|"HTTP (own REST API)"| OM
@@ -114,6 +116,7 @@ parameters.
 | process-path-management | order-management | Published Language | Anti-Corruption Layer (local read model) | Kafka `warehouse.process-path-management.events` | live with `PATH_CATALOGUE_SOURCE=kafka` | `outbound/kafkacatalog`, `outbound/kafkacptschedule` |
 | wes-work-planning | order-management | Published Language | Anti-Corruption Layer (local read model) | Kafka `warehouse.work-planning.events` | live with `PATH_CATALOGUE_SOURCE=kafka` | `outbound/kafkapathcapacity` |
 | wes-work-planning | order-management | Published Language | Anti-Corruption Layer (confirmation of a release; reads only `reference` and `line_no`) | Kafka `warehouse.work-planning.events`, `WorkUnitCreated` | opt-in, off by default: `RELEASE_CONFIRMATION_MODE=kafka` + `RELEASE_CONFIRMATION_CONSUMER_GROUP` | `inbound/kafka/release_confirmation_consumer.go` (ADR 0043) |
+| outbound-shipping | order-management | Published Language | Anti-Corruption Layer (ship confirmation and missed-load re-promise; reads only `load_id`, `orders[].order_id`, `source_order_id` and `cutoff`) | Kafka `warehouse.outbound-shipping.events`, `ShipmentConfirmed` and `PackageMissedLoad` | opt-in, off by default: `OUTBOUND_SHIPPING_CONSUMER_MODE=kafka` + `OUTBOUND_SHIPPING_CONSUMER_GROUP`; not enabled by the chart or by `warehouse-infra` | `inbound/kafka/outbound_shipping_consumer.go` (ADR 0051) |
 | fulfillment-execution | order-management | Published Language | Anti-Corruption Layer | Kafka `warehouse.fulfillment.events` | live whenever `KAFKA_BROKERS` is set | `inbound/kafka/repromise_consumer.go` |
 | warehouse-planning | order-management | Published Language | Anti-Corruption Layer (local read model) | Kafka `warehouse.warehouse-planning.events` | opt-in, `PLANNED_CAPACITY_CONSUMER_GROUP` | `inbound/kafka/planned_capacity_consumer.go` |
 | order-management | network-fulfillment | Open Host Service (`apis/openapi.yaml`) | Customer/Supplier; network-fulfillment is the ACL to the external network | REST `POST /orders`, `POST /orders/{id}/releases`, `DELETE /orders/{id}` | live | ADR 0020 |
@@ -208,7 +211,7 @@ line, and flags one that is never confirmed with the analytics-only
 `OrderReleaseUnconfirmed`. It is not a reply event and not a call, and
 nothing is cancelled, re-released or retried on a timeout.
 
-### ← `process-path-management`, `wes-work-planning`, `fulfillment-execution` (Kafka, inbound)
+### ← `process-path-management`, `wes-work-planning`, `fulfillment-execution`, `outbound-shipping` (Kafka, inbound)
 
 | Topic | Event types consumed | Adapter | Purpose |
 | --- | --- | --- | --- |
@@ -216,6 +219,7 @@ nothing is cancelled, re-released or retried on a timeout.
 | `warehouse.process-path-management.events` | `CPTScheduleChanged` | `outbound/kafkacptschedule` | Site CPT schedule for the promise ([ADR 0014](/docs/adr/0014-promise-derived-from-fulfillment-capability)) |
 | `warehouse.work-planning.events` | `PathCapacityChanged` | `outbound/kafkapathcapacity` | Remaining path capacity per cutoff ([ADR 0015](/docs/adr/0015-wes-work-planning-path-capacity-changed-wired)) |
 | `warehouse.work-planning.events` | `WorkUnitCreated` (`reference`, `line_no`) | `inbound/kafka` (`ReleaseConfirmationConsumer`) | Confirms a released order line; opt-in, off by default ([ADR 0043](/docs/adr/0043-release-confirmation-from-workunitcreated)) |
+| `warehouse.outbound-shipping.events` | `ShipmentConfirmed` (`load_id`, `orders[].order_id`), `PackageMissedLoad` (`source_order_id`, `cutoff`) | `inbound/kafka` (`OutboundShippingConsumer`) | Ships the named orders' `Released` lines; re-promises an order whose package missed its load; opt-in, off by default ([ADR 0051](/docs/adr/0051-consume-shipment-confirmed-and-package-missedload)) |
 | `warehouse.fulfillment.events` | `TaskCPTMissed`, `PackageManifested` | `inbound/kafka` (`RepromiseConsumer`) | Re-promise loop, raises `OrderRepromised` ([ADR 0018](/docs/adr/0018-repromise-order-consumer-and-order-repromised)) |
 
 The first three are local caches rebuilt by full replay under a
@@ -226,7 +230,10 @@ stable shared group (`order-management-repromise`) and runs whenever
 `KAFKA_BROKERS` is set. The release-confirmation consumer uses its own
 stable group (`RELEASE_CONFIRMATION_CONSUMER_GROUP`, no default) and runs
 only with `RELEASE_CONFIRMATION_MODE=kafka`; poison goes to
-`warehouse.work-planning.events.dlq`.
+`warehouse.work-planning.events.dlq`. The outbound-shipping consumer uses its
+own stable group (`OUTBOUND_SHIPPING_CONSUMER_GROUP`, no default) and runs only
+with `OUTBOUND_SHIPPING_CONSUMER_MODE=kafka`; poison goes to
+`warehouse.outbound-shipping.events.dlq`.
 
 ### ← `network-fulfillment` (inbound HTTP, ADR 0020)
 
