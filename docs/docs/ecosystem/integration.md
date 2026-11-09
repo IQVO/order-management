@@ -14,7 +14,9 @@ behaviour coded on this side. For the DDD reading of the same edges
 [Context Map](./context-map.md).
 
 Consumers in sibling repositories were checked with `git grep` on each
-sibling's `origin/develop` in the local checkouts on 2026-10-12.
+sibling's `origin/develop` in the local checkouts on 2026-10-12. The
+outbound-shipping edge was read on 2026-11-09 (`outbound-shipping` at
+`51a250c`, `warehouse-infra` at `02bf9b7`).
 
 ```mermaid
 flowchart LR
@@ -30,6 +32,7 @@ flowchart LR
   PM["product-master"]
   NIP["network-inventory-planning"]
   SO["slotting-optimization"]
+  OS["outbound-shipping"]
 
   NF -- "REST POST /orders, /release, DELETE" --> OM
   OPS -- "REST GET /orders/{id}, /reports/funnel; MCP" --> OM
@@ -38,6 +41,7 @@ flowchart LR
   PPM -- "Kafka ProcessPath*, CPTScheduleChanged" --> OM
   WP -- "Kafka PathCapacityChanged, WorkUnitCreated (ADR 0043, off by default)" --> OM
   FE -- "Kafka TaskCPTMissed, PackageManifested" --> OM
+  OS -- "Kafka ShipmentConfirmed, PackageMissedLoad (ADR 0051, off by default)" --> OM
   WPL -- "Kafka CapacityPlan*" --> OM
   PM -- "Kafka ProductClassified" --> OM
   OM -- "Kafka OrderAllocated, OrderPartiallyAllocated" --> WP
@@ -62,6 +66,7 @@ REST API is behind Kong at `/api/order-management` (prefix stripped).
 | process-path-management | Kafka, `warehouse.process-path-management.events`, per-process replay groups | `com.warehouse.wes.process-path-management.processpath.ProcessPathCreated`, `…ProcessPathUpdated`, `…ProcessPathDeactivated`; `com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged` | Only with `PATH_CATALOGUE_SOURCE=kafka`. Boot waits up to 60 s per cache and fails if the replay does not finish. Without the caches: no path validation and lead-time promises only. Reads `path_id`, `match_prefix`, `cycle_time_p95`, `eligibility`, `destination_location_role` and `intake` (process-path-management ADR 0034; absent = empty): path selection considers only paths whose intake contains `CUSTOMER_ORDER` and falls back to `pick` when none does ([ADR 0042](../adr/0042-path-selection-honours-process-path-intake.md)). |
 | wes-work-planning | Kafka, `warehouse.work-planning.events`, per-process replay group | `com.warehouse.wes.work-planning.workpool.PathCapacityChanged` | Same switch and boot wait as above. Without it, path capacity is `Unknown`. |
 | wes-work-planning (release confirmation) | Kafka, `warehouse.work-planning.events`, group `RELEASE_CONFIRMATION_CONSUMER_GROUP` (stable, no default) | `com.warehouse.wes.work-planning.workunit.WorkUnitCreated`; reads only the optional `data.reference` (the order id) and `data.line_no` | Available, **off by default**: runs only with `RELEASE_CONFIRMATION_MODE=kafka` (ADR 0043). Confirms the released line `{reference}`/`{line_no}` once per CloudEvents id. An event without both fields, or for a line this service never released (transfer, RELOCATE, legacy work), is ignored and counted, not dead-lettered. An undecodable `data`, a non-CloudEvents message or a handling that still fails after 3 attempts goes to `warehouse.work-planning.events.dlq`. Needs wes-work-planning to stamp the two fields (its ADR 0041); until it does, every line is flagged after the timeout, so do not enable the mode before that is deployed. |
+| outbound-shipping | Kafka, `warehouse.outbound-shipping.events`, group `OUTBOUND_SHIPPING_CONSUMER_GROUP` (stable, no default) | `com.warehouse.wms.outbound-shipping.outboundload.ShipmentConfirmed` (reads `load_id` and `orders[].order_id`) and `com.warehouse.wms.outbound-shipping.shippingpackage.PackageMissedLoad` (reads `source_order_id` and `cutoff`); every other type on the topic is committed past | Available, **off by default**: runs only with `OUTBOUND_SHIPPING_CONSUMER_MODE=kafka` (ADR 0051). `ShipmentConfirmed` ships every named order's `Released` lines in one unit of work (the order becomes `Shipped` or `PartiallyShipped`), claiming the CloudEvents id once in `shipment_processed_events`; an unknown order or one with no `Released` line is logged at WARN and skipped, never dead-lettered. `PackageMissedLoad` re-promises the named order, every promise group, through the ADR 0018 machinery (`OrderRepromised`, reason `PackageMissedLoad`, `repromise_processed_events`). A non-CloudEvents message or an undecodable payload goes to `warehouse.outbound-shipping.events.dlq`; a transient failure retries in process, then dead-letters. |
 | warehouse-planning | Kafka, `warehouse.warehouse-planning.events`, group `PLANNED_CAPACITY_CONSUMER_GROUP` | `com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanCreated`, `…CapacityPlanPublished`, `…CapacityShortageDetected`, `…BottleneckDetected` | Opt-in (ADR 0031). Annotates orders only; never moves a promise or rejects an order. Bad messages go to `warehouse.warehouse-planning.events.dlq`. A failing read model omits the annotation and the order read still succeeds. |
 | product-master | Kafka, `warehouse.product-master.events`, group `PRODUCT_CLASSIFICATION_CONSUMER_GROUP` | `com.warehouse.wms.product-master.product.ProductClassified` | Opt-in (ADR 0036). Unknown SKUs fail open (no attributes). Invalid messages are logged and skipped; transient errors retry the same message. |
 
@@ -93,8 +98,15 @@ on [Domain Events](../ddd/domain-events.md).
   call or a dedicated reply event.
 - No call to product-master or process-path-management: their facts
   arrive only as events into local copies.
-- No call to fulfillment-execution: re-promise is triggered only by its
-  events.
+- No call to fulfillment-execution or outbound-shipping: re-promise is
+  triggered only by their events, and a shipment is known only from
+  `ShipmentConfirmed` (nothing calls an endpoint to mark an order shipped; no
+  REST or MCP route does it).
+- Nothing enables the outbound-shipping consumer in the shared deployment:
+  `warehouse-infra` (develop, `02bf9b7`) has no reference to outbound-shipping,
+  and neither the chart nor `helm-values/order-management.yaml` sets
+  `OUTBOUND_SHIPPING_CONSUMER_MODE`. Until a deployment sets it, orders stop at
+  `Released`.
 - No shared database and no imported Go module from any sibling
   (ADR 0002).
 - No consumer of `OrderRepromised` in the fleet yet.
