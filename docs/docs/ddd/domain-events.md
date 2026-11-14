@@ -59,7 +59,7 @@ integration-only).
 | OrderPartiallyAllocated | `com.warehouse.wes.order-management.order.OrderPartiallyAllocated` | integration + analytics | allocation pass when the order ends `PartiallyAllocated` or `PartiallyReleased` | wes-work-planning, order-projector |
 | OrderAllocationPartiallyFailed | `com.warehouse.wes.order-management.order.OrderAllocationPartiallyFailed` | analytics | allocation pass, hard failure after some lines allocated | order-projector |
 | OrderCancelled | `com.warehouse.wes.order-management.order.OrderCancelled` | analytics | CancelOrder | order-projector |
-| OrderRepromised | `com.warehouse.wes.order-management.order.OrderRepromised` | integration + analytics | RepromiseOrder | order-projector; no integration consumer known from this repo |
+| OrderRepromised | `com.warehouse.wes.order-management.order.OrderRepromised` | integration + analytics | RepromiseOrder | order-projector, exception-management (auto-resolve correlation) |
 | OrderLineReleased | `com.warehouse.wes.order-management.order.OrderLineReleased` | analytics | allocation pass, once per line released in that pass | order-projector |
 | OrderReleased | `com.warehouse.wes.order-management.order.OrderReleased` | analytics | allocation pass, when that pass leaves every line `Released` | order-projector |
 | OrderReleaseUnconfirmed | `com.warehouse.wes.order-management.order.OrderReleaseUnconfirmed` | analytics | `FlagUnconfirmedReleases`, the release-confirmation timeout inside the housekeeping sweep, once per line, only while `RELEASE_CONFIRMATION_MODE=kafka` ([ADR 0043](/docs/adr/0043-release-confirmation-from-workunitcreated)) | none: the order-projector ignores the type |

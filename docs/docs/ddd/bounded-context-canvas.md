@@ -25,8 +25,7 @@ commands (`cmd`), **dotted green** queries (`qry`), **thick orange** events
 (`evt`); each arrow names its channel and the messages it carries. Box shapes
 mark the collaborator kind: rounded = people, UI or any client; blue =
 sibling bounded context; double border = external system or platform;
-grey = this context's own projector, reports or dead-letter path; dashed =
-published today with no consumer. Channel names on the arrows are
+grey = this context's own projector, reports or dead-letter path. Channel names on the arrows are
 abbreviated (REST, MCP, Kafka, HTTP, port); the Inbound and Outbound
 Communication tables carry the exact route, tool, topic and CloudEvents
 type for every message.
@@ -102,7 +101,7 @@ flowchart LR
         out0["inventory-storage"]:::ctx
         out1["wes-work-planning"]:::ctx
         out2["slotting-optimization and<br/>network-inventory-planning"]:::ctx
-        out3["any subscriber (none<br/>known)"]:::none
+        out3["exception-management"]:::ctx
         out4["own order-projector"]:::self
         out5["dead-letter topics"]:::self
     end
@@ -190,7 +189,7 @@ holding network-originated orders until their caller commits.
 | wes-work-planning | OrderAllocated | Event | Kafka `warehouse.order-management.events`, `com.warehouse.wes.order-management.order.OrderAllocated` | Published Language |
 | wes-work-planning | OrderPartiallyAllocated | Event | Kafka `warehouse.order-management.events`, `com.warehouse.wes.order-management.order.OrderPartiallyAllocated` | Published Language |
 | slotting-optimization, network-inventory-planning | SiteSkuDemandChanged | Event | Kafka `warehouse.order-management.events`, `com.warehouse.wes.order-management.siteskudemand.SiteSkuDemandChanged` (per-line demand projection, [ADR 0035](/docs/adr/0035-site-sku-demand-projection-event)) | Published Language |
-| any subscriber (none known) | OrderRepromised | Event | Kafka `warehouse.order-management.events`, `com.warehouse.wes.order-management.order.OrderRepromised` | Published Language |
+| exception-management | OrderRepromised | Event | Kafka `warehouse.order-management.events`, `com.warehouse.wes.order-management.order.OrderRepromised` | Published Language |
 | order-projector (this repo) | every raised domain event | Event | Kafka `warehouse.order-management.analytics`, `com.warehouse.wes.order-management.order.*` (including the analytics-only `OrderReleaseUnconfirmed`, ADR 0043, which the projector ignores) | internal |
 | Dead-letter topics | unprocessable inbound message | Event | Kafka `warehouse.fulfillment.events.dlq`, `warehouse.warehouse-planning.events.dlq`, and (ADR 0043, when the release-confirmation consumer is on) `warehouse.work-planning.events.dlq` | internal |
 
@@ -271,10 +270,13 @@ Top terms:
 
 ## Open Questions
 
-- No consumer of `OrderRepromised` on the integration topic is known — does
-  wes-work-planning or network-fulfillment need it?
-- **Held orders are never swept.** Nothing expires an orphaned hold; ADR
-  0020 names network-fulfillment as the natural owner of a sweeper.
+- `OrderRepromised` on the integration topic is read by exception-management, which uses it to auto-resolve open
+  exception cases (`internal/adapters/inbound/kafka/order_correlation_consumer.go` there). No other sibling consumes it
+  (warehouse-planning's order-demand consumer ignores it on purpose). Whether wes-work-planning or network-fulfillment need
+  it is open.
+- **Held orders are not swept here, by design.** Nothing in this service expires an orphaned hold (ADR 0020, accepted
+  deferral). network-fulfillment's `SweepOrphanedHolds` (`internal/application/usecases/sweep_orphaned_holds.go`, its ADR 0024)
+  cancels a hold nobody decided, past `acknowledgeBy` plus a grace period, through `DELETE /orders/{id}`.
 - Release confirmation (ADR 0043) is available but off by default, and a line
   it flags `UNCONFIRMED` is only reported. Whether an automatic reaction
   (re-publishing `OrderAllocated`, revoking reservations, cancelling) is ever

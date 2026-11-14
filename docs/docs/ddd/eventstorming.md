@@ -137,7 +137,6 @@ flowchart LR
   P5["No cancel once any line is released"]:::policy
   INV2["inventory-storage"]:::external
   E9["Order Cancelled"]:::event
-  H3["Orphaned hold is never swept"]:::hotspot
 
   NF --> ROH --> P3 --> O2
   O2 --> E7 --> RV --> NF
@@ -147,7 +146,7 @@ flowchart LR
   NF --> CO --> P5 --> O2
   O2 --> INV2
   O2 --> E9
-  E7 -.-> H3
+  NF -. "network-fulfillment sweeps an undecided hold past acknowledgeBy plus grace" .-> CO
 
   classDef actor fill:#fff59d,stroke:#b59f00,color:#1f1300,font-size:11px;
   classDef command fill:#4aa3df,stroke:#1f6f9f,color:#0b1e2d;
@@ -161,7 +160,8 @@ flowchart LR
 
 Source: `internal/application/usecases/release_held_order.go`,
 `cancel_order.go`, `internal/domain/order/intake_intent.go`, `order.go`
-(`EnsureCancellable`, `EnsureReleasable`), ADR 0004, ADR 0020. Omits:
+(`EnsureCancellable`, `EnsureReleasable`), ADR 0004, ADR 0020; the orphaned-hold sweep is network-fulfillment's
+`internal/application/usecases/sweep_orphaned_holds.go` (its ADR 0024), which cancels through `DELETE /orders/{id}`. Omits:
 cancellation by a direct customer (same command, different actor).
 
 ## 3. Re-promise and planned capacity
@@ -183,7 +183,7 @@ flowchart LR
   AP["Apply Planned Capacity"]:::command
   RM2["Planned capacity windows"]:::readmodel
   CON["Console user or AI agent"]:::actor
-  H5["No known consumer of Order Repromised"]:::hotspot
+  EXM["exception-management"]:::external
 
   FE --> E10 --> P6
   FE --> E11 --> P6
@@ -194,7 +194,7 @@ flowchart LR
   WPL --> E13 --> AP --> RM2
   RM2 --> CON
   O3 --> CON
-  E12 -.-> H5
+  E12 --> EXM
 
   classDef actor fill:#fff59d,stroke:#b59f00,color:#1f1300,font-size:11px;
   classDef command fill:#4aa3df,stroke:#1f6f9f,color:#0b1e2d;
@@ -208,7 +208,8 @@ flowchart LR
 
 Source: `internal/adapters/inbound/kafka/repromise_consumer.go`,
 `planned_capacity_consumer.go`, `internal/application/usecases/repromise_order.go`,
-`planned_capacity.go`, `internal/adapters/outbound/{kafkacatalog,kafkacptschedule,kafkapathcapacity}`.
+`planned_capacity.go`, `internal/adapters/outbound/{kafkacatalog,kafkacptschedule,kafkapathcapacity}`; the `OrderRepromised`
+consumer is exception-management's `internal/adapters/inbound/kafka/order_correlation_consumer.go`.
 Omits: the analytics projector (a read model built from every event, see
 [Order Funnel report](/docs/analytics/order-funnel-report)).
 
@@ -243,10 +244,10 @@ Omits: the analytics projector (a read model built from every event, see
 | Planned capacity windows | Read Model | `planned_capacity_windows`, `order.PlannedCapacityWindow` |
 | Product classification copy | Read Model | `product_classification_copy`, `ports.ProductClassificationLookup` (ADR 0036) |
 | Order view with promiseDate | Read Model | `GET /orders/{id}` response (`orderResponse`) |
-| inventory-storage, product-master, wes-work-planning, process-path-management, fulfillment-execution, warehouse-planning, network-fulfillment | External System | outbound and inbound adapters listed on [Context Map](/docs/ecosystem/context-map) |
+| inventory-storage, product-master, wes-work-planning, process-path-management, fulfillment-execution, warehouse-planning, network-fulfillment, exception-management | External System | outbound and inbound adapters listed on [Context Map](/docs/ecosystem/context-map) |
 | Order Line Released and Order Released raised only on the analytics topic | Event | `publishReleaseFacts` in `allocation.go`, [ADR 0034](/docs/adr/0034-raise-order-line-released-and-order-released) |
 | Order Release Unconfirmed raised only on the analytics topic, by the housekeeping timeout | Event | `FlagUnconfirmedReleases`, [ADR 0043](/docs/adr/0043-release-confirmation-from-workunitcreated) |
 | Release confirmation is off by default, an unconfirmed line triggers no automatic action | Hotspot | ADR 0043, README Deferred list |
-| Orphaned hold is never swept | Hotspot | ADR 0020, README Deferred list |
+| network-fulfillment sweeps an undecided hold past acknowledgeBy plus grace | External System | network-fulfillment `internal/application/usecases/sweep_orphaned_holds.go` (its ADR 0024) cancels through `DELETE /orders/{id}`; the sweep is not in this service by design (ADR 0020 accepted deferral, README Deferred list) |
 | BR3 blocking a release is a hold, answered 201/200 with a `Backordered` order (no `ship-complete-blocked` problem type) | Policy | `releaseAllocatedLines`, `Order.EnsureReleasable`, `br3_block_test.go`, ADR 0003 |
-| No known consumer of Order Repromised | Hotspot | published on `warehouse.order-management.events` (`outbound/kafka.Publisher`), but no sibling consumer is named in this repo's docs or ADR 0018 |
+| exception-management consumes Order Repromised | External System | published on `warehouse.order-management.events` (`outbound/kafka.Publisher`); exception-management `internal/adapters/inbound/kafka/order_correlation_consumer.go` uses it to auto-resolve the order's open exception cases |
