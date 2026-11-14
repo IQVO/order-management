@@ -68,26 +68,19 @@ Feature: The order rules of the Order Management documentation
     And the order status is "Released"
     And the response flag "releaseOnAllocation" is false
 
-  Scenario: Lines are numbered from 1 in request order and keep their quantity and gift wrap
-    Given inventory-storage has usable stock for SKU "SKU-BOOK-0001"
-    And inventory-storage has usable stock for SKU "SKU-TOY-0042"
-    When an order is placed with lines:
-      | sku           | quantity | giftWrap |
-      | SKU-BOOK-0001 | 2        | true     |
-      | SKU-TOY-0042  | 5        | false    |
-    Then line 1 is for SKU "SKU-BOOK-0001" with quantity 2 and gift wrap true
-    And line 2 is for SKU "SKU-TOY-0042" with quantity 5 and gift wrap false
-
-  Scenario: Allocation reserves each line once with the order id as demand reference
+  Scenario: Lines are numbered from 1 in request order and each is reserved once with the order id as demand reference
     Given inventory-storage has usable stock for SKU "SKU-BOOK-0001"
     And inventory-storage has usable stock for SKU "SKU-TOY-0042"
     And inventory-storage has usable stock for SKU "SKU-GAME-0007"
     When an order is placed with lines:
       | sku           | quantity | giftWrap |
-      | SKU-BOOK-0001 | 2        | false    |
+      | SKU-BOOK-0001 | 2        | true     |
       | SKU-TOY-0042  | 1        | false    |
       | SKU-GAME-0007 | 4        | false    |
-    Then inventory-storage received 3 reservation requests
+    Then line 1 is for SKU "SKU-BOOK-0001" with quantity 2 and gift wrap true
+    And line 2 is for SKU "SKU-TOY-0042" with quantity 1 and gift wrap false
+    And line 3 is for SKU "SKU-GAME-0007" with quantity 4 and gift wrap false
+    And inventory-storage received 3 reservation requests
     And reservation request 1 asked for 2 of SKU "SKU-BOOK-0001" for line 1 of the order
     And reservation request 2 asked for 1 of SKU "SKU-TOY-0042" for line 2 of the order
     And reservation request 3 asked for 4 of SKU "SKU-GAME-0007" for line 3 of the order
@@ -192,16 +185,21 @@ Feature: The order rules of the Order Management documentation
 
   # --- Product classification local copy (ADR 0036) ------------------------
 
-  Scenario: A newer classification version replaces the stored one and an older one never does
+  Scenario Outline: A classification at version <version> never replaces the stored version 2
     Given process-path-management declares the paths:
       | pathId    | cycleMinutes | intake         | maxUnits | requires | excludes |
       | pick      | 45           | CUSTOMER_ORDER | -        | -        | -        |
       | pick-fast | 10           | CUSTOMER_ORDER | -        | -        | Hazmat   |
     And product-master has classified SKU "SKU-CHEM-0007" as "Hazmat" at version 2 in event "evt-v2"
-    When product-master publishes event "evt-v1" classifying SKU "SKU-CHEM-0007" as "-" at version 1
+    When product-master publishes event "evt-late" classifying SKU "SKU-CHEM-0007" as "-" at version <version>
     Then the classification is accepted
     When an order is placed for SKUs "SKU-CHEM-0007"
     Then line 1 is on process path "pick"
+
+    Examples:
+      | version |
+      | 1       |
+      | 2       |
 
   Scenario: A redelivered classification event id is applied only once
     Given process-path-management declares the paths:
@@ -332,6 +330,20 @@ Feature: The order rules of the Order Management documentation
     And no "OrderLineReleased" event was published
     And no "OrderAllocated" event was published
 
+  Scenario: In a partial shipment a lapsed reservation backorders its own line without holding back the others
+    Given inventory-storage has usable stock for SKU "SKU-BOOK-0001"
+    And inventory-storage reports insufficient usable stock for SKU "SKU-TOY-0042"
+    And inventory-storage is unreachable for SKU "SKU-GAME-0007"
+    And an order allowing partial shipment is placed for SKUs "SKU-BOOK-0001,SKU-TOY-0042,SKU-GAME-0007"
+    And the reservation for SKU "SKU-BOOK-0001" has lapsed upstream
+    And inventory-storage has usable stock for SKU "SKU-TOY-0042"
+    When the order is retried for allocation
+    Then the request is accepted with status 200
+    And line 1 status is "Backordered"
+    And line 2 status is "Released"
+    And line 3 status is "Pending"
+    And the last "OrderPartiallyAllocated" event released exactly the lines "2"
+
   Scenario: A still-valid reservation is reconfirmed before release without raising a second allocation fact
     Given inventory-storage has usable stock for SKU "SKU-BOOK-0001"
     And inventory-storage reports insufficient usable stock for SKU "SKU-TOY-9999"
@@ -461,6 +473,22 @@ Feature: The order rules of the Order Management documentation
     And the problem detail type is "no-backordered-lines"
     And no new reservation request was made
 
+  Scenario: A rejected cancellation revokes nothing even when an allocated line sits beside a released one
+    Given inventory-storage has usable stock for SKU "SKU-BOOK-0001"
+    And inventory-storage reports insufficient usable stock for SKU "SKU-TOY-0042"
+    And inventory-storage reports insufficient usable stock for SKU "SKU-GAME-0007"
+    And an order allowing partial shipment is placed for SKUs "SKU-BOOK-0001,SKU-TOY-0042,SKU-GAME-0007"
+    And inventory-storage has usable stock for SKU "SKU-TOY-0042"
+    And inventory-storage is unreachable for SKU "SKU-GAME-0007"
+    And the order is retried for allocation
+    When the order is cancelled
+    Then the request is rejected with status 409
+    And the problem detail type is "order-already-released"
+    And exactly 0 reservations were revoked
+    When the order is fetched
+    Then line 1 status is "Released"
+    And line 2 status is "Allocated"
+
   # --- Demand projection (ADR 0035 / ADR 0044) --------------------------------
 
   Scenario: A retry projects demand only for the line it newly allocated
@@ -473,6 +501,22 @@ Feature: The order rules of the Order Management documentation
     When the order is retried for allocation
     Then exactly 2 "SiteSkuDemandChanged" events were published
     And the last "SiteSkuDemandChanged" event is for line 2 due at "2026-09-08T09:00:00Z"
+
+  Scenario: Each line's demand is due at the cutoff of its own promise group
+    Given inventory-storage has usable stock for SKU "SKU-BOOK-0001"
+    And inventory-storage has usable stock for SKU "SKU-TOY-0042"
+    And the site has CPT windows on path "pick" with a cycle time of 60 minutes:
+      | cptId    | cutoffAt             |
+      | sp1-1200 | 2026-09-07T12:00:00Z |
+      | sp1-1500 | 2026-09-07T15:00:00Z |
+    And path "pick" has capacity for 5 units before CPT "sp1-1200"
+    When an order allowing partial shipment at fulfillment site "WH2" is placed with lines:
+      | sku           | quantity | giftWrap |
+      | SKU-BOOK-0001 | 2        | false    |
+      | SKU-TOY-0042  | 8        | false    |
+    Then the response field "promiseDate" is "2026-09-07T15:00:00Z"
+    And the ACTIVE SiteSkuDemandChanged event for line 1 is due at "2026-09-07T12:00:00Z"
+    And the ACTIVE SiteSkuDemandChanged event for line 2 is due at "2026-09-07T15:00:00Z"
 
   # --- Promise (ADR 0014 / 0017 / 0020) ---------------------------------------
 

@@ -215,6 +215,7 @@ func registerRulesGivens(sc *godog.ScenarioContext, w *world) {
 func registerRulesWhens(sc *godog.ScenarioContext, w *world) {
 	sc.Step(`^the order "([^"]*)" is retried for allocation$`, w.retryNamed)
 	sc.Step(`^an order allowing partial shipment is placed with lines:$`, w.placePartialWithLines)
+	sc.Step(`^an order allowing partial shipment at fulfillment site "([^"]*)" is placed with lines:$`, w.placePartialAtSite)
 	sc.Step(`^an order of (\d+) units of SKU "([^"]*)" is placed with required ship-by "([^"]*)"$`, w.placeUnitsWithShipBy)
 	sc.Step(`^the service is probed for readiness$`, w.probeReadiness)
 	sc.Step(`^the service begins shutting down$`, w.beginShutdown)
@@ -243,6 +244,7 @@ func registerRulesEventThens(sc *godog.ScenarioContext, w *world) {
 	sc.Step(`^the last "OrderAllocated" event released line (\d+) under promise CPT "([^"]*)"$`, w.releasedLinePromiseCPT)
 	sc.Step(`^the last "OrderAllocationPartiallyFailed" event reports (\d+) allocated lines$`, w.partiallyFailedAllocated)
 	sc.Step(`^the last "SiteSkuDemandChanged" event is for line (\d+) due at "([^"]*)"$`, w.lastDemandLineDue)
+	sc.Step(`^the ACTIVE SiteSkuDemandChanged event for line (\d+) is due at "([^"]*)"$`, w.siteDemandForLineDue)
 	sc.Step(`^the last "OrderRepromised" event moved the promise from CPT "([^"]*)" to "([^"]*)" because of "([^"]*)"$`, w.repromisedFromTo)
 	sc.Step(`^the last "(OrderLineShipped|OrderShipped|OrderPartiallyShipped)" event carries load "([^"]*)"$`, w.shippedEventLoad)
 	sc.Step(`^the last "OrderReleaseUnconfirmed" event is for line (\d+) with work unit id "([^"]*)"$`, w.unconfirmedEventFor)
@@ -386,6 +388,14 @@ func (w *world) retryNamed(id string) error {
 }
 
 func (w *world) placePartialWithLines(table *godog.Table) error {
+	return w.placePartialAt("", table)
+}
+
+func (w *world) placePartialAtSite(site string, table *godog.Table) error {
+	return w.placePartialAt(site, table)
+}
+
+func (w *world) placePartialAt(site string, table *godog.Table) error {
 	var lines []map[string]any
 	for _, r := range rows(table) {
 		quantity, err := strconv.Atoi(r["quantity"])
@@ -394,7 +404,11 @@ func (w *world) placePartialWithLines(table *godog.Table) error {
 		}
 		lines = append(lines, map[string]any{"sku": r["sku"], "quantity": quantity, "giftWrap": r["giftWrap"] == "true"})
 	}
-	return w.postAndCapture(map[string]any{"lines": lines, "allowPartialShipment": true})
+	body := map[string]any{"lines": lines, "allowPartialShipment": true}
+	if site != "" {
+		body["fulfillmentSiteId"] = site
+	}
+	return w.postAndCapture(body)
 }
 
 func (w *world) probeReadiness() error { return w.do(http.MethodGet, "/readyz", nil) }
@@ -649,6 +663,20 @@ func (w *world) partiallyFailedAllocated(want int) error {
 		return fmt.Errorf("OrderAllocationPartiallyFailed allocated %d lines, want %d", e.AllocatedLines, want)
 	}
 	return nil
+}
+
+func (w *world) siteDemandForLineDue(lineNo int, due string) error {
+	for _, ev := range w.eventsNamed("SiteSkuDemandChanged") {
+		d, ok := ev.(shared.SiteSkuDemandChanged)
+		if !ok || d.LineNo != lineNo || d.State != shared.SiteSkuDemandActive {
+			continue
+		}
+		if got := d.DueAt.UTC().Format(time.RFC3339); got != due {
+			return fmt.Errorf("SiteSkuDemandChanged for line %d is due %s, want %s", lineNo, got, due)
+		}
+		return nil
+	}
+	return fmt.Errorf("no ACTIVE SiteSkuDemandChanged event for line %d (captured: %v)", lineNo, w.eventCounts())
 }
 
 func (w *world) lastDemandLineDue(lineNo int, due string) error {

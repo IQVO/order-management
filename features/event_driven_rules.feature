@@ -47,6 +47,27 @@ Feature: Facts consumed from fulfillment-execution, wes-work-planning and outbou
     When fulfillment-execution reports PackageManifested event "evt-m2" for line 1 of the order
     Then exactly 1 "OrderRepromised" event was published
 
+  Scenario: A lead-time promise that slipped is re-promised without any CPT identity
+    Given inventory-storage has usable stock for SKU "SKU-BOOK-0001"
+    And an order is placed for SKUs "SKU-BOOK-0001"
+    And the clock advances 210 minutes
+    When fulfillment-execution reports TaskCPTMissed event "evt-m1" for line 1 of the order
+    Then the last "OrderRepromised" event moved the promise from CPT "" to "" because of "TaskCPTMissed"
+    When the order is fetched
+    Then the response field "promiseDate" is "2026-09-08T12:30:00Z"
+
+  Scenario: A promise that moves to another departure at the same instant is still a re-promise
+    Given inventory-storage has usable stock for SKU "SKU-BOOK-0001"
+    And the site has CPT windows on path "pick" with a cycle time of 60 minutes:
+      | cptId        | cutoffAt             |
+      | sp1-1500-std | 2026-09-07T15:00:00Z |
+    And an order is placed for SKUs "SKU-BOOK-0001"
+    And the site has CPT windows on path "pick" with a cycle time of 60 minutes:
+      | cptId        | cutoffAt             |
+      | sp1-1500-exp | 2026-09-07T15:00:00Z |
+    When fulfillment-execution reports TaskCPTMissed event "evt-m1" for line 1 of the order
+    Then the last "OrderRepromised" event moved the promise from CPT "sp1-1500-std" to "sp1-1500-exp" because of "TaskCPTMissed"
+
   Scenario: A signal that leaves the promise where it was raises nothing and changes nothing
     Given inventory-storage has usable stock for SKU "SKU-BOOK-0001"
     And the site has CPT windows on path "pick" with a cycle time of 60 minutes:
