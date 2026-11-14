@@ -100,9 +100,9 @@ flowchart LR
 Source: `internal/adapters/outbound/{inventorystorage,productclassificationcopy,kafka,kafkacatalog,kafkacptschedule,kafkapathcapacity}`,
 `internal/adapters/inbound/{kafka,http,mcp}`, `cmd/order/main.go`.
 Omits: the analytics topic (internal to this repo), the
-`OrderRepromised` integration event (published, no known consumer), the
+`OrderRepromised` integration event (published; exception-management consumes it to auto-resolve open exception cases), the
 `SiteSkuDemandChanged` projection (ADR 0035, opt-in via
-`DEMAND_PROJECTION_SITE_ID`, no known consumer yet), and the
+`DEMAND_PROJECTION_SITE_ID`; slotting-optimization and network-inventory-planning consume it), and the
 CloudEvents type prefix on every Kafka label (`com.warehouse.wms.product-master.`
 for product-master, `com.warehouse.wes.<context>.` for the others).
 Arrows point from upstream to downstream; `id` and `sku` stand for the path
