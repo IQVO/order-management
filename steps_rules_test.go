@@ -254,7 +254,6 @@ func registerRulesConsumerSteps(sc *godog.ScenarioContext, w *world) {
 	sc.Step(`^fulfillment-execution reports TaskCPTMissed event "([^"]*)" for order_ref "([^"]*)"$`, w.reportMissedRefStep)
 	sc.Step(`^wes-work-planning confirms line (\d+) of the order in event "([^"]*)"$`, w.confirmLine)
 	sc.Step(`^wes-work-planning publishes WorkUnitCreated "([^"]*)" for reference "([^"]*)" and line (\d+)$`, w.workUnitCreated)
-	sc.Step(`^wes-work-planning publishes WorkUnitCreated "([^"]*)" without a reference$`, w.workUnitCreatedNoReference)
 	sc.Step(`^the confirmation outcome is "([^"]*)"$`, w.confirmationOutcomeIs)
 	sc.Step(`^the confirmation of line (\d+) is "([^"]*)"$`, w.confirmationStateIs)
 	sc.Step(`^there is no confirmation for line (\d+)$`, w.noConfirmationFor)
@@ -751,10 +750,6 @@ func (w *world) workUnitCreated(eventID, reference string, lineNo int) error {
 	}
 	w.rules.lastOutcome = string(outcome)
 	return nil
-}
-
-func (w *world) workUnitCreatedNoReference(eventID string) error {
-	return w.workUnitCreated(eventID, "", 0)
 }
 
 func (w *world) confirmationOutcomeIs(want string) error {

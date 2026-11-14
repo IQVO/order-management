@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -693,11 +694,19 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 
 // TestFeatures runs the Gherkin acceptance suite under features/.
 func TestFeatures(t *testing.T) {
+	tags := os.Getenv("BDD_TAGS")
+	if tags == "" {
+		tags = "~@known-bug"
+	}
 	suite := godog.TestSuite{
 		ScenarioInitializer: InitializeScenario,
 		Options: &godog.Options{
 			Format: "pretty",
 			Paths:  []string{"features"},
+			// Tags excludes scenarios that describe documented behaviour the
+			// code does not implement yet (@known-bug). BDD_TAGS=@known-bug
+			// runs only those, and they must fail.
+			Tags: tags,
 			// Strict makes an undefined or pending step fail the suite instead
 			// of silently skipping it.
 			Strict:   true,

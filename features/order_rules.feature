@@ -133,7 +133,9 @@ Feature: The order rules of the Order Management documentation
     Given process-path-management declares the paths:
       | pathId | cycleMinutes | intake         | maxUnits | requires | excludes |
       | pack   | 5            | STOCK_TRANSFER | -        | -        | -        |
-    When an order is placed for SKUs "SKU-BOOK-0001"
+    When an order is placed with lines:
+      | sku           | quantity | giftWrap |
+      | SKU-BOOK-0001 | 1        | false    |
     Then the request is rejected with status 400
     And the problem detail type is "unknown-process-path"
     And no "OrderReceived" event was published
