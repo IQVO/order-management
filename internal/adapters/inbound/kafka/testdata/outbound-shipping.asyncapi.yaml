@@ -1,0 +1,1663 @@
+asyncapi: 2.6.0
+
+info:
+  title: outbound-shipping Domain Events
+  version: 1.0.0
+  contact:
+    name: outbound-shipping maintainers
+    url: https://github.com/IQVO/outbound-shipping
+    email: outbound-shipping@iqvo.example.com
+  license:
+    name: UNLICENSED
+  description: |
+    Event contract for the **outbound-shipping** bounded context (WMS
+    subdomain): staging, the outbound load, ship-confirm on the trailer's
+    physical departure, and the bill of lading (ADR 0001, ADR 0002, ADR
+    0005).
+
+    **Published.** Three aggregates raise thirteen events, published to
+    `warehouse.outbound-shipping.events` through a **transactional outbox**:
+    the aggregate row and its already-encoded events are written in ONE
+    database transaction and a relay drains them to Kafka (at-least-once; the
+    CloudEvents `id` is stored with the outbox row, so a retry republishes
+    the same `id`). Every payload carries the aggregate `version` AFTER the
+    change, so consumers can reject out-of-order deliveries.
+
+    **Analytics.** Every published event is ALSO written, in the same
+    transaction and under the same `id`, to
+    `warehouse.outbound-shipping.analytics` with
+    `dataschema urn:warehouse:outbound-shipping:analytics:<EventName>:v1`.
+    That stream is not an integration contract: only this service's own
+    projector consumes it. Other contexts keep reading
+    `warehouse.outbound-shipping.events`.
+
+    **Consumed (ADR 0003, ADR 0005).** `PackageManifested` and
+    `PackageDiverted` from fulfillment-execution; `CPTScheduleChanged` from
+    process-path-management; `ZoneRegistered` and `LocationSlotRegistered`
+    from facility-layout; `DockAppointmentBooked` from dock-scheduling
+    (pinned from its `origin/feature/service` until that contract merges);
+    `TrailerDocked`, `DoorWorkCompleted` and `TrailerDeparted` from
+    yard-management (pinned to its merged contract,
+    `contracts/yard-management.asyncapi.yaml`, ADR 0010 there). Each feeds a durable local copy. The consumed
+    messages below are the producers' own contracts, decoded independently
+    here and never imported.
+
+    **Envelope (mandatory).** CloudEvents 1.0, structured content mode, Kafka
+    header `content-type: application/cloudevents+json; charset=UTF-8`.
+    `type` = `com.warehouse.wms.outbound-shipping.<entity>.<EventName>`
+    where `<entity>` is the raising aggregate lowercase with no separators:
+    `outboundload`, `shippingpackage`, `billoflading`. Kafka key = aggregate
+    id. Dispatch on the full `type`, ignore unknown types, dedupe on `id`.
+
+servers:
+  production:
+    url: '{brokers}'
+    protocol: kafka
+    description: Fleet-shared Kafka broker (host supplied by the deployment environment).
+    variables:
+      brokers:
+        default: kafka.warehouse-systems.internal:9092
+
+tags:
+  - name: outbound-shipping
+    description: The outbound-shipping bounded context (WMS subdomain).
+  - name: outboundload
+    description: Events raised by the OutboundLoad aggregate.
+  - name: shippingpackage
+    description: Events raised by the ShippingPackage aggregate.
+  - name: billoflading
+    description: Events raised by the BillOfLading aggregate.
+  - name: consumed
+    description: Events produced by sibling contexts that this service consumes (ADR 0003, ADR 0005).
+  - name: analytics
+    description: This service's own analytics stream (every published event, same id).
+
+defaultContentType: application/json
+
+channels:
+  warehouse.outbound-shipping.events:
+    description: |
+      This service's integration topic. Written by the outbox relay; key =
+      aggregate id, so all events of one load (or package, or BOL) stay
+      ordered on one partition. Every message carries the CloudEvents
+      content-type header. Dispatch on the full `type`, ignore unknown
+      types, dedupe on `id`.
+    subscribe:
+      operationId: receiveOutboundShippingEvents
+      summary: Receive outbound-shipping events.
+      description: |
+        Subscribe to the outbound shipping facts. Route on the full `type`
+        (`com.warehouse.wms.outbound-shipping.<entity>.<EventName>`).
+        `ShipmentConfirmed` is the fleet's "this actually shipped" fact
+        (ADR 0002, ADR 0004); `PackageMissedLoad` drives exception cases and
+        re-promising.
+      tags:
+        - name: outbound-shipping
+      message:
+        oneOf:
+          - $ref: '#/components/messages/LoadPlanned'
+          - $ref: '#/components/messages/LoadDoorAssigned'
+          - $ref: '#/components/messages/LoadingStarted'
+          - $ref: '#/components/messages/LoadClosed'
+          - $ref: '#/components/messages/LoadReopened'
+          - $ref: '#/components/messages/LoadCancelled'
+          - $ref: '#/components/messages/ShipmentConfirmed'
+          - $ref: '#/components/messages/PackageStaged'
+          - $ref: '#/components/messages/PackageLoaded'
+          - $ref: '#/components/messages/PackageUnloaded'
+          - $ref: '#/components/messages/PackageMissedLoad'
+          - $ref: '#/components/messages/BillOfLadingIssued'
+          - $ref: '#/components/messages/BillOfLadingVoided'
+
+  warehouse.outbound-shipping.analytics:
+    description: |
+      This service's own analytics stream, written by the SAME transactional
+      outbox as the integration topic: every published event appears here
+      too, under the SAME CloudEvents id and `type`, with only the
+      `dataschema` stream segment different
+      (`urn:warehouse:outbound-shipping:analytics:<EventName>:v1`). It is
+      NOT an integration contract: the only consumer is this service's own
+      projector. Other contexts keep reading
+      `warehouse.outbound-shipping.events`.
+    subscribe:
+      operationId: receiveOutboundShippingAnalytics
+      summary: Receive the analytics twin of every outbound-shipping event.
+      description: |
+        Payloads are byte-for-byte the integration payloads; only the
+        `dataschema` stream segment differs. Consumed by this service's
+        projector (fixed consumer group) to fold the load funnel and
+        adherence read models.
+      tags:
+        - name: analytics
+      message:
+        oneOf:
+          - $ref: '#/components/messages/LoadPlanned'
+          - $ref: '#/components/messages/LoadDoorAssigned'
+          - $ref: '#/components/messages/LoadingStarted'
+          - $ref: '#/components/messages/LoadClosed'
+          - $ref: '#/components/messages/LoadReopened'
+          - $ref: '#/components/messages/LoadCancelled'
+          - $ref: '#/components/messages/ShipmentConfirmed'
+          - $ref: '#/components/messages/PackageStaged'
+          - $ref: '#/components/messages/PackageLoaded'
+          - $ref: '#/components/messages/PackageUnloaded'
+          - $ref: '#/components/messages/PackageMissedLoad'
+          - $ref: '#/components/messages/BillOfLadingIssued'
+          - $ref: '#/components/messages/BillOfLadingVoided'
+
+  warehouse.fulfillment.events:
+    description: |
+      fulfillment-execution's integration topic. This service consumes ONLY
+      `PackageManifested` and `PackageDiverted` (keyed by package id, so one
+      package's stream is totally ordered), under a stable consumer group.
+      Every other type on the topic is ignored.
+    publish:
+      operationId: consumeFulfillmentPackageEvents
+      summary: Consume package manifestation and diversion.
+      description: |
+        `PackageManifested` plans the load (PlanLoadFromCutoff policy) and
+        records the package as EXPECTED on it (AssignPackageToLoad). The
+        additive correlation fields `site_id`, `source_order_id`, `cpt`,
+        `weight_g` (ADR 0003) are optional and omitted by the producer when
+        unknown — this consumer tolerates both shapes. `PackageDiverted`
+        short-ships an EXPECTED package with reason DIVERTED (DropDiverted
+        policy). The CloudEvents `id` claim and the effect commit in one
+        transaction; the offset is committed afterwards.
+      tags:
+        - name: consumed
+      message:
+        oneOf:
+          - $ref: '#/components/messages/PackageManifested'
+          - $ref: '#/components/messages/PackageDiverted'
+
+  warehouse.process-path-management.events:
+    description: |
+      process-path-management's integration topic. This service consumes
+      ONLY `CPTScheduleChanged` (keyed by site id), which feeds the local
+      CPT copy the load planner reads. Every other type on the topic is
+      ignored.
+    publish:
+      operationId: consumeCptSchedule
+      summary: Consume the cutoff (CPT) schedule.
+      description: |
+        Last writer wins per site: the local copy keeps each cutoff's id,
+        local time, days of week and ship method — the (site, cpt, date,
+        ship method) key a load is planned for. A cutoff that disappears
+        from the schedule leaves the local copy stale until the next change;
+        that is recorded, not guessed.
+      tags:
+        - name: consumed
+      message:
+        $ref: '#/components/messages/CPTScheduleChanged'
+
+  warehouse.facility.events:
+    description: |
+      facility-layout's integration topic. This service consumes ONLY
+      `ZoneRegistered` (zone to site mapping) and `LocationSlotRegistered`
+      (staging locations). Every other type on the topic is ignored.
+    publish:
+      operationId: consumeFacilityLayout
+      summary: Consume zones and staging locations.
+      description: |
+        Feeds the staging-location local copy: a package stages only at a
+        location whose `role` is Staging in a zone of its site
+        (`ErrNotStagingLocation`). A location maps to a site through its
+        `zoneId`, never by parsing its code. `role` is absent on events
+        emitted before the field existed (treated as Storage, so never
+        Staging).
+      tags:
+        - name: consumed
+      message:
+        oneOf:
+          - $ref: '#/components/messages/ZoneRegistered'
+          - $ref: '#/components/messages/LocationSlotRegistered'
+
+  warehouse.dock-scheduling.events:
+    description: |
+      dock-scheduling's integration topic. This service consumes ONLY
+      `DockAppointmentBooked` with `direction=OUTBOUND` (DoorFromAppointment
+      policy: an appointment naming the load's cpt assigns the door).
+      `cpt_id` and `carrier_scac` are nullable — an appointment without a
+      cpt names no load. PINNED from the producer's
+      `origin/feature/service` (campaign spike Q5): re-verify against the
+      producer's `origin/develop` AsyncAPI before fleet wiring lands.
+    publish:
+      operationId: consumeDockAppointments
+      summary: Consume outbound dock appointments.
+      description: |
+        INBOUND appointments are ignored. An OUTBOUND appointment carrying a
+        `cpt_id` assigns the door to the open load of that (site, cpt,
+        date, ship method), if one exists when the event arrives; a later
+        appointment for the same cpt re-assigns and the change is published
+        as `LoadDoorAssigned` again.
+      tags:
+        - name: consumed
+      message:
+        $ref: '#/components/messages/DockAppointmentBooked'
+
+  warehouse.yard-management.events:
+    description: |
+      yard-management's integration topic. This service consumes ONLY
+      `TrailerDocked`, `DoorWorkCompleted` and `TrailerDeparted`
+      (StartOnDock, ConfirmOnDeparture and FlagDepartureWithoutClose
+      policies, ADR 0002). The three messages are validated against the
+      producer's merged AsyncAPI, pinned in `contracts/yard-management.asyncapi.yaml`
+      (kept equal to its `develop` by `scripts/harness/pinned_contract_gate.py`);
+      `TestConsumedYardTypesMatchTheProducersIntegrationContract` fails when a
+      consumed type is not on the producer's integration channel.
+    publish:
+      operationId: consumeYardTrailerEvents
+      summary: Consume trailer dock, door-work and departure facts.
+      description: |
+        `TrailerDocked` at the load's door attaches the trailer (loading may
+        then start). `TrailerDeparted` for a CLOSED load confirms the
+        shipment with the event's seal number and issues the BOL; for a
+        LOADING load it never confirms — every package not loaded raises
+        `PackageMissedLoad` and the load is left for a supervisor. `time`
+        and `subject` are read from the envelope attributes, the payload via
+        `DataAs`, and the consumer dedupes on `id`: a re-delivered departure
+        confirms nothing twice.
+      tags:
+        - name: consumed
+      message:
+        oneOf:
+          - $ref: '#/components/messages/TrailerDocked'
+          - $ref: '#/components/messages/DoorWorkCompleted'
+          - $ref: '#/components/messages/TrailerDeparted'
+
+components:
+  messages:
+    LoadPlanned:
+      x-no-consumer-reason: "No integration consumer by design: the ADR 0005 type catalogue lists this type as analytics only; the service's own projector folds it from the analytics stream."
+      name: LoadPlanned
+      title: Load planned
+      summary: A load was planned for one cutoff and ship method.
+      description: |
+        `type` = `com.warehouse.wms.outbound-shipping.outboundload.LoadPlanned`;
+        subject and key = the load id. Raised automatically when the first
+        package of a (site, cpt, date, ship method) manifests and no open
+        load exists for that key (PlanLoadFromCutoff policy).
+      contentType: application/cloudevents+json
+      tags:
+        - name: outboundload
+      payload:
+        $ref: '#/components/schemas/LoadPlannedEvent'
+      examples:
+        - name: planned
+          summary: The first package of the 16:00 ground cutoff plans load load-7f3a.
+          payload:
+            specversion: '1.0'
+            id: 3f1d2c3b-4a5e-4b7c-8d9e-0a1b2c3d4e01
+            source: /warehouse/outbound-shipping
+            type: com.warehouse.wms.outbound-shipping.outboundload.LoadPlanned
+            subject: load-7f3a
+            time: '2026-11-06T13:02:11Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:outbound-shipping:events:LoadPlanned:v1
+            data:
+              load_id: load-7f3a
+              site_id: SITE-1
+              cpt_id: cpt-1600
+              operating_date: '2026-11-06'
+              ship_method: STDOUT-2DAY
+              cutoff: '2026-11-06T16:00:00Z'
+              version: 1
+
+    LoadDoorAssigned:
+      x-no-consumer-reason: "No integration consumer by design: the ADR 0005 type catalogue lists this type as analytics only; the service's own projector folds it from the analytics stream."
+      name: LoadDoorAssigned
+      title: Load door assigned
+      summary: An outbound dock appointment assigned the load's door.
+      description: |
+        `type` =
+        `com.warehouse.wms.outbound-shipping.outboundload.LoadDoorAssigned`;
+        subject and key = the load id. DoorFromAppointment policy: the
+        appointment names the cpt; `appointment_id` is that appointment.
+      contentType: application/cloudevents+json
+      tags:
+        - name: outboundload
+      payload:
+        $ref: '#/components/schemas/LoadDoorAssignedEvent'
+      examples:
+        - name: assigned
+          summary: Appointment appt-2211 assigns door D04 to load-7f3a.
+          payload:
+            specversion: '1.0'
+            id: 3f1d2c3b-4a5e-4b7c-8d9e-0a1b2c3d4e02
+            source: /warehouse/outbound-shipping
+            type: com.warehouse.wms.outbound-shipping.outboundload.LoadDoorAssigned
+            subject: load-7f3a
+            time: '2026-11-06T13:20:00Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:outbound-shipping:events:LoadDoorAssigned:v1
+            data:
+              load_id: load-7f3a
+              site_id: SITE-1
+              door_code: D04
+              appointment_id: appt-2211
+              version: 2
+
+    LoadingStarted:
+      x-no-consumer-reason: "pending: ADR 0005 names yard-management as the integration consumer, but yard-management declares no such consumer and has no handler for it on develop."
+      name: LoadingStarted
+      title: Loading started
+      summary: Loading began at the assigned door with the docked trailer.
+      description: |
+        `type` =
+        `com.warehouse.wms.outbound-shipping.outboundload.LoadingStarted`;
+        subject and key = the load id. Requires a door AND a docked trailer
+        (`ErrTrailerNotDocked`). yard-management starts its outbound door
+        work on it (wave 6.4, deferred until the yard contract merges).
+      contentType: application/cloudevents+json
+      tags:
+        - name: outboundload
+      payload:
+        $ref: '#/components/schemas/LoadingStartedEvent'
+      examples:
+        - name: started
+          summary: Trailer trl-91 docks at D04 and loading starts.
+          payload:
+            specversion: '1.0'
+            id: 3f1d2c3b-4a5e-4b7c-8d9e-0a1b2c3d4e03
+            source: /warehouse/outbound-shipping
+            type: com.warehouse.wms.outbound-shipping.outboundload.LoadingStarted
+            subject: load-7f3a
+            time: '2026-11-06T14:05:00Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:outbound-shipping:events:LoadingStarted:v1
+            data:
+              load_id: load-7f3a
+              site_id: SITE-1
+              door_code: D04
+              trailer_id: trl-91
+              started_at: '2026-11-06T14:05:00Z'
+              version: 3
+
+    LoadClosed:
+      x-no-consumer-reason: "pending: ADR 0005 names yard-management as the integration consumer, but yard-management declares no such consumer and has no handler for it on develop."
+      name: LoadClosed
+      title: Load closed
+      summary: Every package is loaded or short-shipped; the load is closed.
+      description: |
+        `type` =
+        `com.warehouse.wms.outbound-shipping.outboundload.LoadClosed`;
+        subject and key = the load id. `package_count` is the loaded count,
+        `short_shipped_count` the deliberate left-offs with reasons.
+        yard-management completes its outbound door work on it.
+      contentType: application/cloudevents+json
+      tags:
+        - name: outboundload
+      payload:
+        $ref: '#/components/schemas/LoadClosedEvent'
+      examples:
+        - name: closed
+          summary: Load-7f3a closes with 40 loaded packages and one short-ship.
+          payload:
+            specversion: '1.0'
+            id: 3f1d2c3b-4a5e-4b7c-8d9e-0a1b2c3d4e04
+            source: /warehouse/outbound-shipping
+            type: com.warehouse.wms.outbound-shipping.outboundload.LoadClosed
+            subject: load-7f3a
+            time: '2026-11-06T15:41:00Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:outbound-shipping:events:LoadClosed:v1
+            data:
+              load_id: load-7f3a
+              site_id: SITE-1
+              door_code: D04
+              trailer_id: trl-91
+              package_count: 40
+              short_shipped_count: 1
+              closed_at: '2026-11-06T15:41:00Z'
+              version: 4
+
+    LoadReopened:
+      x-no-consumer-reason: "pending: ADR 0005 names yard-management as the integration consumer, but yard-management declares no such consumer and has no handler for it on develop."
+      name: LoadReopened
+      title: Load reopened
+      summary: A supervisor reopened a closed load for more loading.
+      description: |
+        `type` =
+        `com.warehouse.wms.outbound-shipping.outboundload.LoadReopened`;
+        subject and key = the load id. A SHIP_CONFIRMED load is never
+        reopened (`ErrLoadConfirmed`). yard-management reopens the door work
+        on it.
+      contentType: application/cloudevents+json
+      tags:
+        - name: outboundload
+      payload:
+        $ref: '#/components/schemas/LoadReopenedEvent'
+      examples:
+        - name: reopened
+          summary: Load-7f3a reopens for a late package.
+          payload:
+            specversion: '1.0'
+            id: 3f1d2c3b-4a5e-4b7c-8d9e-0a1b2c3d4e05
+            source: /warehouse/outbound-shipping
+            type: com.warehouse.wms.outbound-shipping.outboundload.LoadReopened
+            subject: load-7f3a
+            time: '2026-11-06T15:44:00Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:outbound-shipping:events:LoadReopened:v1
+            data:
+              load_id: load-7f3a
+              site_id: SITE-1
+              reopened_at: '2026-11-06T15:44:00Z'
+              version: 5
+
+    LoadCancelled:
+      x-no-consumer-reason: "No integration consumer by design: the ADR 0005 type catalogue lists this type as analytics only; the service's own projector folds it from the analytics stream."
+      name: LoadCancelled
+      title: Load cancelled
+      summary: A planned load was cancelled before loading.
+      description: |
+        `type` =
+        `com.warehouse.wms.outbound-shipping.outboundload.LoadCancelled`;
+        subject and key = the load id. Only a PLANNED load can be cancelled.
+      contentType: application/cloudevents+json
+      tags:
+        - name: outboundload
+      payload:
+        $ref: '#/components/schemas/LoadCancelledEvent'
+      examples:
+        - name: cancelled
+          summary: The cutoff was withdrawn before any package loaded.
+          payload:
+            specversion: '1.0'
+            id: 3f1d2c3b-4a5e-4b7c-8d9e-0a1b2c3d4e06
+            source: /warehouse/outbound-shipping
+            type: com.warehouse.wms.outbound-shipping.outboundload.LoadCancelled
+            subject: load-9c2b
+            time: '2026-11-06T12:10:00Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:outbound-shipping:events:LoadCancelled:v1
+            data:
+              load_id: load-9c2b
+              site_id: SITE-1
+              cancelled_at: '2026-11-06T12:10:00Z'
+              version: 2
+
+    ShipmentConfirmed:
+      name: ShipmentConfirmed
+      title: Shipment confirmed
+      summary: The trailer left with a closed load; the shipment is a fact.
+      description: |
+        `type` =
+        `com.warehouse.wms.outbound-shipping.outboundload.ShipmentConfirmed`;
+        subject and key = the load id. Raised on `TrailerDeparted` for a
+        CLOSED load (ADR 0002): the goods physically left. `orders` lists
+        every distinct `source_order_id` of the shipped packages (ADR 0003);
+        a package manifested without one is excluded. order-management marks
+        orders Shipped/PartiallyShipped (D7) and network-fulfillment joins
+        `localOrderId` (ADR 0004).
+      contentType: application/cloudevents+json
+      tags:
+        - name: outboundload
+      payload:
+        $ref: '#/components/schemas/ShipmentConfirmedEvent'
+      examples:
+        - name: confirmed
+          summary: Trailer trl-91 departs with load-7f3a, seal SL-4471, two orders.
+          payload:
+            specversion: '1.0'
+            id: 3f1d2c3b-4a5e-4b7c-8d9e-0a1b2c3d4e07
+            source: /warehouse/outbound-shipping
+            type: com.warehouse.wms.outbound-shipping.outboundload.ShipmentConfirmed
+            subject: load-7f3a
+            time: '2026-11-06T16:02:00Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:outbound-shipping:events:ShipmentConfirmed:v1
+            data:
+              load_id: load-7f3a
+              site_id: SITE-1
+              cpt_id: cpt-1600
+              carrier: STDOUT
+              trailer_id: trl-91
+              seal_number: SL-4471
+              departed_at: '2026-11-06T16:01:30Z'
+              orders:
+                - order_id: order-88421
+                - order_id: order-88422
+              version: 6
+
+    PackageStaged:
+      x-no-consumer-reason: "No integration consumer by design: the ADR 0005 type catalogue lists this type as analytics only; the service's own projector folds it from the analytics stream."
+      name: PackageStaged
+      title: Package staged
+      summary: A manifested package was staged at a Staging location.
+      description: |
+        `type` =
+        `com.warehouse.wms.outbound-shipping.shippingpackage.PackageStaged`;
+        subject and key = the package id. The location is a facility-layout
+        Staging location of the package's site.
+      contentType: application/cloudevents+json
+      tags:
+        - name: shippingpackage
+      payload:
+        $ref: '#/components/schemas/PackageStagedEvent'
+      examples:
+        - name: staged
+          summary: pkg-1029 stages at STG-D04-A.
+          payload:
+            specversion: '1.0'
+            id: 3f1d2c3b-4a5e-4b7c-8d9e-0a1b2c3d4e08
+            source: /warehouse/outbound-shipping
+            type: com.warehouse.wms.outbound-shipping.shippingpackage.PackageStaged
+            subject: pkg-1029
+            time: '2026-11-06T14:20:00Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:outbound-shipping:events:PackageStaged:v1
+            data:
+              package_id: pkg-1029
+              load_id: load-7f3a
+              site_id: SITE-1
+              staging_location: STG-D04-A
+              staged_at: '2026-11-06T14:20:00Z'
+              version: 2
+
+    PackageLoaded:
+      x-no-consumer-reason: "No integration consumer by design: the ADR 0005 type catalogue lists this type as analytics only; the service's own projector folds it from the analytics stream."
+      name: PackageLoaded
+      title: Package loaded
+      summary: A package was loaded onto its load through the load's door.
+      description: |
+        `type` =
+        `com.warehouse.wms.outbound-shipping.shippingpackage.PackageLoaded`;
+        subject and key = the package id.
+      contentType: application/cloudevents+json
+      tags:
+        - name: shippingpackage
+      payload:
+        $ref: '#/components/schemas/PackageLoadedEvent'
+      examples:
+        - name: loaded
+          summary: pkg-1029 loads through door D04 onto load-7f3a.
+          payload:
+            specversion: '1.0'
+            id: 3f1d2c3b-4a5e-4b7c-8d9e-0a1b2c3d4e09
+            source: /warehouse/outbound-shipping
+            type: com.warehouse.wms.outbound-shipping.shippingpackage.PackageLoaded
+            subject: pkg-1029
+            time: '2026-11-06T14:48:00Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:outbound-shipping:events:PackageLoaded:v1
+            data:
+              package_id: pkg-1029
+              load_id: load-7f3a
+              site_id: SITE-1
+              loaded_at: '2026-11-06T14:48:00Z'
+              version: 3
+
+    PackageUnloaded:
+      x-no-consumer-reason: "No integration consumer by design: the ADR 0005 type catalogue lists this type as analytics only; the service's own projector folds it from the analytics stream."
+      name: PackageUnloaded
+      title: Package unloaded
+      summary: A loaded package came back off the load before ship-confirm.
+      description: |
+        `type` =
+        `com.warehouse.wms.outbound-shipping.shippingpackage.PackageUnloaded`;
+        subject and key = the package id. `reason` is the operator's reason,
+        omitted when none was given. Impossible after ship-confirm
+        (`ErrAlreadyShipped`).
+      contentType: application/cloudevents+json
+      tags:
+        - name: shippingpackage
+      payload:
+        $ref: '#/components/schemas/PackageUnloadedEvent'
+      examples:
+        - name: unloaded
+          summary: pkg-1029 comes back off with a damaged carton.
+          payload:
+            specversion: '1.0'
+            id: 3f1d2c3b-4a5e-4b7c-8d9e-0a1b2c3d4e0a
+            source: /warehouse/outbound-shipping
+            type: com.warehouse.wms.outbound-shipping.shippingpackage.PackageUnloaded
+            subject: pkg-1029
+            time: '2026-11-06T15:00:00Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:outbound-shipping:events:PackageUnloaded:v1
+            data:
+              package_id: pkg-1029
+              load_id: load-7f3a
+              site_id: SITE-1
+              unloaded_at: '2026-11-06T15:00:00Z'
+              reason: damaged-carton
+              version: 4
+
+    PackageMissedLoad:
+      name: PackageMissedLoad
+      title: Package missed its load
+      summary: A package was not loaded by its cutoff or by departure.
+      description: |
+        `type` =
+        `com.warehouse.wms.outbound-shipping.shippingpackage.PackageMissedLoad`;
+        subject and key = the package id. Raised at most ONCE per package and
+        load (the flagged fact is remembered: a re-run sweep or a repeated
+        departure publishes nothing new). `source_order_id` is omitted when
+        the manifest carried none (ADR 0003). exception-management opens a
+        case; order-management re-promises.
+      contentType: application/cloudevents+json
+      tags:
+        - name: shippingpackage
+      payload:
+        $ref: '#/components/schemas/PackageMissedLoadEvent'
+      examples:
+        - name: missed
+          summary: The 16:00 cutoff passes with pkg-2055 still staged.
+          payload:
+            specversion: '1.0'
+            id: 3f1d2c3b-4a5e-4b7c-8d9e-0a1b2c3d4e0b
+            source: /warehouse/outbound-shipping
+            type: com.warehouse.wms.outbound-shipping.shippingpackage.PackageMissedLoad
+            subject: pkg-2055
+            time: '2026-11-06T16:00:00Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:outbound-shipping:events:PackageMissedLoad:v1
+            data:
+              package_id: pkg-2055
+              load_id: load-7f3a
+              site_id: SITE-1
+              source_order_id: order-88423
+              cutoff: '2026-11-06T16:00:00Z'
+              detected_at: '2026-11-06T16:00:00Z'
+              version: 2
+
+    BillOfLadingIssued:
+      x-no-consumer-reason: "No integration consumer by design: the ADR 0005 type catalogue lists this type as analytics only; the service's own projector folds it from the analytics stream."
+      name: BillOfLadingIssued
+      title: Bill of lading issued
+      summary: The shipping document of one confirmed load was issued.
+      description: |
+        `type` =
+        `com.warehouse.wms.outbound-shipping.billoflading.BillOfLadingIssued`;
+        subject and key = the BOL number. Issued exactly once per
+        SHIP_CONFIRMED load (`ErrBolAlreadyIssued`) with the seal the
+        departure carried (`ErrSealMissing` without one).
+      contentType: application/cloudevents+json
+      tags:
+        - name: billoflading
+      payload:
+        $ref: '#/components/schemas/BillOfLadingIssuedEvent'
+      examples:
+        - name: issued
+          summary: BOL for load-7f3a, 40 packages, 412.5 kg.
+          payload:
+            specversion: '1.0'
+            id: 3f1d2c3b-4a5e-4b7c-8d9e-0a1b2c3d4e0c
+            source: /warehouse/outbound-shipping
+            type: com.warehouse.wms.outbound-shipping.billoflading.BillOfLadingIssued
+            subject: BOL-2026-11-06-0042
+            time: '2026-11-06T16:02:01Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:outbound-shipping:events:BillOfLadingIssued:v1
+            data:
+              bol_number: BOL-2026-11-06-0042
+              load_id: load-7f3a
+              site_id: SITE-1
+              carrier: STDOUT
+              trailer_id: trl-91
+              seal_number: SL-4471
+              package_count: 40
+              total_weight_g: 412500
+              issued_at: '2026-11-06T16:02:01Z'
+              version: 1
+
+    BillOfLadingVoided:
+      x-no-consumer-reason: "No integration consumer by design: the ADR 0005 type catalogue lists this type as analytics only; the service's own projector folds it from the analytics stream."
+      name: BillOfLadingVoided
+      title: Bill of lading voided
+      summary: An issued bill of lading was voided.
+      description: |
+        `type` =
+        `com.warehouse.wms.outbound-shipping.billoflading.BillOfLadingVoided`;
+        subject and key = the BOL number. A supervisor decision (e.g. a
+        re-issued document); the shipment itself is not undone.
+      contentType: application/cloudevents+json
+      tags:
+        - name: billoflading
+      payload:
+        $ref: '#/components/schemas/BillOfLadingVoidedEvent'
+      examples:
+        - name: voided
+          summary: The carrier rejected the print; the document is voided for re-issue.
+          payload:
+            specversion: '1.0'
+            id: 3f1d2c3b-4a5e-4b7c-8d9e-0a1b2c3d4e0d
+            source: /warehouse/outbound-shipping
+            type: com.warehouse.wms.outbound-shipping.billoflading.BillOfLadingVoided
+            subject: BOL-2026-11-06-0042
+            time: '2026-11-06T16:30:00Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:outbound-shipping:events:BillOfLadingVoided:v1
+            data:
+              bol_number: BOL-2026-11-06-0042
+              load_id: load-7f3a
+              site_id: SITE-1
+              reason: reprint-for-carrier
+              voided_at: '2026-11-06T16:30:00Z'
+              version: 2
+
+    PackageManifested:
+      name: PackageManifested
+      title: PackageManifested (consumed)
+      summary: fulfillment-execution's package manifestation; plans the load and expects the package.
+      description: |
+        Producer contract (fulfillment-execution, `origin/develop`). The four
+        ship-correlation fields are ADDITIVE per ADR 0003, pinned from the
+        producer's wave-2 branch and optional (`omitempty`): `site_id` is
+        omitted today (no source in the chain yet), `source_order_id`,
+        `cpt` and `weight_g` flow once the producer stamps them. This
+        consumer tolerates both shapes and never parses `order_ref`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+      payload:
+        $ref: '#/components/schemas/PackageManifestedEvent'
+      examples:
+        - name: manifested
+          summary: pkg-1029 manifests with its order correlation.
+          payload:
+            specversion: '1.0'
+            id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+            source: /warehouse/fulfillment-execution
+            type: com.warehouse.wes.fulfillment-execution.package.PackageManifested
+            subject: pkg-1029
+            time: '2026-11-06T13:02:10Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:fulfillment-execution:events:PackageManifested:v1
+            data:
+              package_id: pkg-1029
+              order_ref: order-88421-line-1
+              source_order_id: order-88421
+              cpt: '2026-11-06T16:00:00Z'
+              weight_g: 10300
+
+    PackageDiverted:
+      name: PackageDiverted
+      title: PackageDiverted (consumed)
+      summary: fulfillment-execution diverted a package; an EXPECTED package becomes SHORT_SHIPPED (DIVERTED).
+      description: |
+        Producer contract (fulfillment-execution, `origin/develop`). The
+        DropDiverted policy: an EXPECTED package of an open load is
+        short-shipped with reason DIVERTED so the load can still close.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+      payload:
+        $ref: '#/components/schemas/PackageDivertedEvent'
+      examples:
+        - name: diverted
+          summary: pkg-2077 fails its weigh-check and is diverted.
+          payload:
+            specversion: '1.0'
+            id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4c
+            source: /warehouse/fulfillment-execution
+            type: com.warehouse.wes.fulfillment-execution.package.PackageDiverted
+            subject: pkg-2077
+            time: '2026-11-06T13:40:00Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:fulfillment-execution:events:PackageDiverted:v1
+            data:
+              package_id: pkg-2077
+
+    CPTScheduleChanged:
+      name: CPTScheduleChanged
+      title: CPTScheduleChanged (consumed)
+      summary: process-path-management's cutoff schedule; feeds the local CPT copy.
+      description: |
+        Producer contract (process-path-management, `origin/develop`). The
+        local copy keeps each cutoff's id, local time, days of week and ship
+        method — the (site, cpt, date, ship method) key a load is planned
+        for. Last writer wins per site.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+      payload:
+        $ref: '#/components/schemas/CPTScheduleChangedEvent'
+      examples:
+        - name: schedule
+          summary: SITE-1's schedule with one 16:00 ground cutoff.
+          payload:
+            specversion: '1.0'
+            id: 1d2e3f4a-5b6c-4d7e-8f9a-0b1c2d3e4f5a
+            source: /warehouse/process-path-management
+            type: com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged
+            subject: SITE-1
+            time: '2026-11-01T00:00:00Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:process-path-management:events:CPTScheduleChanged:v1
+            data:
+              site_id: SITE-1
+              timezone: America/Sao_Paulo
+              cutoffs:
+                - cpt_id: cpt-1600
+                  local_time: '13:00'
+                  days_of_week: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']
+                  ship_method: STDOUT-2DAY
+                  eligible_path_ids: ['PICK', 'PACK']
+
+    ZoneRegistered:
+      name: ZoneRegistered
+      title: ZoneRegistered (consumed)
+      summary: facility-layout zone registration; feeds the zone-to-site mapping.
+      description: |
+        Producer contract (facility-layout, `origin/develop`). A location
+        maps to a site via its `zoneId` through this copy — never by parsing
+        a location code (the site_key convention).
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+      payload:
+        $ref: '#/components/schemas/ZoneRegisteredEvent'
+      examples:
+        - name: zone
+          summary: Zone Z-D04 of site SITE-1.
+          payload:
+            specversion: '1.0'
+            id: 2a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6d
+            source: /warehouse/facility-layout
+            type: com.warehouse.wms.facility-layout.zone.ZoneRegistered
+            subject: Z-D04
+            time: '2026-10-01T00:00:00Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:facility-layout:events:ZoneRegistered:v1
+            data:
+              zoneId: Z-D04
+              siteCode: SITE-1
+              areaCode: A-OUT
+              zoneCode: D04
+              temperatureClass: Ambient
+              hazmat: false
+
+    LocationSlotRegistered:
+      name: LocationSlotRegistered
+      title: LocationSlotRegistered (consumed)
+      summary: facility-layout location registration; feeds the staging-location copy.
+      description: |
+        Producer contract (facility-layout, `origin/develop`). Only locations
+        whose `role` is Staging can hold a staged package
+        (`ErrNotStagingLocation`); `role` is absent on pre-role events and
+        treated as Storage. `zoneId` joins the zone-to-site copy.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+      payload:
+        $ref: '#/components/schemas/LocationSlotRegisteredEvent'
+      examples:
+        - name: stagingSlot
+          summary: Staging location STG-D04-A in zone Z-D04.
+          payload:
+            specversion: '1.0'
+            id: 2a3b4c5d-6e7f-4a8b-9c0d-1e2f3a4b5c6e
+            source: /warehouse/facility-layout
+            type: com.warehouse.wms.facility-layout.locationslot.LocationSlotRegistered
+            subject: STG-D04-A
+            time: '2026-10-01T00:00:00Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:facility-layout:events:LocationSlotRegistered:v1
+            data:
+              locationCode: STG-D04-A
+              aisleId: A-07
+              zoneId: Z-D04
+              locationType: FLOOR
+              role: Staging
+
+    DockAppointmentBooked:
+      name: DockAppointmentBooked
+      title: DockAppointmentBooked (consumed)
+      summary: dock-scheduling's appointment booking; an OUTBOUND appointment names the cpt and assigns the door.
+      description: |
+        PINNED from dock-scheduling's `origin/feature/service` (campaign
+        spike Q5) — its develop contract does not exist yet; re-pin before
+        fleet wiring. Only `direction=OUTBOUND` is acted on. `cpt_id` and
+        `carrier_scac` are nullable: an appointment without a cpt names no
+        load. `expected_seal_number` is nullable.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+      payload:
+        $ref: '#/components/schemas/DockAppointmentBookedEvent'
+      examples:
+        - name: outboundAppointment
+          summary: An OUTBOUND appointment at door D04 for the 16:00 cutoff.
+          payload:
+            specversion: '1.0'
+            id: 4b5c6d7e-8f9a-4b0c-1d2e-3f4a5b6c7d8e
+            source: /warehouse/dock-scheduling
+            type: com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentBooked
+            subject: appt-2211
+            time: '2026-11-06T09:00:00Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:dock-scheduling:events:DockAppointmentBooked:v1
+            data:
+              appointment_id: appt-2211
+              site_id: SITE-1
+              direction: OUTBOUND
+              door_code: D04
+              carrier: STDOUT
+              carrier_scac: STDOUT
+              cpt_id: cpt-1600
+              window_start: '2026-11-06T14:00:00Z'
+              window_end: '2026-11-06T16:00:00Z'
+              asn_numbers: []
+              shipment_refs: []
+              expected_seal_number: null
+              arrival_tolerance_minutes: 30
+              provenance: native
+              version: 1
+
+    TrailerDocked:
+      name: TrailerDocked
+      title: TrailerDocked (consumed, pinned)
+      summary: yard-management docked a trailer at the load's door; the trailer attaches to the load.
+      description: |
+        Pinned from yard-management's merged AsyncAPI
+        (`contracts/`). StartOnDock
+        policy: a docking at the load's assigned door attaches the trailer,
+        after which loading may start.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+      payload:
+        $ref: '#/components/schemas/TrailerDockedEvent'
+      examples:
+        - name: docked
+          summary: Trailer trl-91 docks at door D04.
+          payload:
+            specversion: '1.0'
+            id: 5c6d7e8f-9a0b-4c1d-2e3f-4a5b6c7d8e9f
+            source: /warehouse/yard-management
+            type: com.warehouse.wms.yard-management.trailer.TrailerDocked
+            subject: trl-91
+            time: '2026-11-06T14:00:00Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:yard-management:events:TrailerDocked:v1
+            data:
+              trailer_id: trl-91
+              site_id: SITE-1
+              door_code: D04
+              appointment_id: appt-2211
+              asn_numbers: []
+              visit_id: visit-551
+              docked_at: '2026-11-06T14:00:00Z'
+              version: 4
+
+    DoorWorkCompleted:
+      name: DoorWorkCompleted
+      title: DoorWorkCompleted (consumed, pinned)
+      summary: yard-management completed the door work; recorded, no state change in v1.
+      description: |
+        Pinned from yard-management's merged AsyncAPI. Consumed for the
+        load-adherence read model (door work finish vs cutoff). A CLOSED
+        load's door work completes on `LoadClosed` (wave 6.4, deferred).
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+      payload:
+        $ref: '#/components/schemas/DoorWorkCompletedEvent'
+      examples:
+        - name: doorWork
+          summary: Door work at D04 completes with a full trailer.
+          payload:
+            specversion: '1.0'
+            id: 6d7e8f9a-0b1c-4d2e-3f4a-5b6c7d8e9f0a
+            source: /warehouse/yard-management
+            type: com.warehouse.wms.yard-management.trailer.DoorWorkCompleted
+            subject: trl-91
+            time: '2026-11-06T15:50:00Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:yard-management:events:DoorWorkCompleted:v1
+            data:
+              trailer_id: trl-91
+              site_id: SITE-1
+              door_code: D04
+              appointment_id: appt-2211
+              completed_at: '2026-11-06T15:50:00Z'
+              load_state: FULL
+              version: 7
+
+    TrailerDeparted:
+      name: TrailerDeparted
+      title: TrailerDeparted (consumed, pinned)
+      summary: The trailer physically left; the seal number and departure trigger ship-confirm (ADR 0002).
+      description: |
+        Pinned from yard-management's merged AsyncAPI. ConfirmOnDeparture
+        policy: a departure for a CLOSED load confirms the shipment (seal
+        from this event) and issues the BOL. FlagDepartureWithoutClose: a
+        departure for a LOADING load NEVER confirms — every package not
+        loaded raises `PackageMissedLoad` once and the load is left for a
+        supervisor. A re-delivered departure confirms nothing twice.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+      payload:
+        $ref: '#/components/schemas/TrailerDepartedEvent'
+      examples:
+        - name: departed
+          summary: Trailer trl-91 departs sealed.
+          payload:
+            specversion: '1.0'
+            id: 7e8f9a0b-1c2d-4e3f-4a5b-6c7d8e9f0a1b
+            source: /warehouse/yard-management
+            type: com.warehouse.wms.yard-management.trailer.TrailerDeparted
+            subject: trl-91
+            time: '2026-11-06T16:01:30Z'
+            datacontenttype: application/json
+            dataschema: urn:warehouse:yard-management:events:TrailerDeparted:v1
+            data:
+              trailer_id: trl-91
+              site_id: SITE-1
+              visit_id: visit-551
+              departed_at: '2026-11-06T16:01:30Z'
+              dwell_minutes: 121
+              load_state: FULL
+              seal_number: SL-4471
+              version: 9
+
+  schemas:
+    CloudEventEnvelope:
+      type: object
+      required: [specversion, id, source, type, subject, time, datacontenttype, dataschema, data]
+      properties:
+        specversion:
+          type: string
+          const: '1.0'
+        id:
+          type: string
+          description: UUID minted once per occurrence and persisted with the outbox row; consumers dedupe on it.
+        source:
+          type: string
+          const: /warehouse/outbound-shipping
+        type:
+          type: string
+          description: com.warehouse.wms.outbound-shipping.<entity>.<EventName>.
+        subject:
+          type: string
+          description: Aggregate root id; also the Kafka partition key.
+        time:
+          type: string
+          format: date-time
+        datacontenttype:
+          type: string
+          const: application/json
+        dataschema:
+          type: string
+          description: urn:warehouse:outbound-shipping:<events|analytics>:<EventName>:v1.
+
+    LoadPlannedEvent:
+      allOf:
+        - $ref: '#/components/schemas/CloudEventEnvelope'
+        - type: object
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wms.outbound-shipping.outboundload.LoadPlanned
+            dataschema:
+              type: string
+              const: urn:warehouse:outbound-shipping:events:LoadPlanned:v1
+            data:
+              type: object
+              required: [load_id, site_id, cpt_id, operating_date, ship_method, cutoff, version]
+              properties:
+                load_id: {type: string}
+                site_id: {type: string}
+                cpt_id: {type: string}
+                operating_date: {type: string, format: date}
+                ship_method: {type: string}
+                cutoff: {type: string, format: date-time}
+                version: {type: integer, minimum: 1}
+
+    LoadDoorAssignedEvent:
+      allOf:
+        - $ref: '#/components/schemas/CloudEventEnvelope'
+        - type: object
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wms.outbound-shipping.outboundload.LoadDoorAssigned
+            dataschema:
+              type: string
+              const: urn:warehouse:outbound-shipping:events:LoadDoorAssigned:v1
+            data:
+              type: object
+              required: [load_id, site_id, door_code, appointment_id, version]
+              properties:
+                load_id: {type: string}
+                site_id: {type: string}
+                door_code: {type: string}
+                appointment_id: {type: string}
+                version: {type: integer, minimum: 1}
+
+    LoadingStartedEvent:
+      allOf:
+        - $ref: '#/components/schemas/CloudEventEnvelope'
+        - type: object
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wms.outbound-shipping.outboundload.LoadingStarted
+            dataschema:
+              type: string
+              const: urn:warehouse:outbound-shipping:events:LoadingStarted:v1
+            data:
+              type: object
+              required: [load_id, site_id, door_code, trailer_id, started_at, version]
+              properties:
+                load_id: {type: string}
+                site_id: {type: string}
+                door_code: {type: string}
+                trailer_id: {type: string}
+                started_at: {type: string, format: date-time}
+                version: {type: integer, minimum: 1}
+
+    LoadClosedEvent:
+      allOf:
+        - $ref: '#/components/schemas/CloudEventEnvelope'
+        - type: object
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wms.outbound-shipping.outboundload.LoadClosed
+            dataschema:
+              type: string
+              const: urn:warehouse:outbound-shipping:events:LoadClosed:v1
+            data:
+              type: object
+              required: [load_id, site_id, door_code, trailer_id, package_count, short_shipped_count, closed_at, version]
+              properties:
+                load_id: {type: string}
+                site_id: {type: string}
+                door_code: {type: string}
+                trailer_id: {type: string}
+                package_count: {type: integer, minimum: 0}
+                short_shipped_count: {type: integer, minimum: 0}
+                closed_at: {type: string, format: date-time}
+                version: {type: integer, minimum: 1}
+
+    LoadReopenedEvent:
+      allOf:
+        - $ref: '#/components/schemas/CloudEventEnvelope'
+        - type: object
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wms.outbound-shipping.outboundload.LoadReopened
+            dataschema:
+              type: string
+              const: urn:warehouse:outbound-shipping:events:LoadReopened:v1
+            data:
+              type: object
+              required: [load_id, site_id, reopened_at, version]
+              properties:
+                load_id: {type: string}
+                site_id: {type: string}
+                reopened_at: {type: string, format: date-time}
+                version: {type: integer, minimum: 1}
+
+    LoadCancelledEvent:
+      allOf:
+        - $ref: '#/components/schemas/CloudEventEnvelope'
+        - type: object
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wms.outbound-shipping.outboundload.LoadCancelled
+            dataschema:
+              type: string
+              const: urn:warehouse:outbound-shipping:events:LoadCancelled:v1
+            data:
+              type: object
+              required: [load_id, site_id, cancelled_at, version]
+              properties:
+                load_id: {type: string}
+                site_id: {type: string}
+                cancelled_at: {type: string, format: date-time}
+                version: {type: integer, minimum: 1}
+
+    ShipmentConfirmedEvent:
+      allOf:
+        - $ref: '#/components/schemas/CloudEventEnvelope'
+        - type: object
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wms.outbound-shipping.outboundload.ShipmentConfirmed
+            dataschema:
+              type: string
+              const: urn:warehouse:outbound-shipping:events:ShipmentConfirmed:v1
+            data:
+              type: object
+              required: [load_id, site_id, cpt_id, carrier, trailer_id, seal_number, departed_at, orders, version]
+              properties:
+                load_id: {type: string}
+                site_id: {type: string}
+                cpt_id: {type: string}
+                carrier: {type: string}
+                trailer_id: {type: string}
+                seal_number: {type: string}
+                departed_at: {type: string, format: date-time}
+                orders:
+                  type: array
+                  description: Distinct source_order_id of the shipped packages (ADR 0003); a package manifested without one is excluded.
+                  items:
+                    type: object
+                    required: [order_id]
+                    properties:
+                      order_id: {type: string}
+                version: {type: integer, minimum: 1}
+
+    PackageStagedEvent:
+      allOf:
+        - $ref: '#/components/schemas/CloudEventEnvelope'
+        - type: object
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wms.outbound-shipping.shippingpackage.PackageStaged
+            dataschema:
+              type: string
+              const: urn:warehouse:outbound-shipping:events:PackageStaged:v1
+            data:
+              type: object
+              required: [package_id, load_id, site_id, staging_location, staged_at, version]
+              properties:
+                package_id: {type: string}
+                load_id: {type: string}
+                site_id: {type: string}
+                staging_location: {type: string}
+                staged_at: {type: string, format: date-time}
+                version: {type: integer, minimum: 1}
+
+    PackageLoadedEvent:
+      allOf:
+        - $ref: '#/components/schemas/CloudEventEnvelope'
+        - type: object
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wms.outbound-shipping.shippingpackage.PackageLoaded
+            dataschema:
+              type: string
+              const: urn:warehouse:outbound-shipping:events:PackageLoaded:v1
+            data:
+              type: object
+              required: [package_id, load_id, site_id, loaded_at, version]
+              properties:
+                package_id: {type: string}
+                load_id: {type: string}
+                site_id: {type: string}
+                loaded_at: {type: string, format: date-time}
+                version: {type: integer, minimum: 1}
+
+    PackageUnloadedEvent:
+      allOf:
+        - $ref: '#/components/schemas/CloudEventEnvelope'
+        - type: object
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wms.outbound-shipping.shippingpackage.PackageUnloaded
+            dataschema:
+              type: string
+              const: urn:warehouse:outbound-shipping:events:PackageUnloaded:v1
+            data:
+              type: object
+              required: [package_id, load_id, site_id, unloaded_at, version]
+              properties:
+                package_id: {type: string}
+                load_id: {type: string}
+                site_id: {type: string}
+                unloaded_at: {type: string, format: date-time}
+                reason:
+                  type: string
+                  description: Operator's reason, omitted when none was given.
+                version: {type: integer, minimum: 1}
+
+    PackageMissedLoadEvent:
+      allOf:
+        - $ref: '#/components/schemas/CloudEventEnvelope'
+        - type: object
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wms.outbound-shipping.shippingpackage.PackageMissedLoad
+            dataschema:
+              type: string
+              const: urn:warehouse:outbound-shipping:events:PackageMissedLoad:v1
+            data:
+              type: object
+              required: [package_id, load_id, site_id, cutoff, detected_at, version]
+              properties:
+                package_id: {type: string}
+                load_id: {type: string}
+                site_id: {type: string}
+                source_order_id:
+                  type: string
+                  description: Omitted when the manifest carried none (ADR 0003).
+                cutoff: {type: string, format: date-time}
+                detected_at: {type: string, format: date-time}
+                version: {type: integer, minimum: 1}
+
+    BillOfLadingIssuedEvent:
+      allOf:
+        - $ref: '#/components/schemas/CloudEventEnvelope'
+        - type: object
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wms.outbound-shipping.billoflading.BillOfLadingIssued
+            dataschema:
+              type: string
+              const: urn:warehouse:outbound-shipping:events:BillOfLadingIssued:v1
+            data:
+              type: object
+              required: [bol_number, load_id, site_id, carrier, trailer_id, seal_number, package_count, total_weight_g, issued_at, version]
+              properties:
+                bol_number: {type: string}
+                load_id: {type: string}
+                site_id: {type: string}
+                carrier: {type: string}
+                trailer_id: {type: string}
+                seal_number: {type: string}
+                package_count: {type: integer, minimum: 1}
+                total_weight_g:
+                  type: number
+                  minimum: 0
+                  description: Sum of the shipped packages' weight_g; 0 when none carried one.
+                issued_at: {type: string, format: date-time}
+                version: {type: integer, minimum: 1}
+
+    BillOfLadingVoidedEvent:
+      allOf:
+        - $ref: '#/components/schemas/CloudEventEnvelope'
+        - type: object
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wms.outbound-shipping.billoflading.BillOfLadingVoided
+            dataschema:
+              type: string
+              const: urn:warehouse:outbound-shipping:events:BillOfLadingVoided:v1
+            data:
+              type: object
+              required: [bol_number, load_id, site_id, reason, voided_at, version]
+              properties:
+                bol_number: {type: string}
+                load_id: {type: string}
+                site_id: {type: string}
+                reason: {type: string}
+                voided_at: {type: string, format: date-time}
+                version: {type: integer, minimum: 1}
+
+    PackageManifestedEvent:
+      type: object
+      required: [specversion, id, source, type, datacontenttype, data]
+      properties:
+        specversion: {type: string, const: '1.0'}
+        id: {type: string}
+        source: {type: string, const: /warehouse/fulfillment-execution}
+        type:
+          type: string
+          const: com.warehouse.wes.fulfillment-execution.package.PackageManifested
+        subject: {type: string}
+        time: {type: string, format: date-time}
+        datacontenttype: {type: string}
+        dataschema: {type: string}
+        data:
+          type: object
+          required: [package_id, order_ref]
+          properties:
+            package_id: {type: string}
+            order_ref:
+              type: string
+              description: Stored verbatim, never parsed (ADR 0003).
+            site_id:
+              type: string
+              description: Additive (ADR 0003); omitted today — no source in the chain yet.
+            source_order_id:
+              type: string
+              description: Additive (ADR 0003); the order-management OrderId.
+            cpt:
+              type: string
+              description: Additive (ADR 0003); RFC 3339 instant of the owning cutoff.
+            weight_g:
+              type: number
+              description: Additive (ADR 0003); actual SLAM weight in grams.
+
+    PackageDivertedEvent:
+      type: object
+      required: [specversion, id, source, type, datacontenttype, data]
+      properties:
+        specversion: {type: string, const: '1.0'}
+        id: {type: string}
+        source: {type: string, const: /warehouse/fulfillment-execution}
+        type:
+          type: string
+          const: com.warehouse.wes.fulfillment-execution.package.PackageDiverted
+        subject: {type: string}
+        time: {type: string, format: date-time}
+        datacontenttype: {type: string}
+        dataschema: {type: string}
+        data:
+          type: object
+          required: [package_id]
+          properties:
+            package_id: {type: string}
+
+    CPTScheduleChangedEvent:
+      type: object
+      required: [specversion, id, source, type, datacontenttype, data]
+      properties:
+        specversion: {type: string, const: '1.0'}
+        id: {type: string}
+        source: {type: string, const: /warehouse/process-path-management}
+        type:
+          type: string
+          const: com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged
+        subject: {type: string}
+        time: {type: string, format: date-time}
+        datacontenttype: {type: string}
+        dataschema: {type: string}
+        data:
+          type: object
+          required: [site_id, timezone, cutoffs]
+          properties:
+            site_id: {type: string}
+            timezone: {type: string}
+            cutoffs:
+              type: array
+              items:
+                type: object
+                required: [cpt_id, local_time, days_of_week, ship_method]
+                properties:
+                  cpt_id: {type: string}
+                  local_time: {type: string}
+                  days_of_week:
+                    type: array
+                    items: {type: string}
+                  ship_method: {type: string}
+                  eligible_path_ids:
+                    type: array
+                    items: {type: string}
+
+    ZoneRegisteredEvent:
+      type: object
+      required: [specversion, id, source, type, datacontenttype, data]
+      properties:
+        specversion: {type: string, const: '1.0'}
+        id: {type: string}
+        source: {type: string, const: /warehouse/facility-layout}
+        type:
+          type: string
+          const: com.warehouse.wms.facility-layout.zone.ZoneRegistered
+        subject: {type: string}
+        time: {type: string, format: date-time}
+        datacontenttype: {type: string}
+        dataschema: {type: string}
+        data:
+          type: object
+          required: [zoneId, siteCode, zoneCode]
+          properties:
+            zoneId: {type: string}
+            siteCode: {type: string}
+            areaCode: {type: string}
+            zoneCode: {type: string}
+            temperatureClass: {type: string}
+            hazmat: {type: boolean}
+
+    LocationSlotRegisteredEvent:
+      type: object
+      required: [specversion, id, source, type, datacontenttype, data]
+      properties:
+        specversion: {type: string, const: '1.0'}
+        id: {type: string}
+        source: {type: string, const: /warehouse/facility-layout}
+        type:
+          type: string
+          const: com.warehouse.wms.facility-layout.locationslot.LocationSlotRegistered
+        subject: {type: string}
+        time: {type: string, format: date-time}
+        datacontenttype: {type: string}
+        dataschema: {type: string}
+        data:
+          type: object
+          required: [locationCode, zoneId, locationType, role]
+          properties:
+            locationCode: {type: string}
+            aisleId: {type: string}
+            zoneId: {type: string}
+            locationType: {type: string}
+            role:
+              type: string
+              description: LocationRole (ADR-0016 of the producer); absent on pre-role events, treated as Storage.
+            dockFlow: {type: string}
+
+    DockAppointmentBookedEvent:
+      type: object
+      required: [specversion, id, source, type, datacontenttype, data]
+      properties:
+        specversion: {type: string, const: '1.0'}
+        id: {type: string}
+        source: {type: string, const: /warehouse/dock-scheduling}
+        type:
+          type: string
+          const: com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentBooked
+        subject: {type: string}
+        time: {type: string, format: date-time}
+        datacontenttype: {type: string}
+        dataschema: {type: string}
+        data:
+          type: object
+          required: [appointment_id, site_id, direction, door_code, carrier, version]
+          properties:
+            appointment_id: {type: string}
+            site_id: {type: string}
+            direction:
+              type: string
+              enum: [INBOUND, OUTBOUND]
+            door_code: {type: string}
+            carrier: {type: string}
+            carrier_scac:
+              type: [string, 'null']
+            cpt_id:
+              type: [string, 'null']
+              description: Nullable; an appointment without a cpt names no load.
+            window_start: {type: string, format: date-time}
+            window_end: {type: string, format: date-time}
+            asn_numbers:
+              type: array
+              items: {type: string}
+            shipment_refs:
+              type: array
+              items: {type: string}
+            expected_seal_number:
+              type: [string, 'null']
+            arrival_tolerance_minutes: {type: integer}
+            provenance:
+              type: string
+              enum: [native, legacy-import]
+            version: {type: integer}
+
+    TrailerDockedEvent:
+      type: object
+      required: [specversion, id, source, type, datacontenttype, data]
+      properties:
+        specversion: {type: string, const: '1.0'}
+        id: {type: string}
+        source: {type: string, const: /warehouse/yard-management}
+        type:
+          type: string
+          const: com.warehouse.wms.yard-management.trailer.TrailerDocked
+        subject: {type: string}
+        time: {type: string, format: date-time}
+        datacontenttype: {type: string}
+        dataschema: {type: string}
+        data:
+          type: object
+          required: [trailer_id, site_id, door_code, docked_at, version]
+          properties:
+            trailer_id: {type: string}
+            site_id: {type: string}
+            door_code: {type: string}
+            appointment_id: {type: string}
+            asn_numbers:
+              type: array
+              items: {type: string}
+            visit_id: {type: string}
+            docked_at: {type: string, format: date-time}
+            version: {type: integer}
+
+    DoorWorkCompletedEvent:
+      type: object
+      required: [specversion, id, source, type, datacontenttype, data]
+      properties:
+        specversion: {type: string, const: '1.0'}
+        id: {type: string}
+        source: {type: string, const: /warehouse/yard-management}
+        type:
+          type: string
+          const: com.warehouse.wms.yard-management.trailer.DoorWorkCompleted
+        subject: {type: string}
+        time: {type: string, format: date-time}
+        datacontenttype: {type: string}
+        dataschema: {type: string}
+        data:
+          type: object
+          required: [trailer_id, site_id, door_code, completed_at, version]
+          properties:
+            trailer_id: {type: string}
+            site_id: {type: string}
+            door_code: {type: string}
+            appointment_id: {type: string}
+            completed_at: {type: string, format: date-time}
+            load_state: {type: string}
+            version: {type: integer}
+
+    TrailerDepartedEvent:
+      type: object
+      required: [specversion, id, source, type, datacontenttype, data]
+      properties:
+        specversion: {type: string, const: '1.0'}
+        id: {type: string}
+        source: {type: string, const: /warehouse/yard-management}
+        type:
+          type: string
+          const: com.warehouse.wms.yard-management.trailer.TrailerDeparted
+        subject: {type: string}
+        time: {type: string, format: date-time}
+        datacontenttype: {type: string}
+        dataschema: {type: string}
+        data:
+          type: object
+          required: [trailer_id, site_id, departed_at, version]
+          properties:
+            trailer_id: {type: string}
+            site_id: {type: string}
+            visit_id: {type: string}
+            departed_at: {type: string, format: date-time}
+            dwell_minutes: {type: integer}
+            load_state: {type: string}
+            seal_number:
+              type: string
+              description: The seal yard-management recorded; required to issue the BOL (ErrSealMissing without it).
+            version: {type: integer}

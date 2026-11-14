@@ -1,0 +1,7 @@
+{
+  "type": "https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-reused",
+  "title": "Idempotency-Key was already used with a different request",
+  "status": 409,
+  "detail": "The Idempotency-Key header on this request was already used with a different method, path or body. Use a new Idempotency-Key for a genuinely different request.",
+  "instance": "/reservations"
+}

@@ -1,0 +1,729 @@
+asyncapi: 2.6.0
+
+info:
+  title: product-master Domain Events
+  version: "1.1.0"
+  contact:
+    name: product-master maintainers
+    url: https://github.com/IQVO/product-master
+    email: product-master@iqvo.example.com
+  license:
+    name: UNLICENSED
+  description: |
+    Event catalog for the **product-master** bounded context (WMS subdomain):
+    SKU-level product master data, i.e. handling classification, the
+    physical profile and the packaging hierarchy with GS1 GTINs (ADR 0001,
+    ADR 0002, ADR 0011).
+
+    **Published.** The `Product` aggregate raises eight events, published to
+    `warehouse.product-master.events` through a **transactional outbox**: the
+    product row and its already-encoded events are written in ONE database
+    transaction and a relay drains them to Kafka (at-least-once; the CloudEvents
+    `id` is stored with the outbox row, so a retry republishes the same `id`).
+    A change that alters nothing raises no event.
+
+    **Packaging hierarchy (ADR 0011).** Three events carry the pack levels
+    (`EACH | INNER | CASE | PALLET`) of a SKU. They are additive and
+    integration-only (NOT written to the analytics stream). A GTIN is always
+    the 14-digit zero-left-padded string. Eaches are the ledger unit: `qty_of_child`
+    and `units_per_pack` are the only pack quantities, a bare quantity never
+    changes meaning. `units_per_pack` is the direct factor to eaches. Once a
+    level is active its quantities never change: a new content quantity is a
+    new GTIN at that level (declaring it end-dates the old level with a
+    `ProductPackLevelRetired`, reason `superseded`, in the same transaction,
+    one `version` apart). An end-dated level is kept: resolve a GTIN of an
+    in-flight ASN from your local copy, which must keep retired levels.
+    Dates and timestamps are RFC 3339 UTC.
+
+    **Local copies, not lookups.** Sibling contexts (inventory-storage,
+    order-management, wes-work-planning, fulfillment-execution) keep a local
+    copy keyed by SKU. Every payload carries the aggregate `version` after the
+    change; apply a message only when its `version` is greater than the stored
+    one. Payloads are full-state per concern (classification, physical profile),
+    so a consumer overwrites, it never merges.
+
+    **Analytics (ADR 0006).** The same five events are ALSO written, in the
+    same transaction, to `warehouse.product-master.analytics` with the same
+    `type` and the same `id` per occurrence, `dataschema`
+    `urn:warehouse:product-master:analytics:<EventName>:v1` and payloads equal
+    to the integration payloads. Only this service's `product-projector`
+    consumes it; it is not an integration contract.
+
+    **Envelope (mandatory).** CloudEvents 1.0, structured content mode, Kafka
+    header `content-type: application/cloudevents+json; charset=UTF-8`.
+    Optional W3C trace-context headers (`traceparent`, and `tracestate` /
+    `baggage` when present) carry the trace of the request that wrote the
+    outbox row (ADR 0009); consumers may extract them, and must not require
+    them.
+    `specversion`, `id`, `source` (`/warehouse/product-master`), `type`,
+    `subject` (the SKU), `time`, `datacontenttype` (`application/json`) and
+    `dataschema` (`urn:warehouse:product-master:events:<EventName>:v1`) are all
+    required. Kafka key = the SKU. Type =
+    `com.warehouse.wms.product-master.product.<EventName>`. A breaking payload
+    change is a new `.v2` type, never a mutation.
+
+servers:
+  production:
+    url: "{brokers}"
+    protocol: kafka
+    description: Fleet-shared Kafka broker (host supplied by the deployment environment).
+    variables:
+      brokers:
+        default: "kafka.warehouse-systems.internal:9092"
+
+defaultContentType: application/cloudevents+json
+
+tags:
+  - name: product-master
+    description: The product-master bounded context (WMS subdomain).
+  - name: product
+    description: Events raised by the Product aggregate.
+  - name: analytics
+    description: This service's own analytics stream, consumed only by its projector (ADR 0006).
+
+channels:
+  warehouse.product-master.events:
+    description: |
+      This service's integration topic. Written by the outbox relay; key = SKU;
+      every message carries the CloudEvents content-type header (plus the
+      optional W3C `traceparent` of the writing request). Dispatch on the
+      full `type`, ignore unknown types, dedupe on `id`, apply by `version`.
+    subscribe:
+      operationId: receiveProductEvents
+      summary: Receive Product events.
+      description: |
+        Subscribe to the product master data stream. Route on the full `type`
+        (`com.warehouse.wms.product-master.product.<EventName>`).
+      tags:
+        - name: product
+      message:
+        oneOf:
+          - $ref: "#/components/messages/ProductRegistered"
+          - $ref: "#/components/messages/ProductDescriptionChanged"
+          - $ref: "#/components/messages/ProductClassified"
+          - $ref: "#/components/messages/ProductDimensionsDeclared"
+          - $ref: "#/components/messages/ProductMeasured"
+          - $ref: "#/components/messages/ProductPackLevelDeclared"
+          - $ref: "#/components/messages/ProductPackLevelRetired"
+          - $ref: "#/components/messages/ProductPackLevelMeasured"
+
+  warehouse.product-master.analytics:
+    description: |
+      This service's analytics topic (`AnalyticsTopic` in
+      `internal/adapters/outbound/kafka/analytics_encoder.go`; ADR 0006).
+      Written by the SAME outbox relay, from rows inserted in the same
+      transaction as the integration rows (one CloudEvents `id` per occurrence
+      on both topics); key = SKU. Consumed ONLY by this service's
+      `product-projector` under a fixed consumer group read from env
+      `ANALYTICS_CONSUMER_GROUP` (at-least-once; the offset is committed after
+      the projection and the dedupe mark committed together in the analytical
+      database). The projector dedupes on `id`, ignores unknown types, skips
+      (with a rate-limited WARN) anything that is not CloudEvents 1.0, and
+      dead-letters a known type with an unusable payload to
+      `warehouse.product-master.analytics.dlq` (raw bytes plus `x-dlq-*`
+      headers). Not an integration contract: other contexts consume
+      `warehouse.product-master.events`.
+    subscribe:
+      operationId: receiveProductAnalyticsEvents
+      summary: Receive the Product analytics events.
+      description: |
+        Route on the full `type`; the payloads equal the integration payloads
+        (no analytics-only fields in v1). `dataschema` is
+        `urn:warehouse:product-master:analytics:<EventName>:v1`.
+      tags:
+        - name: analytics
+      message:
+        oneOf:
+          - $ref: "#/components/messages/ProductRegisteredAnalytics"
+          - $ref: "#/components/messages/ProductDescriptionChangedAnalytics"
+          - $ref: "#/components/messages/ProductClassifiedAnalytics"
+          - $ref: "#/components/messages/ProductDimensionsDeclaredAnalytics"
+          - $ref: "#/components/messages/ProductMeasuredAnalytics"
+
+components:
+  messages:
+    ProductRegistered:
+      name: ProductRegistered
+      title: Product registered
+      summary: A SKU was registered as a product.
+      description: "`type` = `com.warehouse.wms.product-master.product.ProductRegistered`; subject and key = the SKU."
+      contentType: application/cloudevents+json
+      tags:
+        - name: product
+      payload:
+        $ref: "#/components/schemas/ProductRegisteredEvent"
+      examples:
+        - name: registered
+          summary: SKU-1 registered.
+          payload:
+            specversion: "1.0"
+            id: "1b0c9a4e-2f7d-4a63-9d1e-5a7c3e2b9f10"
+            source: "/warehouse/product-master"
+            type: "com.warehouse.wms.product-master.product.ProductRegistered"
+            subject: "SKU-1"
+            time: "2026-10-06T21:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:product-master:events:ProductRegistered:v1"
+            data:
+              sku: "SKU-1"
+              description: "Lithium battery pack 12V"
+              version: 1
+
+    ProductDescriptionChanged:
+      x-no-consumer-reason: "Published Language fact (product description); consumed on demand"
+      name: ProductDescriptionChanged
+      title: Product description changed
+      summary: A registered product's description changed.
+      description: "`type` = `com.warehouse.wms.product-master.product.ProductDescriptionChanged`; subject and key = the SKU."
+      contentType: application/cloudevents+json
+      tags:
+        - name: product
+      payload:
+        $ref: "#/components/schemas/ProductDescriptionChangedEvent"
+      examples:
+        - name: described
+          summary: SKU-1's description changed.
+          payload:
+            specversion: "1.0"
+            id: "8d3f2c1a-6b5e-4f7a-9c0d-1e2f3a4b5c6d"
+            source: "/warehouse/product-master"
+            type: "com.warehouse.wms.product-master.product.ProductDescriptionChanged"
+            subject: "SKU-1"
+            time: "2026-10-06T21:01:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:product-master:events:ProductDescriptionChanged:v1"
+            data:
+              sku: "SKU-1"
+              description: "Lithium battery pack 12V, 7Ah"
+              version: 2
+
+    ProductClassified:
+      name: ProductClassified
+      title: Product classified
+      summary: A product's handling classification was set or replaced.
+      description: |
+        `type` = `com.warehouse.wms.product-master.product.ProductClassified`;
+        subject and key = the SKU. Full-state replacement of the
+        classification. `sku`, `handling_tags`, `temperature_class` and
+        `dot_hazard_class` keep the field names of inventory-storage's v1
+        payload (ADR 0004). Optional fields are omitted when unset.
+      contentType: application/cloudevents+json
+      tags:
+        - name: product
+      payload:
+        $ref: "#/components/schemas/ProductClassifiedEvent"
+      examples:
+        - name: hazmatFrozen
+          summary: SKU-1 classified Hazmat + TemperatureSensitive (Frozen), DOT class 3.
+          payload:
+            specversion: "1.0"
+            id: "0f6d8a2b-3c4e-4d5f-8a9b-7c6d5e4f3a2b"
+            source: "/warehouse/product-master"
+            type: "com.warehouse.wms.product-master.product.ProductClassified"
+            subject: "SKU-1"
+            time: "2026-10-06T21:02:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:product-master:events:ProductClassified:v1"
+            data:
+              sku: "SKU-1"
+              handling_tags: ["Hazmat", "TemperatureSensitive"]
+              temperature_class: "Frozen"
+              dot_hazard_class: 3
+              classification_source: "native"
+              version: 3
+
+    ProductDimensionsDeclared:
+      name: ProductDimensionsDeclared
+      title: Product dimensions declared
+      summary: Declared unit dimensions and weight were set or replaced.
+      description: |
+        `type` = `com.warehouse.wms.product-master.product.ProductDimensionsDeclared`;
+        subject and key = the SKU. Carries the FULL physical profile after the
+        change (ADR 0002); act on `effective`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: product
+      payload:
+        $ref: "#/components/schemas/PhysicalProfileEvent"
+      examples:
+        - name: declared
+          summary: SKU-1 declared at 200x120x80 mm, 1500 g.
+          payload:
+            specversion: "1.0"
+            id: "5a4b3c2d-1e0f-4a9b-8c7d-6e5f4a3b2c1d"
+            source: "/warehouse/product-master"
+            type: "com.warehouse.wms.product-master.product.ProductDimensionsDeclared"
+            subject: "SKU-1"
+            time: "2026-10-06T21:03:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:product-master:events:ProductDimensionsDeclared:v1"
+            data:
+              sku: "SKU-1"
+              declared: { length_mm: 200, width_mm: 120, height_mm: 80, weight_g: 1500, volume_mm3: 1920000 }
+              effective: { length_mm: 200, width_mm: 120, height_mm: 80, weight_g: 1500, volume_mm3: 1920000 }
+              effective_source: "declared"
+              discrepancy: false
+              version: 4
+
+    ProductMeasured:
+      name: ProductMeasured
+      title: Product measured
+      summary: A measurement of one unit was recorded and is now effective.
+      description: |
+        `type` = `com.warehouse.wms.product-master.product.ProductMeasured`;
+        subject and key = the SKU. Carries the FULL physical profile after the
+        change (ADR 0002); act on `effective`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: product
+      payload:
+        $ref: "#/components/schemas/PhysicalProfileEvent"
+      examples:
+        - name: measuredWithDiscrepancy
+          summary: SKU-1 measured heavier than declared (more than 10 %).
+          payload:
+            specversion: "1.0"
+            id: "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b"
+            source: "/warehouse/product-master"
+            type: "com.warehouse.wms.product-master.product.ProductMeasured"
+            subject: "SKU-1"
+            time: "2026-10-06T21:04:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:product-master:events:ProductMeasured:v1"
+            data:
+              sku: "SKU-1"
+              declared: { length_mm: 200, width_mm: 120, height_mm: 80, weight_g: 1500, volume_mm3: 1920000 }
+              measured: { length_mm: 205, width_mm: 121, height_mm: 82, weight_g: 1720, volume_mm3: 2034010, measured_at: "2026-10-06T14:05:00Z", device_id: "CUBISCAN-03" }
+              effective: { length_mm: 205, width_mm: 121, height_mm: 82, weight_g: 1720, volume_mm3: 2034010 }
+              effective_source: "measured"
+              discrepancy: true
+              version: 5
+
+    ProductPackLevelDeclared:
+      name: ProductPackLevelDeclared
+      title: Product pack level declared
+      summary: A pack level (EACH, INNER, CASE or PALLET) of a SKU was declared, or one of its mutable attributes changed.
+      description: |
+        `type` = `com.warehouse.wms.product-master.product.ProductPackLevelDeclared`;
+        subject and key = the SKU. Carries the FULL level after the change
+        (ADR 0011). `child_gtin` and `qty_of_child` are absent for EACH;
+        `units_per_pack` is 1 for EACH. `dims` are the DECLARED dimensions
+        (omitted when none); measurements arrive as `ProductPackLevelMeasured`.
+        Only `dims`, `is_orderable` and `is_despatch_unit` can change for a
+        GTIN already announced (the event is then re-sent in full); a new
+        content quantity is a new `gtin`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: product
+      payload:
+        $ref: "#/components/schemas/ProductPackLevelDeclaredEvent"
+      examples:
+        - name: caseOf12
+          summary: SKU-1 declares a case of 12 eaches.
+          payload:
+            specversion: "1.0"
+            id: "3c2b1a09-8f7e-4d6c-9b5a-4a3b2c1d0e9f"
+            source: "/warehouse/product-master"
+            type: "com.warehouse.wms.product-master.product.ProductPackLevelDeclared"
+            subject: "SKU-1"
+            time: "2026-10-06T21:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:product-master:events:ProductPackLevelDeclared:v1"
+            data:
+              sku: "SKU-1"
+              level: "CASE"
+              gtin: "24006381333935"
+              child_gtin: "04006381333931"
+              qty_of_child: 12
+              units_per_pack: 12
+              dims: { length_mm: 400, width_mm: 300, height_mm: 200, weight_g: 6500 }
+              is_orderable: true
+              is_despatch_unit: true
+              effective_from: "2026-10-06T20:00:00Z"
+              version: 3
+
+    ProductPackLevelRetired:
+      name: ProductPackLevelRetired
+      title: Product pack level retired
+      summary: A pack level was end-dated; its GTIN stays resolvable.
+      description: |
+        `type` = `com.warehouse.wms.product-master.product.ProductPackLevelRetired`;
+        subject and key = the SKU. `reason` is `superseded` when a new GTIN was
+        declared at the same level (the matching `ProductPackLevelDeclared`
+        follows with the next `version`), else the reason given to the retire
+        command. The GTIN is never reused. The levels above it are NOT retired
+        by this event: re-declare them.
+      contentType: application/cloudevents+json
+      tags:
+        - name: product
+      payload:
+        $ref: "#/components/schemas/ProductPackLevelRetiredEvent"
+      examples:
+        - name: superseded
+          summary: The case GTIN was superseded by a new one.
+          payload:
+            specversion: "1.0"
+            id: "7b6a5948-3726-4150-8f9e-0d1c2b3a4958"
+            source: "/warehouse/product-master"
+            type: "com.warehouse.wms.product-master.product.ProductPackLevelRetired"
+            subject: "SKU-1"
+            time: "2026-10-06T21:01:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:product-master:events:ProductPackLevelRetired:v1"
+            data:
+              sku: "SKU-1"
+              level: "CASE"
+              gtin: "24006381333935"
+              effective_to: "2026-10-06T21:01:00Z"
+              reason: "superseded"
+              version: 4
+
+    ProductPackLevelMeasured:
+      name: ProductPackLevelMeasured
+      title: Product pack level measured
+      summary: A measurement of one pack of an active level was recorded.
+      description: |
+        `type` = `com.warehouse.wms.product-master.product.ProductPackLevelMeasured`;
+        subject and key = the SKU. The measurement of the declared-versus-measured
+        split (ADR 0002) per level; `device_id` is omitted for a manual one.
+      contentType: application/cloudevents+json
+      tags:
+        - name: product
+      payload:
+        $ref: "#/components/schemas/ProductPackLevelMeasuredEvent"
+      examples:
+        - name: cubiscan
+          summary: A cubiscan measured the case.
+          payload:
+            specversion: "1.0"
+            id: "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d"
+            source: "/warehouse/product-master"
+            type: "com.warehouse.wms.product-master.product.ProductPackLevelMeasured"
+            subject: "SKU-1"
+            time: "2026-10-06T21:02:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:product-master:events:ProductPackLevelMeasured:v1"
+            data:
+              sku: "SKU-1"
+              level: "CASE"
+              gtin: "24006381333935"
+              dims: { length_mm: 410, width_mm: 310, height_mm: 210, weight_g: 6900 }
+              measured_at: "2026-10-06T14:05:00Z"
+              device_id: "CUBISCAN-03"
+              version: 5
+
+    ProductRegisteredAnalytics:
+      name: ProductRegistered
+      title: Product registered (analytics)
+      summary: Product registered, on the analytics stream.
+      description: "`type` = `com.warehouse.wms.product-master.product.ProductRegistered` (the same as on the integration topic); dataschema `urn:warehouse:product-master:analytics:ProductRegistered:v1`; payload equal to the integration payload."
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/ProductRegisteredEvent"
+      examples:
+        - name: analytics
+          summary: The analytics copy of the integration example (same id).
+          payload:
+            specversion: "1.0"
+            id: "1b0c9a4e-2f7d-4a63-9d1e-5a7c3e2b9f10"
+            source: "/warehouse/product-master"
+            type: "com.warehouse.wms.product-master.product.ProductRegistered"
+            subject: "SKU-1"
+            time: "2026-10-06T21:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:product-master:analytics:ProductRegistered:v1"
+            data:
+              sku: "SKU-1"
+              description: "Lithium battery pack 12V"
+              version: 1
+
+    ProductDescriptionChangedAnalytics:
+      name: ProductDescriptionChanged
+      title: Product description changed (analytics)
+      summary: Product description changed, on the analytics stream.
+      description: "`type` = `com.warehouse.wms.product-master.product.ProductDescriptionChanged` (the same as on the integration topic); dataschema `urn:warehouse:product-master:analytics:ProductDescriptionChanged:v1`; payload equal to the integration payload."
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/ProductDescriptionChangedEvent"
+      examples:
+        - name: analytics
+          summary: The analytics copy of the integration example (same id).
+          payload:
+            specversion: "1.0"
+            id: "8d3f2c1a-6b5e-4f7a-9c0d-1e2f3a4b5c6d"
+            source: "/warehouse/product-master"
+            type: "com.warehouse.wms.product-master.product.ProductDescriptionChanged"
+            subject: "SKU-1"
+            time: "2026-10-06T21:01:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:product-master:analytics:ProductDescriptionChanged:v1"
+            data:
+              sku: "SKU-1"
+              description: "Lithium battery pack 12V, 7Ah"
+              version: 2
+
+    ProductClassifiedAnalytics:
+      name: ProductClassified
+      title: Product classified (analytics)
+      summary: Product classified, on the analytics stream.
+      description: "`type` = `com.warehouse.wms.product-master.product.ProductClassified` (the same as on the integration topic); dataschema `urn:warehouse:product-master:analytics:ProductClassified:v1`; payload equal to the integration payload."
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/ProductClassifiedEvent"
+      examples:
+        - name: analytics
+          summary: The analytics copy of the integration example (same id).
+          payload:
+            specversion: "1.0"
+            id: "0f6d8a2b-3c4e-4d5f-8a9b-7c6d5e4f3a2b"
+            source: "/warehouse/product-master"
+            type: "com.warehouse.wms.product-master.product.ProductClassified"
+            subject: "SKU-1"
+            time: "2026-10-06T21:02:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:product-master:analytics:ProductClassified:v1"
+            data:
+              sku: "SKU-1"
+              handling_tags: ["Hazmat", "TemperatureSensitive"]
+              temperature_class: "Frozen"
+              dot_hazard_class: 3
+              classification_source: "native"
+              version: 3
+
+    ProductDimensionsDeclaredAnalytics:
+      name: ProductDimensionsDeclared
+      title: Product dimensions declared (analytics)
+      summary: Product dimensions declared, on the analytics stream.
+      description: "`type` = `com.warehouse.wms.product-master.product.ProductDimensionsDeclared` (the same as on the integration topic); dataschema `urn:warehouse:product-master:analytics:ProductDimensionsDeclared:v1`; payload equal to the integration payload."
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/PhysicalProfileEvent"
+      examples:
+        - name: analytics
+          summary: The analytics copy of the integration example (same id).
+          payload:
+            specversion: "1.0"
+            id: "5a4b3c2d-1e0f-4a9b-8c7d-6e5f4a3b2c1d"
+            source: "/warehouse/product-master"
+            type: "com.warehouse.wms.product-master.product.ProductDimensionsDeclared"
+            subject: "SKU-1"
+            time: "2026-10-06T21:03:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:product-master:analytics:ProductDimensionsDeclared:v1"
+            data:
+              sku: "SKU-1"
+              declared: { length_mm: 200, width_mm: 120, height_mm: 80, weight_g: 1500, volume_mm3: 1920000 }
+              effective: { length_mm: 200, width_mm: 120, height_mm: 80, weight_g: 1500, volume_mm3: 1920000 }
+              effective_source: "declared"
+              discrepancy: false
+              version: 4
+
+    ProductMeasuredAnalytics:
+      name: ProductMeasured
+      title: Product measured (analytics)
+      summary: Product measured, on the analytics stream.
+      description: "`type` = `com.warehouse.wms.product-master.product.ProductMeasured` (the same as on the integration topic); dataschema `urn:warehouse:product-master:analytics:ProductMeasured:v1`; payload equal to the integration payload."
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/PhysicalProfileEvent"
+      examples:
+        - name: analytics
+          summary: The analytics copy of the integration example (same id).
+          payload:
+            specversion: "1.0"
+            id: "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b"
+            source: "/warehouse/product-master"
+            type: "com.warehouse.wms.product-master.product.ProductMeasured"
+            subject: "SKU-1"
+            time: "2026-10-06T21:04:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:product-master:analytics:ProductMeasured:v1"
+            data:
+              sku: "SKU-1"
+              declared: { length_mm: 200, width_mm: 120, height_mm: 80, weight_g: 1500, volume_mm3: 1920000 }
+              measured: { length_mm: 205, width_mm: 121, height_mm: 82, weight_g: 1720, volume_mm3: 2034010, measured_at: "2026-10-06T14:05:00Z", device_id: "CUBISCAN-03" }
+              effective: { length_mm: 205, width_mm: 121, height_mm: 82, weight_g: 1720, volume_mm3: 2034010 }
+              effective_source: "measured"
+              discrepancy: true
+              version: 5
+
+  schemas:
+    CloudEventEnvelope:
+      type: object
+      required: [specversion, id, source, type, subject, time, datacontenttype, dataschema, data]
+      properties:
+        specversion: { type: string, const: "1.0" }
+        id: { type: string, format: uuid }
+        source: { type: string }
+        type: { type: string }
+        subject: { type: string, description: The SKU. }
+        time: { type: string, format: date-time }
+        datacontenttype: { type: string, const: application/json }
+        dataschema: { type: string }
+
+    HandlingTag:
+      type: string
+      enum: [Hazmat, Fragile, TemperatureSensitive, Oversized, HighValue]
+
+    Dimensions:
+      type: object
+      required: [length_mm, width_mm, height_mm, weight_g, volume_mm3]
+      properties:
+        length_mm: { type: integer, minimum: 1, maximum: 20000 }
+        width_mm: { type: integer, minimum: 1, maximum: 20000 }
+        height_mm: { type: integer, minimum: 1, maximum: 20000 }
+        weight_g: { type: integer, minimum: 1, maximum: 2000000 }
+        volume_mm3: { type: integer, minimum: 1 }
+
+    MeasuredDimensions:
+      allOf:
+        - $ref: "#/components/schemas/Dimensions"
+        - type: object
+          required: [measured_at]
+          properties:
+            measured_at: { type: string, format: date-time }
+            device_id: { type: string, description: Omitted for a manual measurement. }
+
+    ProductRegisteredEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [sku, description, version]
+              properties:
+                sku: { type: string }
+                description: { type: string }
+                version: { type: integer, minimum: 1 }
+
+    ProductDescriptionChangedEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [sku, description, version]
+              properties:
+                sku: { type: string }
+                description: { type: string }
+                version: { type: integer, minimum: 1 }
+
+    ProductClassifiedEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [sku, handling_tags, classification_source, version]
+              properties:
+                sku: { type: string }
+                handling_tags:
+                  type: array
+                  minItems: 1
+                  items: { $ref: "#/components/schemas/HandlingTag" }
+                temperature_class: { type: string, enum: [Ambient, Chilled, Frozen] }
+                dot_hazard_class: { type: integer, minimum: 1, maximum: 9 }
+                classification_source: { type: string, enum: [native, legacy-import] }
+                version: { type: integer, minimum: 1 }
+
+    PhysicalProfileEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [sku, effective_source, discrepancy, version]
+              properties:
+                sku: { type: string }
+                declared: { $ref: "#/components/schemas/Dimensions" }
+                measured: { $ref: "#/components/schemas/MeasuredDimensions" }
+                effective: { $ref: "#/components/schemas/Dimensions" }
+                effective_source: { type: string, enum: [measured, declared, none] }
+                discrepancy: { type: boolean }
+                version: { type: integer, minimum: 1 }
+
+    PackLevel:
+      type: string
+      enum: [EACH, INNER, CASE, PALLET]
+
+    Gtin:
+      type: string
+      pattern: '^[0-9]{14}$'
+      description: A GTIN, always the 14-digit zero-left-padded string with a valid mod-10 check digit.
+
+    PackDimensions:
+      type: object
+      required: [length_mm, width_mm, height_mm, weight_g]
+      properties:
+        length_mm: { type: integer, minimum: 1, maximum: 20000 }
+        width_mm: { type: integer, minimum: 1, maximum: 20000 }
+        height_mm: { type: integer, minimum: 1, maximum: 20000 }
+        weight_g: { type: integer, minimum: 1, maximum: 2000000 }
+
+    ProductPackLevelDeclaredEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [sku, level, gtin, units_per_pack, is_orderable, is_despatch_unit, effective_from, version]
+              properties:
+                sku: { type: string }
+                level: { $ref: "#/components/schemas/PackLevel" }
+                gtin: { $ref: "#/components/schemas/Gtin" }
+                child_gtin: { $ref: "#/components/schemas/Gtin" }
+                qty_of_child: { type: integer, minimum: 2, maximum: 1000000, description: Absent for EACH. }
+                units_per_pack: { type: integer, minimum: 1, maximum: 1000000, description: Direct factor to eaches; 1 for EACH. }
+                dims: { $ref: "#/components/schemas/PackDimensions" }
+                is_orderable: { type: boolean }
+                is_despatch_unit: { type: boolean }
+                effective_from: { type: string, format: date-time }
+                version: { type: integer, minimum: 1 }
+
+    ProductPackLevelRetiredEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [sku, level, gtin, effective_to, reason, version]
+              properties:
+                sku: { type: string }
+                level: { $ref: "#/components/schemas/PackLevel" }
+                gtin: { $ref: "#/components/schemas/Gtin" }
+                effective_to: { type: string, format: date-time }
+                reason: { type: string, minLength: 1, maxLength: 200 }
+                version: { type: integer, minimum: 1 }
+
+    ProductPackLevelMeasuredEvent:
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [sku, level, gtin, dims, measured_at, version]
+              properties:
+                sku: { type: string }
+                level: { $ref: "#/components/schemas/PackLevel" }
+                gtin: { $ref: "#/components/schemas/Gtin" }
+                dims: { $ref: "#/components/schemas/PackDimensions" }
+                measured_at: { type: string, format: date-time }
+                device_id: { type: string, description: Omitted for a manual measurement. }
+                version: { type: integer, minimum: 1 }
