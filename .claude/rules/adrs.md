@@ -195,8 +195,9 @@ paths:
     a major e-commerce retailer's PO/ASIN/acknowledgement vocabulary and customer PII are
     explicitly OUT: they live in `network-fulfillment`, and `arch-go`
     cannot catch a vocabulary leak — that check is human. Known gap
-    recorded: nothing here sweeps an orphaned hold, which sits on real
-    inventory reservations. Shipped: `POST /orders/{id}/releases`
+    recorded at the time: nothing here sweeps an orphaned hold. network-fulfillment's
+    `SweepOrphanedHolds` (its ADR 0024) now cancels it through `DELETE /orders/{id}`,
+    past `acknowledgeBy` plus a grace period. Shipped: `POST /orders/{id}/releases`
     (`releaseHeldOrder`), `releaseOnAllocation`/`requiredShipBy` on
     `POST /orders`, `ErrOrderNotHeld` -> 409 `order-not-held`, migrations
     `0005_release_on_allocation`/`0006_required_ship_by`. The caller is
