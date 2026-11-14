@@ -160,8 +160,8 @@ with a `Backordered` order — BR3 is a hold, not an error, so there is no
 | Customer or network partner withdraws before release | Revoke every allocated reservation, then cancel every line | `usecases.CancelOrder` |
 | Concurrent writers | Second save fails with `ErrConcurrentModification` (HTTP 409, Kafka consumer retries then DLQ) | `postgres.OrderRepo.Save` |
 
-Not corrected (documented gaps): an orphaned hold is never swept; released
-work is never clawed back after cancellation (ADR 0004, ADR 0020).
+Not corrected here (documented gaps): an orphaned hold is not swept by this service (network-fulfillment's
+`SweepOrphanedHolds` cancels it, ADR 0020 accepted deferral); released work is never clawed back after cancellation (ADR 0004).
 
 ### 6. Handled Commands
 
@@ -219,7 +219,7 @@ the reconfirm step writes no event — and one `OrderAllocated`), plus one
 one `OrderCancelled` if withdrawn. Lifetime runs from intake to `Released`
 (`Shipped` once the opt-in outbound-shipping consumer, ADR 0051, confirms the load)
 or `Cancelled` — minutes to hours for a released order; a held order lives
-until its caller releases or cancels it (no sweeper, see above).
+until its caller releases or cancels it (no sweeper here; network-fulfillment's sweep cancels an undecided hold, see above).
 
 ## Not aggregates: read models and policies
 

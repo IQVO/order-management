@@ -79,7 +79,7 @@ REST API is behind Kong at `/api/order-management` (prefix stripped).
 | warehouse-planning | Kafka, `warehouse.order-management.events` | `OrderAllocated`, `OrderPartiallyAllocated` (order demand) | Same topic, consumed independently. |
 | network-inventory-planning | Kafka, `warehouse.order-management.events` | `com.warehouse.wes.order-management.siteskudemand.SiteSkuDemandChanged` | Emitted only with `DEMAND_PROJECTION_SITE_ID` set (ADR 0035). |
 | slotting-optimization | Kafka, `warehouse.order-management.events` | `SiteSkuDemandChanged` | Same switch. |
-| (nobody found) | Kafka, `warehouse.order-management.events` | `com.warehouse.wes.order-management.order.OrderRepromised` | Published since ADR 0018; no sibling's `develop` consumes it yet. |
+| exception-management | Kafka, `warehouse.order-management.events`, group `ORDER_CORRELATION_CONSUMER_GROUP` | `com.warehouse.wes.order-management.order.OrderRepromised` | Published since ADR 0018. Consumed by its order-correlation consumer, which auto-resolves the order's open exception cases whose policy has an auto-resolve rule on this type; every other type on the topic is ignored. |
 | this service's projector | Kafka, `warehouse.order-management.analytics`, group `order-management-analytics` | `com.warehouse.wes.order-management.order.OrderReceived`, `…OrderAllocated`, `…OrderPartiallyAllocated`, `…OrderAllocationPartiallyFailed`, `…OrderReleased`, `…OrderCancelled`, `…OrderLineAllocated`, `…OrderLineBackordered`, `…OrderLineReleased`, `…OrderRepromised` | Internal data product (ADR 0006). The e2e-tests repository also reads both topics. The topic also carries `…OrderReleaseUnconfirmed` (ADR 0043, only with the confirmation loop on); the projector ignores that type. |
 
 Every produced event is a CloudEvents 1.0 structured-mode message,
@@ -109,5 +109,5 @@ on [Domain Events](../ddd/domain-events.md).
   `Released`.
 - No shared database and no imported Go module from any sibling
   (ADR 0002).
-- No consumer of `OrderRepromised` in the fleet yet.
+- Only exception-management consumes `OrderRepromised`, as the correlated fact of its auto-resolve rule; no other sibling's `develop` reads it.
 - No authentication on REST or MCP (ADR 0012).

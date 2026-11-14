@@ -462,8 +462,9 @@ Source: `internal/adapters/outbound/postgres/outbox_relay.go`,
 `outbox_publisher.go`, `internal/adapters/outbound/kafka/relay_sink.go`,
 `writer_config.go`. Omits: the housekeeping sweeper that later deletes
 published rows and the `order.outbox.lag_seconds` gauge (both ADR 0032).
-`OrderRepromised` is also written to the integration topic; no consumer of
-it is known from this repository.
+`OrderRepromised` is also written to the integration topic; exception-management reads it
+(`internal/adapters/inbound/kafka/order_correlation_consumer.go` in that repository) to auto-resolve open exception cases,
+and no other sibling consumes it.
 
 ## 10. ApplyProductClassification — Kafka `warehouse.product-master.events`
 

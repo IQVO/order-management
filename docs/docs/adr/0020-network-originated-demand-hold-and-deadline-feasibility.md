@@ -455,3 +455,10 @@ before merge, in this order:
    deadline earlier than the earliest feasible cutoff yields
    `FeasibleBy` false rather than a fallback promise. Neither can pass
    by accident.
+
+## Addendum 2026-11-13: current state
+
+- The orphaned-hold sweeper that the "Accepted deferral" note above asks for exists, in network-fulfillment: `SweepOrphanedHolds`
+  (`internal/application/usecases/sweep_orphaned_holds.go` there, its ADR 0024, accepted 2026-10-17) cancels a hold nobody decided
+  once `acknowledgeBy` plus `ORPHAN_HOLD_GRACE` has passed, through `DELETE /orders/{id}` (`internal/adapters/outbound/ordermanagement/planner.go`).
+- order-management still has no sweeper of its own, as decided here: the deferral stands, and the tracked follow-up is done.

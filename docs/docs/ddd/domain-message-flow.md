@@ -113,7 +113,7 @@ sequenceDiagram
   OM->>OM: recompute that line's shipment-group promise
   alt promise moved
     OM-)PJ: evt: OrderRepromised
-    Note over OM: also on warehouse.order-management.events, no known consumer
+    Note over OM: also on warehouse.order-management.events, read by exception-management to auto-resolve cases
   else unchanged
     Note over OM: no event
   end

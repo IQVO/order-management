@@ -756,9 +756,10 @@ above — have been removed from it.)
   derived from fulfillment capability (ADR 0014), with `LeadTimePolicy` as the
   tagged fallback — it ends at the building's door. There is no live carrier
   integration, and no such service exists in this fleet to call.
-- **Sweeping an orphaned hold.** Nothing expires an order held with
-  `releaseOnAllocation: false` that its caller never releases or cancels
-  (ADR 0020); it keeps its inventory reservations until someone does.
+- **Sweeping an orphaned hold (not here, by design).** Nothing in this service expires an order held with
+  `releaseOnAllocation: false` that its caller never releases or cancels (ADR 0020, accepted deferral). The sweep lives in
+  network-fulfillment: its `SweepOrphanedHolds` (ADR 0024 there) cancels a hold nobody decided, past `acknowledgeBy` plus a grace
+  period, through `DELETE /orders/{id}`.
 - **Clawing back released work on cancellation.** Documented in detail in
   [ADR 0004](docs/docs/adr/0004-cancellation-boundary-at-release.md).
 - **Killing the surviving promise boundary mutants.** Done for
