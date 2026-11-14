@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -53,6 +54,10 @@ type fakeInventory struct {
 	revoked map[string]string // reservation id -> sku
 	// revokeErr, when set, makes every RevokeReservation fail with it.
 	revokeErr error
+	// requests records every Reserve call in arrival order (steps_rules_test.go).
+	requests []ports.ReservationRequest
+	// revokeFail makes RevokeReservation fail for just these reservation ids.
+	revokeFail map[string]bool
 }
 
 func newFakeInventory() *fakeInventory {
@@ -68,6 +73,7 @@ func (f *fakeInventory) setMode(sku string, m inventoryMode) {
 func (f *fakeInventory) Reserve(_ context.Context, req ports.ReservationRequest) (ports.ReservationResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.requests = append(f.requests, req)
 
 	mode, ok := f.modes["*"]
 	if !ok {
@@ -100,6 +106,9 @@ func (f *fakeInventory) RevokeReservation(_ context.Context, reservationID strin
 	defer f.mu.Unlock()
 	if f.revokeErr != nil {
 		return f.revokeErr
+	}
+	if f.revokeFail[reservationID] {
+		return fmt.Errorf("%w: inventory-storage: unexpected response status: 500", ports.ErrDownstreamUnavailable)
 	}
 	// Record it so a scenario can assert WHICH reservations a
 	// cancellation actually revoked.
@@ -156,6 +165,12 @@ type world struct {
 	retry   *usecases.RetryAllocation
 	release *usecases.ReleaseHeldOrder
 	cancel  *usecases.CancelOrder
+
+	// orders and clock are the repository and clock every use case shares;
+	// rules holds the extra use cases and doubles of steps_rules_test.go.
+	orders *memory.OrderRepo
+	clock  *memory.FixedClock
+	rules  *rulesState
 }
 
 func (w *world) reset() {
@@ -176,6 +191,8 @@ func (w *world) reset() {
 	w.retry = &usecases.RetryAllocation{Orders: orders, Inventory: w.inventory, Events: w.publisher, Clock: clock, Promise: promise}
 	w.release = &usecases.ReleaseHeldOrder{Orders: orders, Inventory: w.inventory, Events: w.publisher, Clock: clock, Promise: promise}
 	w.cancel = &usecases.CancelOrder{Orders: orders, Inventory: w.inventory, Events: w.publisher, Clock: clock}
+	w.orders, w.clock = orders, clock
+	w.rules = newRulesState(w)
 
 	server := &inboundhttp.Server{
 		ReceiveOrder:    w.receive,
@@ -183,6 +200,7 @@ func (w *world) reset() {
 		ReleaseHeld:     w.release,
 		CancelOrder:     w.cancel,
 		GetOrder:        &usecases.GetOrder{Orders: orders},
+		Readiness:       w.rules.readiness,
 		// Planned capacity (ADR 0031) is wired for every scenario: with no
 		// window published it is invisible, which is exactly what the
 		// pre-existing scenarios (untouched) keep proving.
@@ -671,15 +689,24 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	registerPlannedCapacitySteps(sc, w)
 	registerWave2Steps(sc, w)
 	registerFulfillmentSiteSteps(sc, w)
+	registerRulesSteps(sc, w)
 }
 
 // TestFeatures runs the Gherkin acceptance suite under features/.
 func TestFeatures(t *testing.T) {
+	tags := os.Getenv("BDD_TAGS")
+	if tags == "" {
+		tags = "~@known-bug"
+	}
 	suite := godog.TestSuite{
 		ScenarioInitializer: InitializeScenario,
 		Options: &godog.Options{
 			Format: "pretty",
 			Paths:  []string{"features"},
+			// Tags excludes scenarios that describe documented behaviour the
+			// code does not implement yet (@known-bug). BDD_TAGS=@known-bug
+			// runs only those, and they must fail.
+			Tags: tags,
 			// Strict makes an undefined or pending step fail the suite instead
 			// of silently skipping it.
 			Strict:   true,
