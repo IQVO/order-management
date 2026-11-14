@@ -1,0 +1,3715 @@
+openapi: 3.0.3
+info:
+  title: Inventory & Storage API
+  version: "1.0.0"
+  description: >
+    The WMS-tier authoritative record of what is held where, and what
+    portion of it is usable, for the warehouse-systems platform. This
+    bounded context implements chaotic (random) stow: there is
+    no fixed product location — an inbound item may be stowed into any free
+    bin, and this service records the exact bin it landed in. It supplies
+    "stock reality" to the Work Planning bounded context and makes
+    allocation a revocable reservation, so a failed physical pick or
+    delivery never strands an order: a reservation can always be revoked
+    and re-satisfied from a different physical holding.
+
+
+    Its aggregates are **StockUnit** (a quantity of a SKU at a specific
+    bin — every physical item has exactly one known bin, or is flagged
+    Unlocated), **Bin/Location** (a coded slot with fixed capacity; any SKU
+    may occupy any free bin, chaotic-storage style), and **Reservation** (a
+    revocable binding of quantity to demand, with a timeout). "Usable"
+    inventory — on-hand minus active reservations minus held/unlocated
+    stock — is what constrains what this service will let you reserve, not
+    raw on-hand quantity.
+
+
+    Out of this service's boundary: it does not pick, pack, ship, route
+    associates, or manage stations/tasks/labor (that is Work Planning /
+    fulfillment-execution); and it does not decide *what* to receive or
+    forecast demand. Bins are registered declaratively by inventory control
+    via `PUT /bins/{binId}` (ADR 0025); every reservation allocation names
+    the bin to pick from (`allocations[].binId`).
+    Error responses across this API use RFC 7807 (`application/problem+json`)
+    Problem Details.
+
+
+    This API follows the fleet REST API guideline (ADR 0049): URLs name
+    things (commands are noun sub-resources such as `POST /stowages` or
+    `POST /reservations/{id}/pick-confirmations`), EVERY `POST` is behind the
+    Idempotency-Key middleware (a retry replays the stored answer with the
+    response header `Idempotency-Replayed: true`; the same key with a
+    different method, path or body is 409 `idempotency-key-reused`; a missing
+    key is 400 `idempotency-key-required`), and every collection `GET` is
+    keyset-paginated as `{items, nextCursor}` with `limit` and `cursor`.
+
+
+    Cross-cutting behaviour that applies to every operation: a NUL
+    character (U+0000) in the query string or a JSON body is 400
+    `malformed-request-body`, and in the path it is 404 `not-found`; a
+    request that matches no route (for example a container `lpn` outside
+    `[A-Za-z0-9._-]`) is 404 `route-not-found`, as
+    `application/problem+json`.
+  contact:
+    name: Inventory & Storage (Core Bounded Context)
+servers:
+  - url: http://localhost:8080
+    description: Local development
+tags:
+  - name: Stock
+    description: >
+      Receiving and stowing physical stock. ReceiveStock stages inbound
+      goods (item-scan only); StowStock durably records the item at a bin
+      (item-scan + location-scan), which is the only way a StockUnit
+      aggregate comes into existence. RelocateStock moves usable stock of
+      one SKU between two bins of the same site (ADR 0039).
+  - name: HeldStock
+    description: >
+      Stock held out of usable quantity (ADR 0052): the Damaged lines of an
+      inbound receipt, which are booked as HELD units instead of being
+      dropped. A held unit has no usable quantity and can never be reserved;
+      a disposition (RELEASE, RETURN_TO_VENDOR, SCRAP, REWORK) settles it.
+  - name: Containers
+    description: >
+      Sealed cases with an identity (ADR 0045, 0046). A Container is a case
+      licence plate (LPN, the carton SSCC) created from inbound-receiving's
+      `ReceiptCartonReceived`; it is stowed into a case bin, and broken
+      (`BreakCase`) into loose eaches. The ledger stays in eaches. Quantity
+      is booked once, by `ReceiptLineReceived`, never by a container.
+  - name: Reservations
+    description: >
+      Revocable bindings of usable stock to demand. A Reservation can be
+      revoked (returning its quantity to usable) or confirmed as picked
+      (consuming it) — it never permanently binds to one physical bin, so a
+      failed pick can be re-satisfied elsewhere.
+  - name: Inventory
+    description: >
+      Read models projected from StockUnits — currently, usable inventory
+      by SKU (on-hand minus active reservations minus held/unlocated stock).
+  - name: Bins
+    description: >
+      Bin registration and inspection (declarative, idempotent
+      `PUT /bins/{binId}` and `GET /bins/{binId}`, ADR 0025), and cycle
+      counting: verifying a bin's physical contents against system records
+      and reconciling discrepancies (shortfall marks stock Unlocated;
+      overage is flagged for a separate receiving/audit process).
+  - name: Products
+    description: >
+      SKU-level product classification (Hazmat/Fragile/TemperatureSensitive/
+      Oversized/HighValue). Owned by product-master since ADR 0034: this
+      service keeps a read-only local copy, fed by product-master's
+      `ProductClassified` events, that StowStock reads to enforce
+      hazmat/temperature placement (ADR 0009) and same-bin DOT segregation
+      (ADR 0010). The write endpoint answers 410 and the read endpoint is
+      deprecated.
+  - name: Health
+    description: Liveness and readiness probes.
+  - name: Transfers
+    description: >-
+      Destination transfer receiving custody (ADR 0031): stage a counted
+      arrival against a recognized ALLOCATED transfer line (or quarantine
+      an unrecognized scan as an inventory exception), then stow the
+      received goods into destination-site bins — the only path that
+      raises the destination site's usable stock.
+  - name: Reports
+    description: >
+      The read-only "Inventory Flow & Accuracy" analytical data product
+      (ADR 0011, ADR 0020). Served by the separate `inventory-reports`
+      deployment (cmd/inventory-reports) over its own read-only database
+      pool — NOT by the OLTP `inventory` binary this spec's other paths
+      describe — so these operations are excluded from the Schemathesis
+      contract run, which boots only the OLTP binary.
+
+paths:
+  /healthz:
+    get:
+      operationId: getHealthz
+      summary: Liveness probe
+      description: >
+        Returns 200 with a static status body if the process is up. Does
+        not check downstream dependencies (e.g. Postgres, Kafka) — it is a
+        liveness check, not a readiness check.
+      tags: [Health]
+      responses:
+        "200":
+          description: Service is alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                example:
+                  status: ok
+
+  /readyz:
+    get:
+      operationId: getReadyz
+      summary: Readiness probe
+      description: >
+        Returns 200 `{"status":"ready"}` while the process is accepting
+        traffic, and 503 `{"status":"not_ready"}` once graceful shutdown
+        has begun (ADR 0020 — readiness is flipped FIRST so a Kubernetes
+        readinessProbe stops routing new requests during the drain
+        window). Distinct from `/healthz`, which is liveness only and is
+        never flipped by shutdown. Checks no downstream dependency.
+      tags: [Health]
+      responses:
+        "200":
+          description: Service is ready to receive traffic.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ready
+                example:
+                  status: ready
+        "503":
+          description: >
+            Not ready: either graceful shutdown has begun (a plain
+            `{"status":"not_ready"}` JSON body), or a runtime dependency
+            (Postgres, Kafka) is unreachable (an RFC 7807
+            `application/problem+json` body of type `dependency-unavailable`
+            whose `detail` names the failing dependencies; the verdict is
+            cached for a few seconds).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: not_ready
+                example:
+                  status: not_ready
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/dependency-unavailable
+                title: A runtime dependency is unavailable
+                status: 503
+                detail: "not ready: postgres"
+                instance: /readyz
+
+  /stock-receipts:
+    post:
+      operationId: receiveStock
+      deprecated: true
+      summary: Acknowledge inbound stock for a SKU
+      description: >
+        Stages a quantity of a SKU as received into the building
+        (publishes StockReceived) without assigning it to a bin yet. This
+        does NOT create a StockUnit aggregate: a StockUnit requires both an
+        item-scan and a location-scan by construction (the
+        stow-requires-both invariant), and a staged receipt has no bin yet.
+        The durable, addressable record only starts at StowStock — that is
+        why this operation returns 202 Accepted rather than 201 Created:
+        there is no resource here to hand back a Location for.
+        Superseded by the inbound-receiving handover (K24, ADR 0037:
+        inbound-receiving publishes
+        `com.warehouse.wms.inbound-receiving.receipt.ReceiptLineReceived`,
+        whose Good lines are booked as staged stock through the same
+        ReceiveStock use case); this endpoint stays as the documented
+        manual fallback; removal planned with the next breaking window.
+      tags: [Stock]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReceiveStockRequest"
+            example:
+              sku: SKU-1
+              quantity: 10
+      responses:
+        "202":
+          description: >
+            Receipt accepted and staged; not yet stowed to a bin.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StagedReceipt"
+              example:
+                sku: SKU-1
+                quantity: 10
+                receivedAt: "2026-08-22T14:20:00Z"
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+        "400":
+          description: >
+            Malformed JSON body, SKU missing/empty, or the Idempotency-Key
+            header is absent (ADR 0018).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                emptySku:
+                  summary: SKU missing or empty
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/empty-sku
+                    title: SKU must not be empty
+                    status: 400
+                    detail: sku must not be empty
+                    instance: /stock-receipts
+                idempotencyKeyRequired:
+                  summary: Idempotency-Key header missing (ADR 0018)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-required
+                    title: Idempotency-Key header is required
+                    status: 400
+                    detail: This endpoint changes state and requires a caller-supplied Idempotency-Key header so a retried request is never applied twice.
+                    instance: /stock-receipts
+        "409":
+          $ref: "#/components/responses/IdempotencyKeyReused"
+        "422":
+          description: >
+            Quantity present but not a positive number.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                zeroQuantity:
+                  summary: Quantity not positive
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/zero-quantity
+                    title: Quantity must be greater than zero
+                    status: 422
+                    detail: quantity must be greater than zero
+                    instance: /stock-receipts
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /stowages:
+    post:
+      operationId: stowStock
+      summary: Stow received stock into a bin
+      description: >
+        Places a quantity of a SKU into a specific bin, requiring BOTH an
+        item-scan (sku) and a location-scan (binId) — this is the only
+        path that creates a StockUnit aggregate, and skipping either scan
+        is precisely how inventory gets lost, so both are mandatory.
+        Respects the bin's capacity: a stow that would exceed
+        sum(occupied) <= capacity is rejected with 409. Chaotic storage
+        means any SKU may be stowed into any free bin — there is no
+        fixed product-to-bin mapping.
+      tags: [Stock]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StowStockRequest"
+            example:
+              sku: SKU-1
+              quantity: 10
+              binId: A-1-1
+      responses:
+        "201":
+          description: Stock unit created and stowed at the given bin.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            Location:
+              description: URI of the newly created StockUnit.
+              schema:
+                type: string
+                example: /stock/su-164710cb-5e14-400b-849c-ed94d8256c6b
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StockUnit"
+              example:
+                id: su-164710cb-5e14-400b-849c-ed94d8256c6b
+                sku: SKU-1
+                binId: A-1-1
+                quantity: 10
+                reserved: 0
+                state: AVAILABLE
+        "400":
+          description: >
+            Malformed JSON body, or SKU/binId missing (either scan absent,
+            including the domain-level stow-requires-both invariant).
+            A missing or malformed Idempotency-Key header is also a 400 (idempotency-key-required / idempotency-key-invalid).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                emptyBinId:
+                  summary: Bin ID missing or empty
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/empty-bin-id
+                    title: Bin ID must not be empty
+                    status: 400
+                    detail: bin id must not be empty
+                    instance: /stowages
+                stowRequiresItemAndLocation:
+                  summary: Stow without both an item scan and a location scan
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/stow-requires-item-and-location
+                    title: Stow requires both an item scan and a location scan
+                    status: 400
+                    detail: stow requires both an item scan (sku) and a location scan (bin)
+                    instance: /stowages
+                idempotencyKeyRequired:
+                  summary: Idempotency-Key header missing or invalid (REST guideline 2.2)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-required
+                    title: Idempotency-Key header is required
+                    status: 400
+                    detail: This endpoint changes state and requires a caller-supplied Idempotency-Key header so a retried request is never applied twice.
+                    instance: /stowages
+        "404":
+          description: The target bin does not exist.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/bin-not-found
+                title: Bin not found
+                status: 404
+                detail: bin not found
+                instance: /stowages
+        "409":
+          description: >
+            The bin does not have enough free capacity for this quantity, or
+            the SKU is Hazmat/TemperatureSensitive-classified (ADR 0009) and
+            the target bin's zone fails the placement check (not
+            hazmat-rated, or a temperature-class mismatch), or the
+            facility-layout classification lookup was unavailable for a
+            classified, rule-relevant SKU, or the SKU carries a DOT hazard
+            class (ADR 0010) that is incompatible with another SKU already
+            occupying the target bin (same-bin DOT segregation).
+            The same Idempotency-Key reused with a different method, path or body is also a 409 (idempotency-key-reused).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                binFull:
+                  summary: Bin capacity exceeded
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/bin-full
+                    title: "Bin is full: capacity exceeded"
+                    status: 409
+                    detail: "bin is full: capacity exceeded"
+                    instance: /stowages
+                hazmatZoneRequired:
+                  summary: Hazmat SKU stowed into a non-hazmat-rated zone
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/hazmat-zone-required
+                    title: Hazmat SKU requires a hazmat-rated zone
+                    status: 409
+                    detail: hazmat sku requires a hazmat-rated zone
+                    instance: /stowages
+                temperatureClassMismatch:
+                  summary: TemperatureSensitive SKU stowed into a mismatched zone
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/temperature-class-mismatch
+                    title: Bin temperature class does not match the SKU's required temperature class
+                    status: 409
+                    detail: bin temperature class does not match the sku's required temperature class
+                    instance: /stowages
+                locationClassificationUnavailable:
+                  summary: facility-layout lookup unavailable for a classified SKU
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/location-classification-unavailable
+                    title: Location classification lookup unavailable
+                    status: 409
+                    detail: location classification lookup unavailable
+                    instance: /stowages
+                hazmatClassIncompatible:
+                  summary: DOT hazard class incompatible with another SKU already in the bin
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/hazmat-class-incompatible
+                    title: DOT hazard class incompatible with another SKU already stowed in this bin
+                    status: 409
+                    detail: dot hazard class incompatible with another sku already stowed in this bin
+                    instance: /stowages
+                concurrentModification:
+                  summary: The bin or stock unit was modified by another request (ADR 0019)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/concurrent-modification
+                    title: The resource was modified by another request; re-fetch the latest version and retry
+                    status: 409
+                    detail: the resource was modified by another request; re-fetch the latest version and retry
+                    instance: /stowages
+                idempotencyKeyReused:
+                  summary: Idempotency-Key reused with a different method, path or body (REST guideline 2.3)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-reused
+                    title: Idempotency-Key was already used with a different request
+                    status: 409
+                    detail: The Idempotency-Key header on this request was already used with a different method, path or body. Use a new Idempotency-Key for a genuinely different request.
+                    instance: /stowages
+        "422":
+          description: Quantity present but not a positive number.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/zero-quantity
+                title: Quantity must be greater than zero
+                status: 422
+                detail: quantity must be greater than zero
+                instance: /stowages
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /reservations:
+    get:
+      operationId: getReservationsByDemandRef
+      summary: Look up every reservation for a demand reference
+      description: >
+        Returns every Reservation ever created against a caller-supplied
+        demandRef (an external system's order+line reference, e.g. from
+        order-management). A demandRef can have MULTIPLE reservations
+        across its lifetime — a reservation that was revoked, followed by
+        a successful retry — so this returns a collection, not a single
+        resource; an unknown demandRef returns 200 with an empty `items`
+        array, not 404. The collection is keyset-paginated (REST guideline
+        section 3): one page of `{items, nextCursor}` ordered by
+        (createdAt, id), `limit` (1-500, default 100) and the opaque
+        `cursor` from the previous page's `nextCursor`; `demandRef` is
+        repeated on every page request and `nextCursor` is absent on the
+        last page. Any query parameter other than `demandRef`, `limit` and
+        `cursor` is 400 `unknown-query-parameter` (a retired paging
+        parameter such as `after` fails loudly instead of reading page one
+        forever). This is the read side backing a cross-service
+        order-lifecycle console screen that needs to answer "what did
+        inventory-storage do for order X, line N". Side-effect-free.
+      tags: [Reservations]
+      parameters:
+        - $ref: "#/components/parameters/DemandRef"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: >
+            One page of the reservations created against this demandRef
+            (possibly empty), ordered by (createdAt, id).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReservationPage"
+              example:
+                items:
+                  - id: res-a1b2c3d4-0000-0000-0000-000000000001
+                    sku: SKU-1
+                    quantity: 6
+                    demandRef: order-42
+                    status: REVOKED
+                    allocations:
+                      - stockUnitId: su-164710cb-5e14-400b-849c-ed94d8256c6b
+                        quantity: 6
+                    createdAt: "2026-08-22T14:00:00Z"
+                    expiresAt: "2026-08-22T14:50:00Z"
+                  - id: res-a1b2c3d4-0000-0000-0000-000000000002
+                    sku: SKU-1
+                    quantity: 6
+                    demandRef: order-42
+                    status: ACTIVE
+                    allocations:
+                      - stockUnitId: su-2b6e7e5b-0000-0000-0000-000000000002
+                        quantity: 6
+                    createdAt: "2026-08-22T14:05:00Z"
+                    expiresAt: "2026-08-22T14:55:00Z"
+                nextCursor: eyJzIjoiMjAyNi0wOC0yMlQxNDowNTowMFoiLCJpIjoicmVzLWExYjJjM2Q0LTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMiJ9
+        "400":
+          description: >-
+            The demandRef query parameter is missing or empty
+            (missing-demand-ref), `limit` is not an integer between 1 and
+            500 (invalid-limit), or `cursor` is not a page token this API
+            issued (invalid-cursor), or a query parameter other than
+            `demandRef`, `limit` and `cursor` was sent
+            (unknown-query-parameter).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                missingDemandRef:
+                  summary: demandRef query parameter is required
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/missing-demand-ref
+                    title: demandRef query parameter is required
+                    status: 400
+                    detail: demandRef query parameter must not be empty
+                    instance: /reservations
+                invalidLimit:
+                  summary: limit is not an integer between 1 and 500
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/invalid-limit
+                    title: "limit must be an integer between 1 and 500"
+                    status: 400
+                    detail: "limit must be an integer between 1 and 500"
+                    instance: /reservations
+                invalidCursor:
+                  summary: cursor was not issued by this API
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/invalid-cursor
+                    title: "cursor is not a valid page token"
+                    status: 400
+                    detail: "cursor is not a valid page token"
+                    instance: /reservations
+                unknownQueryParameter:
+                  summary: a query parameter the collection does not declare
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/unknown-query-parameter
+                    title: the collection does not declare this query parameter
+                    status: 400
+                    detail: "unknown query parameter: after"
+                    instance: /reservations
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    post:
+      operationId: reserveStock
+      summary: Create a revocable reservation against usable inventory
+      description: >
+        Binds a quantity of a SKU's usable inventory (on-hand minus
+        existing reservations, drawn forward-first: a SKU's forward pick face
+        before its reserve bins, then smaller usable first, bin id, stock unit
+        id (ADR 0050), across whichever StockUnits have
+        usable quantity) to a piece of demand identified by demandRef. The
+        reservation is NOT permanently bound to one physical StockUnit —
+        the specific units/quantities drawn from are recorded as
+        Allocations, but a subsequent revoke-and-reserve cycle is free to
+        draw from a different holding. This is what lets a failed physical
+        pick be retried without stranding the order. The reservation
+        expires automatically after a timeout if never confirmed or
+        revoked. Idempotent (best-effort) by (demandRef, sku, quantity):
+        retrying this call after a dropped response returns the existing
+        ACTIVE reservation for the same demandRef, SKU and quantity instead
+        of creating a second one (see REST_AUDIT.md's idempotency notes).
+        One demandRef (e.g. an order) may hold several ACTIVE reservations
+        at once -- one per line/SKU -- so a request for a different SKU or
+        quantity under the same demandRef is always a new reservation.
+        The optional `lineNo` (ADR 0036) names the order line the
+        reservation is for: it is stored, returned, and also taken into
+        account by the replay guard (two lines of one order with the same
+        SKU and quantity stay two reservations when their `lineNo`
+        differ). Replays of the same Idempotency-Key with an identical
+        body still return the cached response (with `Idempotency-Replayed:
+        true`); adding `lineNo` to a key first used without it is a
+        different request (409 `idempotency-key-reused`).
+      tags: [Reservations]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReserveStockRequest"
+            example:
+              sku: SKU-1
+              quantity: 6
+              demandRef: order-42
+              lineNo: 1
+      responses:
+        "201":
+          description: Reservation created.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            Location:
+              description: URI of the newly created Reservation.
+              schema:
+                type: string
+                example: /reservations/res-a1b2c3d4-0000-0000-0000-000000000001
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Reservation"
+              example:
+                id: res-a1b2c3d4-0000-0000-0000-000000000001
+                sku: SKU-1
+                quantity: 6
+                demandRef: order-42
+                lineNo: 1
+                status: ACTIVE
+                allocations:
+                  - stockUnitId: su-164710cb-5e14-400b-849c-ed94d8256c6b
+                    quantity: 6
+                createdAt: "2026-08-22T14:20:00Z"
+                expiresAt: "2026-08-22T14:50:00Z"
+        "400":
+          description: >
+            Malformed JSON body (including `cases` sent as null or a
+            non-integer), SKU missing/empty, demandRef missing/empty,
+            ownerRef malformed (invalid-owner-ref), both `quantity` and
+            `cases` sent (quantity-and-cases-exclusive), lineNo present but
+            outside 1..2147483647, or the Idempotency-Key header is
+            absent (ADR 0018).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                emptySku:
+                  summary: SKU missing or empty
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/empty-sku
+                    title: SKU must not be empty
+                    status: 400
+                    detail: sku must not be empty
+                    instance: /reservations
+                quantityAndCasesExclusive:
+                  summary: Both quantity and cases were sent
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/quantity-and-cases-exclusive
+                    title: quantity and cases are mutually exclusive
+                    status: 400
+                    detail: send either quantity (eaches) or cases (whole sealed cases), not both
+                    instance: /reservations
+                invalidOwnerRef:
+                  summary: ownerRef is not at most 64 characters of [A-Za-z0-9._-]
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/invalid-owner-ref
+                    title: ownerRef must be at most 64 characters of [A-Za-z0-9._-]
+                    status: 400
+                    detail: ownerRef must be at most 64 characters of [A-Za-z0-9._-]
+                    instance: /reservations
+                missingDemandRef:
+                  summary: demandRef missing or empty
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/missing-demand-ref
+                    title: demandRef is required
+                    status: 400
+                    detail: demandRef must not be empty
+                    instance: /reservations
+                invalidLineNo:
+                  summary: lineNo is 0, negative or above 2147483647 (ADR 0036)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/invalid-line-no
+                    title: lineNo must be between 1 and 2147483647
+                    status: 400
+                    detail: lineNo must be an integer between 1 and 2147483647 when present
+                    instance: /reservations
+                idempotencyKeyRequired:
+                  summary: Idempotency-Key header missing (ADR 0018)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-required
+                    title: Idempotency-Key header is required
+                    status: 400
+                    detail: This endpoint changes state and requires a caller-supplied Idempotency-Key header so a retried request is never applied twice.
+                    instance: /reservations
+        "409":
+          description: >
+            Requested quantity exceeds this SKU's currently usable
+            inventory across all its StockUnits, or a racing request
+            modified the same StockUnit first (ADR 0019 — re-fetch and
+            retry).
+            The same Idempotency-Key reused with a different method, path or body is also a 409 (idempotency-key-reused).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                insufficientUsable:
+                  summary: Requested quantity exceeds usable inventory
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/insufficient-usable
+                    title: Requested quantity exceeds usable inventory
+                    status: 409
+                    detail: requested quantity exceeds usable inventory
+                    instance: /reservations
+                concurrentModification:
+                  summary: A racing request modified the same stock unit first (ADR 0019)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/concurrent-modification
+                    title: The resource was modified by another request; re-fetch the latest version and retry
+                    status: 409
+                    detail: the resource was modified by another request; re-fetch the latest version and retry
+                    instance: /reservations
+                idempotencyKeyReused:
+                  summary: Idempotency-Key reused with a different method, path or body (REST guideline 2.3)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-reused
+                    title: Idempotency-Key was already used with a different request
+                    status: 409
+                    detail: The Idempotency-Key header on this request was already used with a different method, path or body. Use a new Idempotency-Key for a genuinely different request.
+                    instance: /reservations
+        "422":
+          description: >
+            Neither `quantity` nor `cases` was sent, or the one sent is not
+            a positive number.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                zeroQuantity:
+                  summary: Quantity (or cases) not positive
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/zero-quantity
+                    title: Quantity must be greater than zero
+                    status: 422
+                    detail: quantity must be greater than zero
+                    instance: /reservations
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /reservations/{id}:
+    delete:
+      operationId: revokeReservation
+      summary: Revoke a reservation
+      description: >
+        Cancels an ACTIVE reservation and returns its full reserved
+        quantity to usable inventory on every StockUnit it had allocated
+        from. This is the mechanism that makes reservations safe against
+        physical delivery failure: revoke, then reserve again — the second
+        reservation is free to draw from a different physical holding.
+        Idempotent in effect (a resource that no longer exists or is
+        already resolved simply can't be revoked again), though a second
+        call on an already-resolved reservation is reported as 409, not a
+        silent 204.
+      tags: [Reservations]
+      parameters:
+        - $ref: "#/components/parameters/ReservationId"
+      responses:
+        "204":
+          description: Reservation revoked; quantity returned to usable.
+        "404":
+          description: No reservation exists with this id.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/reservation-not-found
+                title: Reservation not found
+                status: 404
+                detail: reservation not found
+                instance: /reservations/does-not-exist
+        "409":
+          description: >
+            The reservation is already resolved (confirmed, revoked, or
+            expired), or a racing request modified the same reservation
+            first (ADR 0019 — re-fetch and retry).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                reservationAlreadyResolved:
+                  summary: Reservation is already resolved
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/reservation-already-resolved
+                    title: Reservation is already resolved
+                    status: 409
+                    detail: reservation is already resolved (confirmed, revoked, or expired)
+                    instance: /reservations/res-a1b2c3d4-0000-0000-0000-000000000001
+                concurrentModification:
+                  summary: A racing request modified the same reservation first (ADR 0019)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/concurrent-modification
+                    title: The resource was modified by another request; re-fetch the latest version and retry
+                    status: 409
+                    detail: the resource was modified by another request; re-fetch the latest version and retry
+                    instance: /reservations/res-a1b2c3d4-0000-0000-0000-000000000001
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /reservations/{id}/pick-confirmations:
+    post:
+      operationId: confirmPick
+      deprecated: true
+      summary: Confirm a reservation's physical pick
+      description: >
+        Consumes a reservation: for every Allocation it holds, the
+        allocated quantity is physically removed from its StockUnit
+        (StockUnit transitions toward PICKED/REMOVED) and the
+        corresponding bin capacity is released. This is a terminal,
+        one-way command on the resource in the domain command style (not
+        forced into PUT/PATCH) — a reservation that is already resolved,
+        expired, or has no allocations cannot be confirmed again.
+        Superseded by the TaskCompleted consumer (K37: fulfillment-execution's
+        TaskCompleted for a PICK task confirms the reservation — ADR 0035 /
+        ADR 0036); removal planned with the next breaking window.
+      tags: [Reservations]
+      parameters:
+        - $ref: "#/components/parameters/ReservationId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "204":
+          description: Pick confirmed; reservation consumed.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+        "400":
+          $ref: "#/components/responses/IdempotencyKeyRequired"
+        "404":
+          description: >
+            No reservation exists with this id, or (in a data-consistency
+            fault) one of its allocated stock units (stock-unit-not-found)
+            or bins (bin-not-found) is missing.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                reservationNotFound:
+                  summary: No reservation with this id
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/reservation-not-found
+                    title: Reservation not found
+                    status: 404
+                    detail: reservation not found
+                    instance: /reservations/does-not-exist/pick-confirmations
+                stockUnitNotFound:
+                  summary: An allocated stock unit is missing (data-consistency fault)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/stock-unit-not-found
+                    title: Stock unit not found
+                    status: 404
+                    detail: stock unit not found
+                    instance: /reservations/res-a1b2c3d4-0000-0000-0000-000000000001/pick-confirmations
+                binNotFound:
+                  summary: An allocated stock unit's bin is missing (data-consistency fault)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/bin-not-found
+                    title: Bin not found
+                    status: 404
+                    detail: bin not found
+                    instance: /reservations/res-a1b2c3d4-0000-0000-0000-000000000001/pick-confirmations
+        "409":
+          description: >
+            The reservation cannot be confirmed: already resolved,
+            expired, has no allocations, or the pick quantity/bin
+            release is inconsistent with current stock state — or a
+            racing request modified the same reservation, stock unit, or
+            bin first (ADR 0019 — re-fetch and retry).
+            The same Idempotency-Key reused with a different method, path or body is also a 409 (idempotency-key-reused).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                reservationExpired:
+                  summary: Reservation has expired
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/reservation-expired
+                    title: Reservation has expired
+                    status: 409
+                    detail: reservation has expired
+                    instance: /reservations/res-a1b2c3d4-0000-0000-0000-000000000001/pick-confirmations
+                concurrentModification:
+                  summary: A racing request modified the same aggregate first (ADR 0019)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/concurrent-modification
+                    title: The resource was modified by another request; re-fetch the latest version and retry
+                    status: 409
+                    detail: the resource was modified by another request; re-fetch the latest version and retry
+                    instance: /reservations/res-a1b2c3d4-0000-0000-0000-000000000001/pick-confirmations
+                reservationNoAllocations:
+                  summary: Reservation holds no allocations
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/reservation-no-allocations
+                    title: Reservation requires at least one allocation
+                    status: 409
+                    detail: reservation requires at least one allocation
+                    instance: /reservations/res-a1b2c3d4-0000-0000-0000-000000000001/pick-confirmations
+                insufficientReserved:
+                  summary: Pick quantity exceeds what the unit has reserved
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/insufficient-reserved
+                    title: Pick quantity exceeds reserved quantity
+                    status: 409
+                    detail: pick quantity exceeds reserved quantity
+                    instance: /reservations/res-a1b2c3d4-0000-0000-0000-000000000001/pick-confirmations
+                unitUnlocated:
+                  summary: An allocated stock unit is Unlocated
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/unit-unlocated
+                    title: Stock unit is unlocated
+                    status: 409
+                    detail: stock unit is unlocated
+                    instance: /reservations/res-a1b2c3d4-0000-0000-0000-000000000001/pick-confirmations
+                releaseExceedsOccupancy:
+                  summary: Bin release would exceed its occupancy
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/release-exceeds-occupancy
+                    title: Release exceeds bin occupancy
+                    status: 409
+                    detail: cannot release more than is occupied
+                    instance: /reservations/res-a1b2c3d4-0000-0000-0000-000000000001/pick-confirmations
+                idempotencyKeyReused:
+                  summary: Idempotency-Key reused with a different method, path or body (REST guideline 2.3)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-reused
+                    title: Idempotency-Key was already used with a different request
+                    status: 409
+                    detail: The Idempotency-Key header on this request was already used with a different method, path or body. Use a new Idempotency-Key for a genuinely different request.
+                    instance: /reservations/res-a1b2c3d4-0000-0000-0000-000000000001/pick-confirmations
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /inventory/{sku}/usable:
+    get:
+      operationId: getUsableInventory
+      summary: Get usable inventory for a SKU
+      description: >
+        Returns the usable-inventory read model for a SKU: on-hand minus
+        active reservations minus held/unlocated stock, summed across
+        every StockUnit for that SKU. This is a projection, not a stored
+        aggregate — it is what constrains ReserveStock, since total
+        on-hand is not what's available to promise to new demand.
+        Side-effect-free.
+      tags: [Inventory]
+      parameters:
+        - $ref: "#/components/parameters/Sku"
+        - name: ownerRef
+          in: query
+          required: false
+          description: >-
+            The owner whose stock to count (ADR 0045). Omitted means
+            fleet-owned stock only, never "any owner". A malformed value is
+            400 `invalid-owner-ref`.
+          schema:
+            type: string
+            maxLength: 64
+            pattern: '^[A-Za-z0-9._-]*$'
+            example: seller-a
+      responses:
+        "200":
+          description: Usable quantity for the SKU and owner (0 if the SKU is unknown).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UsableInventory"
+              example:
+                sku: SKU-1
+                usable: 7
+                looseUsable: 7
+                reservableCases: 0
+        "400":
+          description: >-
+            SKU path segment missing/empty (empty-sku), or `ownerRef`
+            malformed (invalid-owner-ref).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                emptySku:
+                  summary: SKU missing or empty
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/empty-sku
+                    title: SKU must not be empty
+                    status: 400
+                    detail: sku must not be empty
+                    instance: /inventory//usable
+                invalidOwnerRef:
+                  summary: ownerRef is not at most 64 characters of [A-Za-z0-9._-]
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/invalid-owner-ref
+                    title: ownerRef must be at most 64 characters of [A-Za-z0-9._-]
+                    status: 400
+                    detail: ownerRef must be at most 64 characters of [A-Za-z0-9._-]
+                    instance: /inventory/SKU-1/usable
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /bins/{binId}:
+    put:
+      operationId: registerBin
+      summary: Register a bin, or converge an existing bin to a capacity
+      description: >
+        Declarative, idempotent bin registration by inventory control
+        (ADR 0025). The body states the desired capacity and the bin
+        converges to it. An absent bin is created empty (201). A present
+        bin with the same capacity is left untouched (200, nothing
+        written). A present bin with a different capacity is resized (200),
+        as long as the new capacity is not below what the bin already holds
+        — shrinking below occupancy is rejected (409
+        capacity-below-occupancy) because that stock is physically in the
+        slot. Occupancy is never changed by this call; it moves only through
+        stow and pick. A resize racing a concurrent stow can surface as 409
+        concurrent-modification (re-fetch and retry).
+      tags: [Bins]
+      parameters:
+        - $ref: "#/components/parameters/BinId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterBinRequest"
+            example:
+              capacity: 20
+      responses:
+        "200":
+          description: >
+            The bin already existed; it is now at the requested capacity
+            (unchanged, or resized).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Bin"
+              example:
+                binId: A-1-1
+                capacity: 20
+                occupied: 4
+                available: 16
+        "201":
+          description: The bin did not exist and was created, empty.
+          headers:
+            Location:
+              description: Path of the registered bin.
+              schema:
+                type: string
+                example: /bins/A-1-1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Bin"
+              example:
+                binId: A-1-1
+                capacity: 20
+                occupied: 0
+                available: 20
+        "400":
+          description: Malformed JSON body, or the body omits capacity.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                capacityRequired:
+                  summary: capacity omitted
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/capacity-required
+                    title: capacity is required
+                    status: 400
+                    detail: capacity must be present in the request body
+                    instance: /bins/A-1-1
+                malformedBody:
+                  summary: Body is not valid JSON
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/malformed-request-body
+                    title: The request body is not valid JSON
+                    status: 400
+                    detail: invalid character 'n' looking for beginning of object key string
+                    instance: /bins/A-1-1
+        "409":
+          description: >
+            The requested capacity is below the bin's current occupancy, or
+            the bin was concurrently modified (re-fetch and retry).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                belowOccupancy:
+                  summary: Capacity below current occupancy
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/capacity-below-occupancy
+                    title: Bin capacity cannot be set below current occupancy
+                    status: 409
+                    detail: bin capacity cannot be set below current occupancy
+                    instance: /bins/A-1-1
+                concurrentModification:
+                  summary: Concurrent modification
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/concurrent-modification
+                    title: The resource was modified by another request; re-fetch the latest version and retry
+                    status: 409
+                    detail: aggregate was concurrently modified by another writer; re-fetch and retry
+                    instance: /bins/A-1-1
+        "422":
+          description: capacity is zero, negative, or above the int32 range.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                zeroCapacity:
+                  summary: Zero capacity
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/invalid-bin-capacity
+                    title: Bin capacity must be greater than zero
+                    status: 422
+                    detail: bin capacity must be greater than zero
+                    instance: /bins/A-1-1
+                negativeCapacity:
+                  summary: Negative capacity
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/negative-quantity
+                    title: Quantity must not be negative
+                    status: 422
+                    detail: quantity must not be negative
+                    instance: /bins/A-1-1
+                capacityOutOfRange:
+                  summary: Capacity above the int32 range
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/capacity-out-of-range
+                    title: Bin capacity is out of range
+                    status: 422
+                    detail: capacity must not exceed 2147483647
+                    instance: /bins/A-1-1
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    get:
+      operationId: getBin
+      summary: Get a bin's capacity and occupancy
+      description: >
+        Returns the bin's capacity, how much of it is occupied, and how much
+        is still available for stow. Side-effect-free. An unknown bin is a
+        404 (there is no meaningful empty bin to return).
+      tags: [Bins]
+      parameters:
+        - $ref: "#/components/parameters/BinId"
+      responses:
+        "200":
+          description: The bin's current capacity and occupancy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Bin"
+              example:
+                binId: A-1-1
+                capacity: 20
+                occupied: 4
+                available: 16
+        "404":
+          description: No bin exists with this id.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/bin-not-found
+                title: Bin not found
+                status: 404
+                detail: bin not found
+                instance: /bins/A-1-1
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /bins/{binId}/cycle-counts:
+    post:
+      operationId: runCycleCount
+      summary: Record a physical cycle count for a bin
+      description: >
+        Verifies a bin's physical contents against system records. If the
+        counted quantity matches system quantity, records a clean
+        CycleCountCompleted. A shortfall (counted < system) marks whichever
+        StockUnits cover the difference fully Unlocated (not split into
+        located/lost sub-quantities — kept simple by design) and publishes
+        ItemUnlocated per unit touched. An overage (counted > system) is
+        reported as a DiscrepancyDetected/CycleCountCompleted(discrepancy=true)
+        pair for a separate receiving/audit process to reconcile — this
+        endpoint does not itself create the extra stock. Each call with a
+        new Idempotency-Key represents a new physical count event and is
+        intentionally repeatable (recounting a bin is a normal operational
+        action); a retry with the SAME Idempotency-Key replays the first
+        answer and counts nothing again.
+      tags: [Bins]
+      parameters:
+        - $ref: "#/components/parameters/BinId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CycleCountRequest"
+            example:
+              countedQuantity: 9
+      responses:
+        "200":
+          description: >
+            Cycle count recorded and reconciled (discrepancy indicates
+            whether counted quantity differed from system quantity).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CycleCountResult"
+              example:
+                binId: A-1-1
+                countedQuantity: 9
+                systemQuantity: 10
+                discrepancy: true
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+        "400":
+          description: >
+            Malformed JSON body, binId path segment missing/empty, or the
+            body omits countedQuantity (an explicit 0 is a valid empty-bin
+            count; omitting the field is a client mistake).
+            A missing or malformed Idempotency-Key header is also a 400 (idempotency-key-required / idempotency-key-invalid).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                emptyBinId:
+                  summary: Bin ID missing or empty
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/empty-bin-id
+                    title: Bin ID must not be empty
+                    status: 400
+                    detail: bin id must not be empty
+                    instance: /bins//cycle-counts
+                countedQuantityRequired:
+                  summary: countedQuantity omitted (an explicit 0 is valid)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/counted-quantity-required
+                    title: countedQuantity is required
+                    status: 400
+                    detail: countedQuantity must be present; an explicit 0 is a valid empty-bin count, omitting it is not
+                    instance: /bins/A-1-1/cycle-counts
+                idempotencyKeyRequired:
+                  summary: Idempotency-Key header missing or invalid (REST guideline 2.2)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-required
+                    title: Idempotency-Key header is required
+                    status: 400
+                    detail: This endpoint changes state and requires a caller-supplied Idempotency-Key header so a retried request is never applied twice.
+                    instance: /bins/A-1-1/cycle-counts
+        "404":
+          description: No bin exists with this id.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/bin-not-found
+                title: Bin not found
+                status: 404
+                detail: bin not found
+                instance: /bins/A-1-1/cycle-counts
+        "409":
+          $ref: "#/components/responses/IdempotencyKeyReused"
+        "422":
+          description: countedQuantity present but negative.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/negative-quantity
+                title: Quantity must not be negative
+                status: 422
+                detail: quantity must not be negative
+                instance: /bins/A-1-1/cycle-counts
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /transfers/{transferLineId}/receipt:
+    post:
+      operationId: stageTransferReceipt
+      summary: Stage a destination transfer receipt (count an arrival)
+      description: >-
+        A destination site counted received goods against a transfer line
+        (ADR 0031). The transfer_line_id is looked up in the
+        transfer_allocations ledger: a recognized ALLOCATED line answers
+        201 with a STAGED transfer receipt (expected_quantity from the
+        ledger, received_quantity as counted, variance = received -
+        expected, SIGNED: positive is over, negative is short) and
+        publishes TransferReceiptStaged through the transactional outbox.
+        NO usable stock moves at this step.
+
+
+        An UNRECOGNIZED scan — no ledger row for the line (this service
+        never allocated it), a row that was REJECTED, a transfer_id
+        mismatch, or a destination equal to the transfer's own origin
+        site — is QUARANTINED: an inventory_exceptions row is written
+        (kind UNKNOWN_TRANSFER or UNRECOGNIZED_TRANSFER), nothing that
+        could raise usable stock is published, and the 422 problem body
+        carries the exception's coordinates in its `exception` extension
+        member so an operator can resolve it.
+
+
+        Idempotent on transfer_line_id at the database level: an
+        identical replay answers 200 with the ORIGINAL receipt (replay:
+        true) and republishes nothing; the same line id with a DIFFERENT
+        payload is a 409 transfer-receipt-conflict (the original receipt
+        is immutable).
+      tags: [Transfers]
+      parameters:
+        - $ref: "#/components/parameters/TransferLineId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StageTransferReceiptRequest"
+            example:
+              transferId: tr-77
+              destinationSiteId: SITE-DEST
+              sku: SKU-T1
+              receivedQuantity: 5
+      responses:
+        "200":
+          description: >-
+            Idempotent replay: this exact scan was already staged; the
+            ORIGINAL receipt is returned (replay: true) and nothing was
+            republished.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransferReceipt"
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+        "201":
+          description: >-
+            The receipt was staged against a recognized ALLOCATED line.
+            No usable stock moved — stow first raises it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransferReceipt"
+              example:
+                transferId: tr-77
+                transferLineId: tl-77-1
+                destinationSiteId: SITE-DEST
+                sku: SKU-T1
+                expectedQuantity: 6
+                receivedQuantity: 5
+                variance: -1
+                state: STAGED
+                stagedAt: "2026-10-06T12:00:00Z"
+                replay: false
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+        "400":
+          description: >-
+            Malformed JSON body, transferId/sku/destinationSiteId missing
+            or empty, receivedQuantity not positive, or the
+            Idempotency-Key header is absent (ADR 0018).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                transferIdRequired:
+                  summary: transferId missing
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/transfer-id-required
+                    title: transferId is required
+                    status: 400
+                    detail: transferId must not be empty
+                    instance: /transfers/tl-77-1/receipt
+                emptySku:
+                  summary: SKU missing or empty
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/empty-sku
+                    title: SKU must not be empty
+                    status: 400
+                    detail: sku must not be empty
+                    instance: /transfers/tl-77-1/receipt
+                idempotencyKeyRequired:
+                  summary: Idempotency-Key header missing or invalid (REST guideline 2.2)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-required
+                    title: Idempotency-Key header is required
+                    status: 400
+                    detail: This endpoint changes state and requires a caller-supplied Idempotency-Key header so a retried request is never applied twice.
+                    instance: /transfers/tl-77-1/receipt
+        "409":
+          description: >-
+            This transfer_line_id already has a receipt staged with a
+            DIFFERENT payload; the original receipt stands immutable.
+            The same Idempotency-Key reused with a different method, path or body is also a 409 (idempotency-key-reused).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                transferReceiptConflict:
+                  summary: "This transfer line already has a receipt for a different scan"
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/transfer-receipt-conflict
+                    title: This transfer line already has a receipt for a different scan
+                    status: 409
+                    detail: transfer line already has a receipt for a different scan
+                    instance: /transfers/tl-77-1/receipt
+                idempotencyKeyReused:
+                  summary: Idempotency-Key reused with a different method, path or body (REST guideline 2.3)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-reused
+                    title: Idempotency-Key was already used with a different request
+                    status: 409
+                    detail: The Idempotency-Key header on this request was already used with a different method, path or body. Use a new Idempotency-Key for a genuinely different request.
+                    instance: /transfers/tl-77-1/receipt
+        "422":
+          description: >-
+            The scan could NOT be matched to a recognized ALLOCATED
+            transfer line and was QUARANTINED as an inventory exception.
+            No stock changed. The `exception` extension member carries
+            the quarantine row's coordinates.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/QuarantinedScanProblem"
+              examples:
+                unknownTransfer:
+                  summary: The line was never allocated by this service
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/transfer-scan-quarantined
+                    title: Destination scan quarantined
+                    status: 422
+                    detail: transfer line was never allocated by this service
+                    instance: /transfers/tl-ghost/receipt
+                    exception:
+                      kind: UNKNOWN_TRANSFER
+                      transferId: tr-ghost
+                      transferLineId: tl-ghost
+                      destinationSiteId: SITE-DEST
+                      sku: SKU-T1
+                      receivedQuantity: 5
+                unrecognizedTransfer:
+                  summary: The line was REJECTED at allocation time
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/transfer-scan-quarantined
+                    title: Destination scan quarantined
+                    status: 422
+                    detail: "transfer line is not in ALLOCATED state for this scan: line \"tl-rej\" was decided REJECTED (INSUFFICIENT_USABLE), not ALLOCATED"
+                    instance: /transfers/tl-rej/receipt
+                    exception:
+                      kind: UNRECOGNIZED_TRANSFER
+                      transferId: tr-r
+                      transferLineId: tl-rej
+                      destinationSiteId: SITE-DEST
+                      sku: SKU-T1
+                      receivedQuantity: 5
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /transfers/{transferLineId}/stowages:
+    post:
+      operationId: stowTransferStock
+      summary: Stow a staged transfer receipt into destination bins
+      description: >-
+        Places a STAGED transfer receipt's goods into destination-site
+        bins (ADR 0031) — the ONLY path that raises the destination
+        site's usable stock for a transfer, exactly once per
+        transfer_line_id. Every requested bin must be registered at the
+        receipt's destination site (the site-custody fact fails closed:
+        another site's bin or a legacy site-less bin is a 409), and the
+        bin quantities must sum EXACTLY to the receipt's
+        receivedQuantity. One StockUnit per bin leg is created AT the
+        destination site, the receipt moves STAGED -> STOWED, and
+        TransferStockStowed is published through the same transactional
+        outbox.
+
+
+        Idempotent at the database level: a replayed stow for an
+        already-STOWED receipt answers 200 with the ORIGINAL outcome
+        (replay: true, the original allocations), creates NO second
+        StockUnit and publishes nothing new. Stowing a line with no
+        staged receipt (stow-before-stage) is a 409 receipt-not-staged.
+      tags: [Transfers]
+      parameters:
+        - $ref: "#/components/parameters/TransferLineId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StowTransferRequest"
+            example:
+              bins:
+                - binId: BIN-DEST-1
+                  quantity: 3
+                - binId: BIN-DEST-2
+                  quantity: 2
+      responses:
+        "200":
+          description: >-
+            The receipt is STOWED; the destination site's usable stock
+            rose by exactly receivedQuantity, once. `allocations` names
+            the StockUnits created and the bin each went into.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StowedTransfer"
+              example:
+                transferId: tr-77
+                transferLineId: tl-77-1
+                destinationSiteId: SITE-DEST
+                sku: SKU-T1
+                expectedQuantity: 6
+                receivedQuantity: 5
+                variance: -1
+                state: STOWED
+                stagedAt: "2026-10-06T12:00:00Z"
+                stowedAt: "2026-10-06T12:05:00Z"
+                replay: false
+                stowedQuantity: 5
+                allocations:
+                  - stockUnitId: su-dest-1
+                    binId: BIN-DEST-1
+                    quantity: 3
+                  - stockUnitId: su-dest-2
+                    binId: BIN-DEST-2
+                    quantity: 2
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+        "400":
+          description: >-
+            Malformed JSON body, bins missing/empty, a binId missing or
+            empty, a quantity not positive, or the Idempotency-Key
+            header absent (ADR 0018).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                binsRequired:
+                  summary: "bins is required"
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/bins-required
+                    title: bins is required
+                    status: 400
+                    detail: bins must contain at least one placement
+                    instance: /transfers/tl-77-1/stowages
+                idempotencyKeyRequired:
+                  summary: Idempotency-Key header missing or invalid (REST guideline 2.2)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-required
+                    title: Idempotency-Key header is required
+                    status: 400
+                    detail: This endpoint changes state and requires a caller-supplied Idempotency-Key header so a retried request is never applied twice.
+                    instance: /transfers/tl-77-1/stowages
+        "409":
+          description: >-
+            No STAGED receipt for this line (stow-before-stage, or the
+            line is unknown), a bin outside the destination site's
+            custody, a bin quantity sum mismatch, or the receipt already
+            has a DIFFERENT staged scan.
+            The same Idempotency-Key reused with a different method, path or body is also a 409 (idempotency-key-reused).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                receiptNotStaged:
+                  summary: Stow before stage
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/receipt-not-staged
+                    title: Transfer receipt is not in STAGED state; stage the receipt before stowing
+                    status: 409
+                    detail: transfer receipt is not in STAGED state; stage the receipt before stowing
+                    instance: /transfers/tl-77-1/stowages
+                binWrongSite:
+                  summary: Bin at another site (or a legacy site-less bin)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/bin-wrong-site
+                    title: Bin does not belong to the transfer's destination site
+                    status: 409
+                    detail: "bin does not belong to the transfer's destination site: bin \"BIN-OTHER\" is not in destination site \"SITE-DEST\"'s custody"
+                    instance: /transfers/tl-77-1/stowages
+                stowQuantityMismatch:
+                  summary: Bin quantities do not sum to receivedQuantity
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/stow-quantity-mismatch
+                    title: Stow quantities must sum exactly to the receipt's received quantity
+                    status: 409
+                    detail: "stow quantities must sum exactly to the receipt's received quantity: bins sum to 3 but the receipt received 5"
+                    instance: /transfers/tl-77-1/stowages
+                idempotencyKeyReused:
+                  summary: Idempotency-Key reused with a different method, path or body (REST guideline 2.3)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-reused
+                    title: Idempotency-Key was already used with a different request
+                    status: 409
+                    detail: The Idempotency-Key header on this request was already used with a different method, path or body. Use a new Idempotency-Key for a genuinely different request.
+                    instance: /transfers/tl-77-1/stowages
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /relocations:
+    post:
+      operationId: relocateStock
+      summary: Move stock of one SKU between two bins of the same site
+      description: >-
+        Records an intra-site relocation (ADR 0039; slotting-optimization
+        ADR 0010): quantity units of sku leave fromBin and arrive in toBin,
+        both bins of siteCode. Only the usable (unreserved) quantity of the
+        SKU in fromBin can move. Both bins' occupancy, every touched
+        StockUnit, a new StockUnit in toBin, the relocation record and the
+        `StockRelocated` event (transactional outbox) commit in one
+        transaction; a concurrent change to either bin or a touched unit is
+        a 409 concurrent-modification and nothing moves.
+
+
+        Behind the Idempotency-Key middleware like the other creating POSTs
+        (ADR 0018): a replay with the same key and body returns the original
+        201 without moving stock again; the same key with a different body
+        is 409 idempotency-key-reused.
+      tags: [Stock]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RelocateStockRequest"
+            example:
+              siteCode: WH1
+              sku: SKU-1
+              fromBin: WH1-STOR-AMB-A07-03-02-B
+              toBin: WH1-STOR-AMB-A01-01-01-A
+              quantity: 12
+              reason: SLOTTING
+              sourceRef: plan-7/move-2
+      responses:
+        "201":
+          description: The stock moved; the body is the relocation record.
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+            Location:
+              description: "`/relocations/{id}` of the new relocation."
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Relocation"
+              example:
+                id: rel-0b7e2a54-3c1d-4f0e-9a8b-7c6d5e4f3a21
+                siteCode: WH1
+                sku: SKU-1
+                fromBin: WH1-STOR-AMB-A07-03-02-B
+                toBin: WH1-STOR-AMB-A01-01-01-A
+                quantity: 12
+                reason: SLOTTING
+                sourceRef: plan-7/move-2
+                destinationStockUnitId: su-9a1e0f3c-2b4d-4c6e-8f00-112233445566
+                legs:
+                  - stockUnitId: su-164710cb-5e14-400b-849c-ed94d8256c6b
+                    quantity: 12
+                occurredAt: "2026-10-13T12:00:00Z"
+        "400":
+          description: >-
+            Malformed JSON body, an empty siteCode, sku, fromBin or toBin, or
+            the Idempotency-Key header absent (ADR 0018).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                emptySiteId:
+                  summary: "Site ID must not be empty"
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/empty-site-id
+                    title: Site ID must not be empty
+                    status: 400
+                    detail: site id must not be empty
+                    instance: /relocations
+                idempotencyKeyRequired:
+                  summary: Idempotency-Key header missing or invalid (REST guideline 2.2)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-required
+                    title: Idempotency-Key header is required
+                    status: 400
+                    detail: This endpoint changes state and requires a caller-supplied Idempotency-Key header so a retried request is never applied twice.
+                    instance: /relocations
+        "404":
+          description: fromBin or toBin is not a registered bin.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/bin-not-found
+                title: Bin not found
+                status: 404
+                detail: bin not found
+                instance: /relocations
+        "409":
+          description: >-
+            A bin is not in siteCode (bin-not-at-site), the usable quantity
+            of the SKU in fromBin is below quantity (insufficient-usable),
+            toBin has no room (bin-full), or a concurrent writer changed a
+            bin or a touched unit (concurrent-modification).
+            The same Idempotency-Key reused with a different method, path or body is also a 409 (idempotency-key-reused).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                binNotAtSite:
+                  summary: A bin outside the site
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/bin-not-at-site
+                    title: Bin is not in the relocation's site
+                    status: 409
+                    detail: bin is not in the relocation's site
+                    instance: /relocations
+                insufficientUsable:
+                  summary: Not enough unreserved stock in fromBin
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/insufficient-usable
+                    title: Requested quantity exceeds usable inventory
+                    status: 409
+                    detail: reserve quantity exceeds usable quantity
+                    instance: /relocations
+                binFull:
+                  summary: toBin has no room
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/bin-full
+                    title: "Bin is full: capacity exceeded"
+                    status: 409
+                    detail: "bin is full: capacity exceeded"
+                    instance: /relocations
+                idempotencyKeyReused:
+                  summary: Idempotency-Key reused with a different method, path or body (REST guideline 2.3)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-reused
+                    title: Idempotency-Key was already used with a different request
+                    status: 409
+                    detail: The Idempotency-Key header on this request was already used with a different method, path or body. Use a new Idempotency-Key for a genuinely different request.
+                    instance: /relocations
+        "422":
+          description: >-
+            fromBin equals toBin (same-bin), quantity is not positive
+            (zero-quantity), reason is not SLOTTING, CONSOLIDATION or MANUAL
+            (invalid-relocation-reason), sourceRef is longer than 200
+            characters (source-ref-too-long).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/same-bin
+                title: Relocation source and destination bin must differ
+                status: 422
+                detail: relocation source and destination bin must differ
+                instance: /relocations
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /relocations/{id}:
+    get:
+      operationId: getRelocation
+      summary: Read one relocation
+      description: The applied relocation record (ADR 0039), with its source legs and destination StockUnit.
+      tags: [Stock]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Relocation id (`rel-<uuid>`).
+          schema:
+            type: string
+            example: rel-0b7e2a54-3c1d-4f0e-9a8b-7c6d5e4f3a21
+      responses:
+        "200":
+          description: The relocation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Relocation"
+        "404":
+          description: No relocation has this id.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/relocation-not-found
+                title: Relocation not found
+                status: 404
+                detail: relocation not found
+                instance: /relocations/rel-missing
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /containers/{lpn}:
+    get:
+      operationId: getContainer
+      summary: Read one container
+      description: >-
+        The container (sealed case, ADR 0045) with this license plate: SKU,
+        case GTIN, units per pack, quantity in eaches, owner, site and bin
+        (empty until it is stowed), state (SEALED, OPEN or EMPTY), lot,
+        expiry and the receipt line it came from. Side-effect-free.
+      tags: [Containers]
+      parameters:
+        - name: lpn
+          in: path
+          required: true
+          description: The container's license plate (the carton SSCC, or an internal `LPN-<site>-<id>`).
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+            pattern: '^[A-Za-z0-9._-]+$'
+            example: "003400000000000017"
+      responses:
+        "200":
+          description: The container.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Container"
+              example:
+                lpn: "003400000000000017"
+                sku: SKU-1
+                gtin: "24006381333935"
+                unitsPerPack: 12
+                qtyEaches: 12
+                ownerRef: seller-a
+                siteId: WH1
+                binId: WH1-STOR-AMB-A01-01-01-A
+                state: SEALED
+                lot: L1
+                expiry: "2027-03-01"
+                stockUnitId: su-9a1e0f3c-2b4d-4c6e-8f00-112233445566
+                receiptId: rcpt-1
+                lineNo: 1
+        "404":
+          description: No container has this LPN.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/container-not-found
+                title: Container not found
+                status: 404
+                detail: container not found
+                instance: /containers/NOPE
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /containers/{lpn}/stowages:
+    post:
+      operationId: stowContainer
+      summary: Stow a sealed case into a case bin
+      description: >-
+        Scan the LPN, scan the location (ADR 0045). The bin must accept
+        sealed cases (handling unit CASE or PALLET, as published by
+        facility-layout); a bin whose handling unit is unknown or EACH is
+        409 `bin-handling-unit-mismatch` (fail closed). The first stow sets
+        the container's site from the bin's site (a carton event carries no
+        site) and creates the SEALED_CASE stock unit holding the case's
+        eaches; moving a stowed container to another bin of the same site
+        is allowed, to another site is 409 `container-not-at-site`.
+        Stowing into the bin it is already in is a no-op.
+
+
+        Behind the Idempotency-Key middleware like the other creating POSTs
+        (ADR 0018).
+      tags: [Containers]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: lpn
+          in: path
+          required: true
+          description: The container's license plate (the carton SSCC, or an internal `LPN-<site>-<id>`).
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+            pattern: '^[A-Za-z0-9._-]+$'
+            example: "003400000000000017"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bin]
+              properties:
+                bin:
+                  type: string
+                  minLength: 1
+                  description: The case bin to stow into.
+                  example: WH1-STOR-AMB-A01-01-01-A
+            example:
+              bin: WH1-STOR-AMB-A01-01-01-A
+      responses:
+        "200":
+          description: The stowed container.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Container"
+              example:
+                lpn: "003400000000000017"
+                sku: SKU-1
+                gtin: "24006381333935"
+                unitsPerPack: 12
+                qtyEaches: 12
+                ownerRef: seller-a
+                siteId: WH1
+                binId: WH1-STOR-AMB-A01-01-01-A
+                state: SEALED
+                lot: L1
+                expiry: "2027-03-01"
+                stockUnitId: su-9a1e0f3c-2b4d-4c6e-8f00-112233445566
+                receiptId: rcpt-1
+                lineNo: 1
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+        "400":
+          description: Malformed body, an empty bin, or the Idempotency-Key header absent.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                emptyBinId:
+                  summary: "Bin ID must not be empty"
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/empty-bin-id
+                    title: Bin ID must not be empty
+                    status: 400
+                    detail: bin id must not be empty
+                    instance: /containers/003400000000000017/stowages
+                idempotencyKeyRequired:
+                  summary: Idempotency-Key header missing or invalid (REST guideline 2.2)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-required
+                    title: Idempotency-Key header is required
+                    status: 400
+                    detail: This endpoint changes state and requires a caller-supplied Idempotency-Key header so a retried request is never applied twice.
+                    instance: /containers/003400000000000017/stowages
+        "404":
+          description: The container or the bin is unknown.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/container-not-found
+                title: Container not found
+                status: 404
+                detail: container not found
+                instance: /containers/NOPE/stowages
+        "409":
+          description: >-
+            The bin does not accept sealed cases (bin-handling-unit-mismatch),
+            the container is not SEALED (container-not-sealed), the bin is in
+            another site (container-not-at-site), the bin has no room
+            (bin-full), or a concurrent writer changed it
+            (concurrent-modification).
+            The same Idempotency-Key reused with a different method, path or body is also a 409 (idempotency-key-reused).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                binHandlingUnitMismatch:
+                  summary: "Bin does not accept this kind of handling unit"
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/bin-handling-unit-mismatch
+                    title: Bin does not accept this kind of handling unit
+                    status: 409
+                    detail: bin does not accept this handling unit
+                    instance: /containers/003400000000000017/stowages
+                idempotencyKeyReused:
+                  summary: Idempotency-Key reused with a different method, path or body (REST guideline 2.3)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-reused
+                    title: Idempotency-Key was already used with a different request
+                    status: 409
+                    detail: The Idempotency-Key header on this request was already used with a different method, path or body. Use a new Idempotency-Key for a genuinely different request.
+                    instance: /containers/003400000000000017/stowages
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /containers/{lpn}/case-breaks:
+    post:
+      operationId: breakCase
+      summary: Break a sealed case into loose eaches
+      description: >-
+        BreakCase (ADR 0045): the whole sealed case is opened and its eaches
+        move to loose stock of the same owner in `looseBin`. Full-quantity
+        and conserving: exactly `unitsPerPack` eaches leave the SEALED_CASE
+        unit and arrive as loose stock, and the container goes SEALED, OPEN,
+        EMPTY in one transaction, with `CaseBroken` and `ContainerEmptied`
+        in the transactional outbox. A case that is reserved (a `cases`
+        reservation) cannot be broken; a container that is not SEALED and
+        stowed cannot either; `looseBin` must accept loose eaches and be in
+        the container's site.
+
+
+        Behind the Idempotency-Key middleware (ADR 0018).
+      tags: [Containers]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: lpn
+          in: path
+          required: true
+          description: The container's license plate (the carton SSCC, or an internal `LPN-<site>-<id>`).
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+            pattern: '^[A-Za-z0-9._-]+$'
+            example: "003400000000000017"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [looseBin]
+              properties:
+                looseBin:
+                  type: string
+                  minLength: 1
+                  description: The bin that receives the loose eaches.
+                  example: WH1-PICK-AMB-B01-01-01-A
+            example:
+              looseBin: WH1-PICK-AMB-B01-01-01-A
+      responses:
+        "200":
+          description: The container, now EMPTY.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Container"
+              example:
+                lpn: "003400000000000017"
+                sku: SKU-1
+                gtin: "24006381333935"
+                unitsPerPack: 12
+                qtyEaches: 12
+                ownerRef: seller-a
+                siteId: WH1
+                state: EMPTY
+                lot: L1
+                expiry: "2027-03-01"
+                stockUnitId: su-9a1e0f3c-2b4d-4c6e-8f00-112233445566
+                receiptId: rcpt-1
+                lineNo: 1
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+        "400":
+          description: Malformed body, an empty looseBin, or the Idempotency-Key header absent.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                emptyBinId:
+                  summary: "Bin ID must not be empty"
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/empty-bin-id
+                    title: Bin ID must not be empty
+                    status: 400
+                    detail: bin id must not be empty
+                    instance: /containers/003400000000000017/case-breaks
+                idempotencyKeyRequired:
+                  summary: Idempotency-Key header missing or invalid (REST guideline 2.2)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-required
+                    title: Idempotency-Key header is required
+                    status: 400
+                    detail: This endpoint changes state and requires a caller-supplied Idempotency-Key header so a retried request is never applied twice.
+                    instance: /containers/003400000000000017/case-breaks
+        "404":
+          description: The container or the bin is unknown.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/container-not-found
+                title: Container not found
+                status: 404
+                detail: container not found
+                instance: /containers/NOPE/case-breaks
+        "409":
+          description: >-
+            The container is not SEALED (container-not-sealed) or not stowed
+            (container-not-stowed), it is reserved (container-reserved), the
+            unit does not hold exactly the case (break-not-conserving),
+            looseBin does not accept loose eaches (bin-handling-unit-mismatch),
+            looseBin is in another site (container-not-at-site) or has no
+            room (bin-full), or a concurrent writer changed it
+            (concurrent-modification).
+            The same Idempotency-Key reused with a different method, path or body is also a 409 (idempotency-key-reused).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                containerReserved:
+                  summary: "Container is reserved"
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/container-reserved
+                    title: Container is reserved
+                    status: 409
+                    detail: container is reserved
+                    instance: /containers/003400000000000017/case-breaks
+                idempotencyKeyReused:
+                  summary: Idempotency-Key reused with a different method, path or body (REST guideline 2.3)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-reused
+                    title: Idempotency-Key was already used with a different request
+                    status: 409
+                    detail: The Idempotency-Key header on this request was already used with a different method, path or body. Use a new Idempotency-Key for a genuinely different request.
+                    instance: /containers/003400000000000017/case-breaks
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /bins/{binId}/containers:
+    get:
+      operationId: listBinContainers
+      summary: List the containers stowed in a bin
+      description: >-
+        The sealed or open containers stowed in the bin (ADR 0045), ordered
+        by LPN (which is unique, so it is both the sort key and the id of
+        the keyset cursor). Empty containers have no bin and are not
+        listed. Keyset-paginated (REST guideline section 3): one page of
+        `{items, nextCursor}`, `limit` (1-500, default 100) and the opaque
+        `cursor` from the previous page's `nextCursor`; `nextCursor` is
+        absent on the last page. Any other query parameter is 400
+        `unknown-query-parameter`. Side-effect-free.
+      tags: [Containers]
+      parameters:
+        - name: binId
+          in: path
+          required: true
+          description: The bin to inspect.
+          schema:
+            type: string
+            example: WH1-STOR-AMB-A01-01-01-A
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of the containers in the bin (possibly none), ordered by LPN.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContainerPage"
+              example:
+                items:
+                  - lpn: "003400000000000017"
+                    sku: SKU-1
+                    gtin: "24006381333935"
+                    unitsPerPack: 12
+                    qtyEaches: 12
+                    ownerRef: seller-a
+                    siteId: WH1
+                    binId: WH1-STOR-AMB-A01-01-01-A
+                    state: SEALED
+                    lot: L1
+                    expiry: "2027-03-01"
+                    stockUnitId: su-9a1e0f3c-2b4d-4c6e-8f00-112233445566
+                    receiptId: rcpt-1
+                    lineNo: 1
+        "400":
+          description: >-
+            `limit` is not an integer between 1 and 500 (invalid-limit), or
+            `cursor` is not a page token this API issued (invalid-cursor), or
+            any query parameter other than `limit` and `cursor` was sent
+            (unknown-query-parameter).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                invalidLimit:
+                  summary: limit is not an integer between 1 and 500
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/invalid-limit
+                    title: "limit must be an integer between 1 and 500"
+                    status: 400
+                    detail: "limit must be an integer between 1 and 500"
+                    instance: /bins/WH1-STOR-AMB-A01-01-01-A/containers
+                invalidCursor:
+                  summary: cursor was not issued by this API
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/invalid-cursor
+                    title: "cursor is not a valid page token"
+                    status: 400
+                    detail: "cursor is not a valid page token"
+                    instance: /bins/WH1-STOR-AMB-A01-01-01-A/containers
+                unknownQueryParameter:
+                  summary: a query parameter the collection does not declare
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/unknown-query-parameter
+                    title: the collection does not declare this query parameter
+                    status: 400
+                    detail: "unknown query parameter: after"
+                    instance: /bins/WH1-STOR-AMB-A01-01-01-A/containers
+        "404":
+          description: The bin is not registered.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/bin-not-found
+                title: Bin not found
+                status: 404
+                detail: bin not found
+                instance: /bins/NOPE/containers
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /held-stock:
+    get:
+      operationId: listHeldStock
+      summary: List the units held out of usable stock
+      description: >-
+        The units still HELD (ADR 0052), oldest first (ties by id), filtered by
+        `reason`, `sku` and age (`olderThanHours`: held for MORE than that
+        many hours). A removed unit (released, returned, scrapped) is not
+        listed; read it by id for its audit trail. Keyset-paginated (REST
+        guideline section 3): `{items, nextCursor}`, `limit` (1-500, default
+        100) and the opaque `cursor`. Any other query parameter is 400
+        `unknown-query-parameter`. Side-effect-free.
+      tags: [HeldStock]
+      parameters:
+        - name: reason
+          in: query
+          required: false
+          description: Only units held for this reason.
+          schema:
+            type: string
+            enum: [DAMAGED, QC_PENDING, SUSPECT, OTHER]
+        - name: sku
+          in: query
+          required: false
+          description: Only units of this SKU.
+          schema:
+            type: string
+            example: SKU-1
+        - name: olderThanHours
+          in: query
+          required: false
+          description: Only units held for more than this many hours (the ageing filter).
+          schema:
+            type: integer
+            minimum: 0
+            example: 24
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of held units (possibly none), oldest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HeldUnitPage"
+              example:
+                items:
+                  - id: hu-3f6c1b0e-7a52-4d11-8c3e-0a9d5b7e2f64
+                    sku: SKU-1
+                    quantity: 4
+                    reason: DAMAGED
+                    state: HELD
+                    receiptId: rcpt-1
+                    asnNumber: ASN-1
+                    lineNo: 2
+                    ownerRef: seller-a
+                    sscc: "003400000000000017"
+                    lpns: ["003400000000000017"]
+                    heldAt: "2026-11-09T07:00:00Z"
+                    reworkCount: 0
+        "400":
+          description: >-
+            `reason` is not a hold reason (invalid-hold-reason),
+            `olderThanHours` is not a non-negative integer
+            (invalid-older-than-hours), `limit` or `cursor` is invalid
+            (invalid-limit, invalid-cursor), or an undeclared query parameter
+            was sent (unknown-query-parameter).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/invalid-hold-reason
+                title: reason must be DAMAGED, QC_PENDING, SUSPECT or OTHER
+                status: 400
+                detail: "unknown hold reason: BROKEN"
+                instance: /held-stock
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /held-stock/{id}:
+    get:
+      operationId: getHeldUnit
+      summary: Read one held unit
+      description: >-
+        A held unit with its receipt line, owner, carton marks and, once
+        decided, its disposition. A unit that was released, returned or
+        scrapped stays readable here as the audit trail. Side-effect-free.
+      tags: [HeldStock]
+      parameters:
+        - $ref: "#/components/parameters/HeldUnitId"
+      responses:
+        "200":
+          description: The held unit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HeldUnit"
+              example:
+                id: hu-3f6c1b0e-7a52-4d11-8c3e-0a9d5b7e2f64
+                sku: SKU-1
+                quantity: 4
+                reason: DAMAGED
+                state: HELD
+                receiptId: rcpt-1
+                asnNumber: ASN-1
+                lineNo: 2
+                ownerRef: seller-a
+                lpns: []
+                heldAt: "2026-11-09T07:00:00Z"
+                reworkCount: 0
+        "404":
+          description: No held unit has this id.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/held-unit-not-found
+                title: Held unit not found
+                status: 404
+                detail: held unit not found
+                instance: /held-stock/hu-missing
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /held-stock/{id}/dispositions:
+    post:
+      operationId: decideHeldDisposition
+      summary: Decide what happens to a held unit
+      description: >-
+        The disposition decision (ADR 0052). RELEASE returns the quantity to
+        usable stock through the same staged-receipt seam as a fresh receipt
+        (it is usable once stowed) and emits `StockReleased`;
+        RETURN_TO_VENDOR and SCRAP remove the unit; REWORK keeps it HELD under
+        a new `reason` (default OTHER). Every decision emits
+        `StockDispositioned`. The decision, the unit's save and the events are
+        one transaction. A unit that already has a final disposition is 409
+        `held-unit-closed`.
+
+
+        Behind the Idempotency-Key middleware like the other creating POSTs
+        (ADR 0018).
+      tags: [HeldStock]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/HeldUnitId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [disposition]
+              properties:
+                disposition:
+                  type: string
+                  enum: [RELEASE, RETURN_TO_VENDOR, SCRAP, REWORK]
+                reason:
+                  type: string
+                  enum: [DAMAGED, QC_PENDING, SUSPECT, OTHER]
+                  description: The new hold reason; read only for REWORK.
+            example:
+              disposition: RETURN_TO_VENDOR
+      responses:
+        "200":
+          description: The unit after the decision (REMOVED, or still HELD for REWORK).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HeldUnit"
+              example:
+                id: hu-3f6c1b0e-7a52-4d11-8c3e-0a9d5b7e2f64
+                sku: SKU-1
+                quantity: 4
+                reason: DAMAGED
+                state: REMOVED
+                receiptId: rcpt-1
+                asnNumber: ASN-1
+                lineNo: 2
+                ownerRef: seller-a
+                lpns: []
+                heldAt: "2026-11-09T07:00:00Z"
+                disposition: RETURN_TO_VENDOR
+                decidedAt: "2026-11-09T12:00:00Z"
+                reworkCount: 0
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+        "400":
+          description: Malformed body, or the Idempotency-Key header absent.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-required
+                title: Idempotency-Key header is required
+                status: 400
+                detail: This endpoint changes state and requires a caller-supplied Idempotency-Key header so a retried request is never applied twice.
+                instance: /held-stock/hu-3f6c1b0e-7a52-4d11-8c3e-0a9d5b7e2f64/dispositions
+        "404":
+          description: No held unit has this id.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/held-unit-not-found
+                title: Held unit not found
+                status: 404
+                detail: held unit not found
+                instance: /held-stock/hu-missing/dispositions
+        "409":
+          description: >-
+            The unit already has a final disposition (held-unit-closed), or a
+            concurrent writer changed it (concurrent-modification). The same
+            Idempotency-Key reused with a different method, path or body is
+            also a 409 (idempotency-key-reused).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/held-unit-closed
+                title: Held unit already has a final disposition
+                status: 409
+                detail: held unit already has a final disposition
+                instance: /held-stock/hu-3f6c1b0e-7a52-4d11-8c3e-0a9d5b7e2f64/dispositions
+        "422":
+          description: The disposition is not one of the four (invalid-disposition), or the REWORK reason is not a hold reason (invalid-hold-reason).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/invalid-disposition
+                title: Disposition must be RELEASE, RETURN_TO_VENDOR, SCRAP or REWORK
+                status: 422
+                detail: invalid disposition
+                instance: /held-stock/hu-3f6c1b0e-7a52-4d11-8c3e-0a9d5b7e2f64/dispositions
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /reports/flow-accuracy:
+    get:
+      operationId: getFlowAccuracyReport
+      summary: Inventory Flow & Accuracy report (hourly)
+      description: >
+        Read-only analytical report over the inventory-storage event
+        stream (ADR 0011): per (SKU, bin, hour) received/stowed/picked
+        quantities, reservation lifecycle counts, and cycle-count
+        accuracy signals. Served by the `inventory-reports` deployment
+        from its own read-only pool (ADR 0020 §CQRS split); the OLTP
+        `inventory` binary does not serve this path. `from` and `to` are
+        required RFC 3339 timestamps; `sku` and `binId` narrow the result;
+        `granularity` is currently only `hour`. Side-effect-free and
+        unauthenticated (ADR 0015).
+      tags: [Reports]
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: Inclusive start of the window, RFC 3339.
+          schema:
+            type: string
+            format: date-time
+            example: "2026-10-01T00:00:00Z"
+        - name: to
+          in: query
+          required: true
+          description: End of the window, RFC 3339.
+          schema:
+            type: string
+            format: date-time
+            example: "2026-10-02T00:00:00Z"
+        - name: sku
+          in: query
+          required: false
+          description: Restrict to one SKU.
+          schema:
+            type: string
+            example: SKU-1
+        - name: binId
+          in: query
+          required: false
+          description: Restrict to one bin.
+          schema:
+            type: string
+            example: A-1-1
+        - name: granularity
+          in: query
+          required: false
+          description: Bucket size. Only `hour` is supported (the default).
+          schema:
+            type: string
+            enum: [hour]
+            default: hour
+      responses:
+        "200":
+          description: The report rows for the window (possibly empty).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FlowAccuracyReport"
+              example:
+                rows:
+                  - sku: SKU-1
+                    binId: A-1-1
+                    hourBucket: "2026-10-01T14:00:00Z"
+                    receivedQuantity: 10
+                    stowedCount: 1
+                    pickedQuantity: 4
+                    reservationsCreated: 1
+                    reservationsExpired: 0
+                    reservationsRevoked: 0
+                    cycleCountsCompleted: 0
+                    discrepanciesDetected: 0
+                    unlocatedCount: 0
+        "400":
+          description: >
+            `from` or `to` missing or not an RFC 3339 timestamp, or
+            `granularity` is not `hour`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/invalid-report-query
+                title: The report query is malformed or missing a required parameter
+                status: 400
+                detail: query parameter 'from' is required (RFC3339)
+                instance: /reports/flow-accuracy
+        "500":
+          description: The read model could not be queried.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/report-store-error
+                title: The report could not be served
+                status: 500
+                detail: read model unavailable
+                instance: /reports/flow-accuracy
+
+  /reports/flow-accuracy/freshness:
+    get:
+      operationId: getFlowAccuracyFreshness
+      summary: Freshness lag of the flow-accuracy read model
+      description: >
+        Seconds between now and the newest event the analytics projector
+        has folded into the read model (ADR 0011) — the staleness a
+        consumer of `/reports/flow-accuracy` should expect. Served by the
+        `inventory-reports` deployment. Side-effect-free.
+      tags: [Reports]
+      responses:
+        "200":
+          description: Current projection lag.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  lagSeconds:
+                    type: number
+                    format: double
+                    description: Projection lag in seconds.
+                    example: 1.5
+                example:
+                  lagSeconds: 1.5
+        "500":
+          description: The read model could not be queried.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/report-store-error
+                title: The report could not be served
+                status: 500
+                detail: read model unavailable
+                instance: /reports/flow-accuracy/freshness
+
+components:
+  headers:
+    IdempotencyReplayed:
+      description: >
+        Present, with the value `true`, ONLY when this response is a replay
+        of the stored answer for the request's Idempotency-Key (the handler
+        did not run again). The first execution of a key never carries it.
+      schema:
+        type: string
+        enum: ["true"]
+        example: "true"
+
+  parameters:
+    ReservationId:
+      name: id
+      in: path
+      required: true
+      description: The reservation's id, formatted `res-<uuid>`.
+      schema:
+        type: string
+        example: res-a1b2c3d4-0000-0000-0000-000000000001
+    Sku:
+      name: sku
+      in: path
+      required: true
+      description: The stock-keeping unit identifier.
+      schema:
+        type: string
+        example: SKU-1
+    DemandRef:
+      name: demandRef
+      in: query
+      required: true
+      description: >
+        The caller-supplied demand reference to look reservations up by
+        (e.g. an external order+line reference). Required — there is no
+        list-all semantics for this endpoint.
+      schema:
+        type: string
+        minLength: 1
+        example: order-42
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >
+        Caller-generated unique key (a UUID per logical submit; a retry
+        reuses it, a new user action mints a new one) that makes a retried
+        request safe (ADR 0018, REST guideline section 2): 1-128 printable
+        ASCII characters. Postgres is the only runtime, so the check is on in
+        every deployment: a missing key is answered with 400
+        `idempotency-key-required`, a malformed one with 400
+        `idempotency-key-invalid`; a replay with the same key and the same
+        method, path and body returns the original response plus
+        `Idempotency-Replayed: true`, while the same key with a different
+        method, path or body is 409 `idempotency-key-reused`.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: '^[ -~]+$'
+        example: 5b0f6a0e-6a41-4c63-9f33-0c8f5c1d2a77
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: >
+        Page size of a collection GET (REST guideline 3.2): an integer from 1
+        to 500, default 100. Anything else is 400 `invalid-limit`.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 100
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: >
+        Opaque page token: the previous page's `nextCursor`, passed back
+        unchanged together with the same filters. Absent on the first page. A
+        value this API did not issue is 400 `invalid-cursor`.
+      schema:
+        type: string
+    HeldUnitId:
+      name: id
+      in: path
+      required: true
+      description: The held unit's id (`hu-<uuid>`).
+      schema:
+        type: string
+        example: hu-3f6c1b0e-7a52-4d11-8c3e-0a9d5b7e2f64
+    BinId:
+      name: binId
+      in: path
+      required: true
+      description: The bin's coded slot identifier.
+      schema:
+        type: string
+        example: A-1-1
+    TransferLineId:
+      name: transferLineId
+      in: path
+      required: true
+      description: >-
+        The planning context's transfer line id (`<transfer_id>:<line>`),
+        the DB-unique key both the origin-side transfer_allocations
+        ledger and the destination-side transfer_receipts row are
+        anchored on (ADR 0031).
+      schema:
+        type: string
+        example: tr-77:1
+
+  responses:
+    IdempotencyKeyRequired:
+      description: >-
+        The Idempotency-Key header is missing (idempotency-key-required) or
+        is not 1-128 printable ASCII characters (idempotency-key-invalid).
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          examples:
+            idempotencyKeyRequired:
+              summary: Idempotency-Key header missing (REST guideline 2.2)
+              value:
+                type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-required
+                title: Idempotency-Key header is required
+                status: 400
+                detail: This endpoint changes state and requires a caller-supplied Idempotency-Key header so a retried request is never applied twice.
+                instance: /stock-receipts
+            idempotencyKeyInvalid:
+              summary: Idempotency-Key header is not 1-128 printable ASCII characters
+              value:
+                type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-invalid
+                title: Idempotency-Key header is invalid
+                status: 400
+                detail: The Idempotency-Key header must be 1-128 printable ASCII characters (a client-generated UUID per logical submit).
+                instance: /stock-receipts
+    IdempotencyKeyReused:
+      description: >-
+        The Idempotency-Key was already used with a different method, path
+        or body (idempotency-key-reused). Distinguishable from a business 409
+        by the problem type; a client bug, never retried blindly.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-reused
+            title: Idempotency-Key was already used with a different request
+            status: 409
+            detail: The Idempotency-Key header on this request was already used with a different method, path or body. Use a new Idempotency-Key for a genuinely different request.
+            instance: /stock-receipts
+    InternalError:
+      description: An unexpected internal error occurred.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+          example:
+            type: https://errors.inventory-storage.warehouse-systems.dev/internal-error
+            title: An unexpected internal error occurred
+            status: 500
+            detail: unexpected adapter failure
+            instance: /stowages
+
+  schemas:
+    Problem:
+      type: object
+      description: >
+        RFC 7807 (Problem Details for HTTP APIs) error shape, used for
+        every non-2xx response across this service. `type` is
+        `https://errors.inventory-storage.warehouse-systems.dev/<slug>`;
+        every slug is documented as a response example on the operation(s)
+        that can return it, and the mapping from typed domain error to
+        (status, slug, title) lives in one lookup table
+        (`problemCatalog` in internal/adapters/inbound/http/errors.go,
+        ADR 0005).
+      required: [type, title, status, detail]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: >
+            A URI identifying the error category (does not need to
+            resolve). Unique per distinct error category in this service.
+          example: https://errors.inventory-storage.warehouse-systems.dev/reservation-not-found
+        title:
+          type: string
+          description: Fixed, human-readable summary of the error category.
+          example: Reservation not found
+        status:
+          type: integer
+          format: int32
+          description: Duplicates the HTTP status code as an integer (RFC 7807 requirement).
+          example: 404
+        detail:
+          type: string
+          description: The specific error message for this occurrence.
+          example: reservation not found
+        instance:
+          type: string
+          description: The request path that produced this error.
+          example: /reservations/does-not-exist
+
+    ReservationPage:
+      type: object
+      required: [items]
+      description: >
+        One keyset page of reservations (REST guideline section 3.3),
+        ordered by (createdAt, id).
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Reservation"
+        nextCursor:
+          type: string
+          description: >
+            Opaque cursor of the next page, to be passed back unchanged as
+            `cursor`. Absent on the last page.
+          example: eyJzIjoiMjAyNi0wOC0yMlQxNDowNTowMFoiLCJpIjoicmVzLWExYjJjM2Q0LTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMiJ9
+
+    ContainerPage:
+      type: object
+      required: [items]
+      description: >
+        One keyset page of containers (REST guideline section 3.3), ordered
+        by LPN.
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Container"
+        nextCursor:
+          type: string
+          description: >
+            Opaque cursor of the next page, to be passed back unchanged as
+            `cursor`. Absent on the last page.
+
+    HeldUnitPage:
+      type: object
+      required: [items]
+      description: >
+        One keyset page of held units (REST guideline section 3.3), oldest
+        first.
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/HeldUnit"
+        nextCursor:
+          type: string
+          description: >
+            Opaque cursor of the next page, to be passed back unchanged as
+            `cursor`. Absent on the last page.
+
+    HeldUnit:
+      type: object
+      required: [id, sku, quantity, reason, state, receiptId, lineNo, lpns, heldAt, reworkCount]
+      description: >-
+        A quantity held out of usable stock (ADR 0052). It has no bin and no
+        usable quantity, and can never be reserved.
+      properties:
+        id:
+          type: string
+          example: hu-3f6c1b0e-7a52-4d11-8c3e-0a9d5b7e2f64
+        sku:
+          type: string
+          example: SKU-1
+        quantity:
+          type: integer
+          minimum: 1
+          description: Eaches held.
+        reason:
+          type: string
+          enum: [DAMAGED, QC_PENDING, SUSPECT, OTHER]
+        state:
+          type: string
+          enum: [HELD, REMOVED]
+          description: HELD while waiting for a decision; REMOVED once a final disposition settled it.
+        receiptId:
+          type: string
+          description: The inbound receipt the quantity came from.
+        asnNumber:
+          type: string
+        lineNo:
+          type: integer
+          minimum: 1
+          description: The receipt line.
+        ownerRef:
+          type: string
+          description: Owner of the stock; absent for fleet-owned stock.
+        sscc:
+          type: string
+          description: The carton SSCC of the line, when it had one.
+        lpns:
+          type: array
+          items:
+            type: string
+          description: License plates of the Damaged cartons of the line (marks only; they carry no quantity).
+        heldAt:
+          type: string
+          format: date-time
+        disposition:
+          type: string
+          enum: [RELEASE, RETURN_TO_VENDOR, SCRAP, REWORK]
+          description: The last decision, once there is one.
+        decidedAt:
+          type: string
+          format: date-time
+        reworkCount:
+          type: integer
+          minimum: 0
+          description: How many times the unit was sent to REWORK.
+
+    ReceiveStockRequest:
+      type: object
+      required: [sku, quantity]
+      properties:
+        sku:
+          type: string
+          minLength: 1
+          description: Stock-keeping unit identifier for the inbound goods.
+          example: SKU-1
+        quantity:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Quantity received. Must be a positive integer.
+          example: 10
+
+    StagedReceipt:
+      type: object
+      properties:
+        sku:
+          type: string
+          example: SKU-1
+        quantity:
+          type: integer
+          format: int32
+          example: 10
+        receivedAt:
+          type: string
+          format: date-time
+          description: Timestamp the receipt was staged, RFC 3339.
+          example: "2026-08-22T14:20:00Z"
+
+    StowStockRequest:
+      type: object
+      required: [sku, quantity, binId]
+      properties:
+        sku:
+          type: string
+          minLength: 1
+          description: Stock-keeping unit identifier (item-scan).
+          example: SKU-1
+        quantity:
+          type: integer
+          format: int32
+          minimum: 1
+          description: Quantity to stow. Must be a positive integer.
+          example: 10
+        binId:
+          type: string
+          minLength: 1
+          description: Target bin's coded slot identifier (location-scan).
+          example: A-1-1
+
+    StockUnit:
+      type: object
+      description: A quantity of a SKU at a specific bin.
+      properties:
+        id:
+          type: string
+          description: StockUnit id, formatted `su-<uuid>`.
+          example: su-164710cb-5e14-400b-849c-ed94d8256c6b
+        sku:
+          type: string
+          example: SKU-1
+        binId:
+          type: string
+          example: A-1-1
+        quantity:
+          type: integer
+          format: int32
+          description: Total on-hand quantity at this bin.
+          example: 10
+        reserved:
+          type: integer
+          format: int32
+          description: Portion of quantity currently bound to a Reservation.
+          example: 0
+        state:
+          type: string
+          description: Lifecycle state of the unit.
+          enum: [AVAILABLE, RESERVED, PICKED, REMOVED, UNLOCATED]
+          example: AVAILABLE
+
+    ReserveStockRequest:
+      type: object
+      required: [sku, demandRef]
+      oneOf:
+        - required: [quantity]
+        - required: [cases]
+      description: >-
+        Send exactly one of `quantity` (eaches, drawn from loose stock) or
+        `cases` (whole sealed cases, ADR 0045); sending both is 400
+        `quantity-and-cases-exclusive`, sending neither is 422
+        `zero-quantity`.
+      properties:
+        sku:
+          type: string
+          minLength: 1
+          example: SKU-1
+        quantity:
+          type: integer
+          format: int32
+          minimum: 1
+          description: Eaches to reserve from loose stock. A positive integer; mutually exclusive with `cases`.
+          example: 6
+        cases:
+          type: integer
+          format: int32
+          minimum: 1
+          description: >-
+            Whole sealed cases to reserve (ReserveFullCases, ADR 0045),
+            oldest stowed container first. The reservation quantity is the
+            cases' eaches (cases x unitsPerPack). Mutually exclusive with
+            `quantity`. A sealed case is never split by a `quantity`
+            reservation.
+          example: 2
+        ownerRef:
+          type: string
+          nullable: true
+          maxLength: 64
+          pattern: '^[A-Za-z0-9._-]*$'
+          description: >-
+            Whose stock the reservation draws on (ADR 0045). A reservation
+            never spans owners. Omitted means fleet-owned stock only, never
+            "any owner": a seller's stock cannot satisfy it. A malformed
+            value is 400 `invalid-owner-ref`.
+          example: seller-a
+        demandRef:
+          type: string
+          minLength: 1
+          description: Caller-supplied reference identifying the demand this reservation satisfies (e.g. an order id).
+          example: order-42
+        lineNo:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 2147483647
+          nullable: true
+          description: >
+            Optional order line this reservation is for (ADR 0036). When
+            sent it is stored on the reservation and returned as `lineNo`,
+            and it lets the TaskCompleted consumer confirm exactly the
+            picked line instead of counting picks (ADR 0035). Omit it, or
+            send null, when unknown. Valid range is 1 to 2147483647 (a
+            32-bit integer); 0, negative values and values above 2147483647
+            are rejected with 400 `invalid-line-no`. Because it is part of the request
+            body, adding it to a request whose Idempotency-Key was first
+            used WITHOUT it is a different body (409
+            `idempotency-key-reused`).
+          example: 1
+
+    StageTransferReceiptRequest:
+      type: object
+      required: [transferId, destinationSiteId, sku, receivedQuantity]
+      description: >-
+        One destination scan (ADR 0031): what line the operator claims
+        the goods belong to, which site received them, and how many were
+        counted.
+      properties:
+        transferId:
+          type: string
+          minLength: 1
+          description: The planning context's transfer (saga) id; must match the ledger row for transferLineId.
+          example: tr-77
+        destinationSiteId:
+          type: string
+          minLength: 1
+          description: The receiving site; may not equal the transfer's own origin site.
+          example: SITE-DEST
+        sku:
+          type: string
+          minLength: 1
+          example: SKU-T1
+        receivedQuantity:
+          type: integer
+          format: int32
+          minimum: 1
+          description: Quantity physically counted at the dock. May differ from expectedQuantity — the signed variance is recorded, never absorbed.
+          example: 5
+
+    TransferReceipt:
+      type: object
+      description: >-
+        The destination-side custody record for one transfer line (ADR
+        0031), keyed DB-unique on transferLineId. STAGED means counted
+        but not yet placed (no usable stock); STOWED means placed — the
+        destination site's usable rose exactly once.
+      properties:
+        transferId:
+          type: string
+          example: tr-77
+        transferLineId:
+          type: string
+          example: tr-77:1
+        destinationSiteId:
+          type: string
+          example: SITE-DEST
+        sku:
+          type: string
+          example: SKU-T1
+        expectedQuantity:
+          type: integer
+          format: int32
+          description: What the transfer_allocations ledger promised (its requested_quantity).
+          example: 6
+        receivedQuantity:
+          type: integer
+          format: int32
+          description: What was physically counted at the dock.
+          example: 5
+        variance:
+          type: integer
+          format: int32
+          description: SIGNED received - expected. Positive = over-receipt, negative = short-receipt, 0 = exact. Explicit, never silently absorbed.
+          example: -1
+        state:
+          type: string
+          enum: [STAGED, STOWED]
+          example: STAGED
+        stagedAt:
+          type: string
+          format: date-time
+          example: "2026-10-06T12:00:00Z"
+        stowedAt:
+          type: string
+          format: date-time
+          description: Present only once STOWED.
+          example: "2026-10-06T12:05:00Z"
+        replay:
+          type: boolean
+          description: True when this response is the ORIGINAL outcome of an idempotent replay, with nothing new written or published.
+          example: false
+
+    StowTransferRequest:
+      type: object
+      required: [bins]
+      description: >-
+        The destination placements for a STAGED transfer receipt (ADR
+        0031). The quantities must sum exactly to the receipt's
+        receivedQuantity; every bin must belong to the receipt's
+        destination site.
+      properties:
+        bins:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [binId, quantity]
+            properties:
+              binId:
+                type: string
+                minLength: 1
+                example: BIN-DEST-1
+              quantity:
+                type: integer
+                format: int32
+                minimum: 1
+                example: 3
+
+    StowedTransfer:
+      type: object
+      description: The STOWED receipt plus the destination StockUnits the stow created.
+      allOf:
+        - $ref: "#/components/schemas/TransferReceipt"
+        - type: object
+          properties:
+            stowedQuantity:
+              type: integer
+              format: int32
+              description: Total quantity placed (equals receivedQuantity).
+              example: 5
+            allocations:
+              type: array
+              description: One entry per destination StockUnit created, with its bin.
+              items:
+                type: object
+                properties:
+                  stockUnitId:
+                    type: string
+                    example: su-dest-1
+                  binId:
+                    type: string
+                    example: BIN-DEST-1
+                  quantity:
+                    type: integer
+                    format: int32
+                    example: 3
+
+    QuarantinedScanProblem:
+      type: object
+      description: >-
+        RFC 7807 problem for a QUARANTINED destination scan (ADR 0031):
+        the standard members plus an `exception` extension object
+        carrying the inventory_exceptions row's coordinates. The scan
+        raised no stock; a human resolves the exception.
+      properties:
+        type:
+          type: string
+          example: https://errors.inventory-storage.warehouse-systems.dev/transfer-scan-quarantined
+        title:
+          type: string
+          example: Destination scan quarantined
+        status:
+          type: integer
+          example: 422
+        detail:
+          type: string
+          description: The explicit problem (why the scan could not be matched).
+          example: transfer line was never allocated by this service
+        instance:
+          type: string
+          example: /transfers/tl-ghost/receipt
+        exception:
+          type: object
+          properties:
+            kind:
+              type: string
+              enum: [UNKNOWN_TRANSFER, UNRECOGNIZED_TRANSFER]
+              example: UNKNOWN_TRANSFER
+            transferId:
+              type: string
+              example: tr-ghost
+            transferLineId:
+              type: string
+              example: tl-ghost
+            destinationSiteId:
+              type: string
+              example: SITE-DEST
+            sku:
+              type: string
+              example: SKU-T1
+            receivedQuantity:
+              type: integer
+              format: int32
+              example: 5
+
+    Allocation:
+      type: object
+      description: >
+        A specific StockUnit and quantity a Reservation drew from, plus the
+        pick location: the bin that StockUnit sits in (ADR 0025).
+      properties:
+        stockUnitId:
+          type: string
+          example: su-164710cb-5e14-400b-849c-ed94d8256c6b
+        binId:
+          type: string
+          description: >
+            Pick location — the bin the allocated StockUnit sits in, i.e.
+            where a picker goes to fulfil this allocation. Always present
+            for allocations made by this version; omitted only for a legacy
+            allocation whose bin could not be backfilled.
+          example: A-1-1
+        quantity:
+          type: integer
+          format: int32
+          example: 6
+
+    Reservation:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Reservation id, formatted `res-<uuid>`.
+          example: res-a1b2c3d4-0000-0000-0000-000000000001
+        sku:
+          type: string
+          example: SKU-1
+        quantity:
+          type: integer
+          format: int32
+          example: 6
+        demandRef:
+          type: string
+          example: order-42
+        ownerRef:
+          type: string
+          description: Owner whose stock the reservation holds (ADR 0045). Omitted for fleet-owned stock.
+          example: seller-a
+        lineNo:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 2147483647
+          description: >
+            The order line this reservation is for (ADR 0036), 1 to 2147483647
+            (32-bit). Omitted when
+            unknown (a reservation made before the field existed, or by a
+            client that does not send it).
+          example: 1
+        status:
+          type: string
+          enum: [ACTIVE, CONFIRMED, REVOKED, EXPIRED]
+          example: ACTIVE
+        allocations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Allocation"
+        createdAt:
+          type: string
+          format: date-time
+          description: Timestamp this reservation was created, RFC 3339.
+          example: "2026-08-22T14:20:00Z"
+        expiresAt:
+          type: string
+          format: date-time
+          description: Timestamp this reservation auto-expires if never confirmed or revoked, RFC 3339.
+          example: "2026-08-22T14:50:00Z"
+
+    RegisterBinRequest:
+      type: object
+      required: [capacity]
+      properties:
+        capacity:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 2147483647
+          description: >
+            Desired capacity of the bin, in units. Must be greater than zero
+            and not below the bin's current occupancy.
+          example: 20
+
+    Bin:
+      type: object
+      description: A coded storage slot with a fixed capacity (chaotic storage).
+      properties:
+        binId:
+          type: string
+          example: A-1-1
+        capacity:
+          type: integer
+          format: int32
+          description: Maximum units the bin can hold.
+          example: 20
+        occupied:
+          type: integer
+          format: int32
+          description: Units currently stowed in the bin.
+          example: 4
+        available:
+          type: integer
+          format: int32
+          description: capacity minus occupied — space still free for stow.
+          example: 16
+
+    UsableInventory:
+      type: object
+      properties:
+        sku:
+          type: string
+          example: SKU-1
+        ownerRef:
+          type: string
+          description: The owner the figures are for (ADR 0045). Omitted for fleet-owned stock.
+          example: seller-a
+        usable:
+          type: integer
+          format: int32
+          description: >-
+            On-hand minus active reservations minus held/unlocated stock,
+            summed across the StockUnits of this SKU owned by `ownerRef`
+            (loose stock and sealed cases alike, in eaches).
+          example: 7
+        looseUsable:
+          type: integer
+          format: int32
+          description: The part of `usable` a `quantity` reservation can draw on (loose stock only).
+          example: 7
+        reservableCases:
+          type: integer
+          format: int32
+          description: How many whole sealed cases can still be reserved with `cases`.
+          example: 0
+
+    Container:
+      type: object
+      description: >-
+        A sealed case with an identity (ADR 0045). The ledger stays in
+        eaches: `qtyEaches` is the case's content, held by the 1:1
+        SEALED_CASE stock unit `stockUnitId` once stowed.
+      required: [lpn, sku, gtin, unitsPerPack, qtyEaches, state, receiptId, lineNo]
+      properties:
+        lpn:
+          type: string
+          description: License plate - the carton SSCC, or an internal `LPN-<site>-<id>`.
+          example: "003400000000000017"
+        sku:
+          type: string
+          example: SKU-1
+        gtin:
+          type: string
+          description: GTIN-14 of the case pack level, resolved in the local PackagingView.
+          example: "24006381333935"
+        unitsPerPack:
+          type: integer
+          format: int32
+          minimum: 1
+          example: 12
+        qtyEaches:
+          type: integer
+          format: int32
+          minimum: 1
+          description: Eaches in the case; always equals `unitsPerPack` for a sealed case.
+          example: 12
+        ownerRef:
+          type: string
+          description: Owner of the case's stock. Omitted for fleet-owned stock.
+          example: seller-a
+        siteId:
+          type: string
+          description: Site, set by the first stow from the bin's site. Omitted until then.
+          example: WH1
+        binId:
+          type: string
+          description: Bin the container is stowed in. Omitted until stowed, and once EMPTY.
+          example: WH1-STOR-AMB-A01-01-01-A
+        state:
+          type: string
+          enum: [SEALED, OPEN, EMPTY]
+          example: SEALED
+        lot:
+          type: string
+          example: L1
+        expiry:
+          type: string
+          description: Expiry date (YYYY-MM-DD) when the carton declared one.
+          example: "2027-03-01"
+        stockUnitId:
+          type: string
+          description: The SEALED_CASE stock unit holding the eaches, created at the first stow.
+          example: su-9a1e0f3c-2b4d-4c6e-8f00-112233445566
+        receiptId:
+          type: string
+          description: The inbound receipt the case arrived on.
+          example: rcpt-1
+        lineNo:
+          type: integer
+          format: int32
+          minimum: 1
+          description: The receipt line whose booking bounds the container.
+          example: 1
+
+    CycleCountRequest:
+      type: object
+      required: [countedQuantity]
+      properties:
+        countedQuantity:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Physically counted quantity at the bin. Zero is valid (an empty bin); negative is rejected. The field itself is required — omitting it (or sending null) is a 400, not an implicit zero.
+          example: 9
+
+    CycleCountResult:
+      type: object
+      properties:
+        binId:
+          type: string
+          example: A-1-1
+        countedQuantity:
+          type: integer
+          format: int32
+          example: 9
+        systemQuantity:
+          type: integer
+          format: int32
+          description: Quantity system records show for this bin prior to reconciliation.
+          example: 10
+        discrepancy:
+          type: boolean
+          description: True if countedQuantity differed from systemQuantity.
+          example: true
+
+    FlowAccuracyReport:
+      type: object
+      description: The Inventory Flow & Accuracy report for a window.
+      required: [rows]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/FlowAccuracyRow"
+
+    FlowAccuracyRow:
+      type: object
+      description: >
+        One (SKU, bin, hour) bucket of flow and accuracy counters.
+      properties:
+        sku:
+          type: string
+          example: SKU-1
+        binId:
+          type: string
+          example: A-1-1
+        hourBucket:
+          type: string
+          format: date-time
+          description: Start of the UTC hour this row aggregates, RFC 3339.
+          example: "2026-10-01T14:00:00Z"
+        receivedQuantity:
+          type: integer
+          description: Units received (StockReceived) in the bucket.
+          example: 10
+        stowedCount:
+          type: integer
+          description: Stow operations (StockStowed) in the bucket.
+          example: 1
+        pickedQuantity:
+          type: integer
+          description: Units picked (StockPicked) in the bucket.
+          example: 4
+        reservationsCreated:
+          type: integer
+          example: 1
+        reservationsExpired:
+          type: integer
+          example: 0
+        reservationsRevoked:
+          type: integer
+          example: 0
+        cycleCountsCompleted:
+          type: integer
+          example: 0
+        discrepanciesDetected:
+          type: integer
+          example: 0
+        unlocatedCount:
+          type: integer
+          example: 0
+
+    RelocateStockRequest:
+      type: object
+      required: [siteCode, sku, fromBin, toBin, quantity]
+      description: >-
+        An intra-site move of one SKU between two bins of the same site
+        (ADR 0039). Both bins must be registered and belong to siteCode:
+        their recorded site custody, or, when none is recorded, the site
+        segment of a facility-layout location code
+        (site-area-zone-aisle-bay-level-position).
+      properties:
+        siteCode:
+          type: string
+          minLength: 1
+          pattern: '\S'
+          description: The site both bins must be in.
+          example: WH1
+        sku:
+          type: string
+          minLength: 1
+          example: SKU-1
+        fromBin:
+          type: string
+          minLength: 1
+          description: Source bin. Only its usable (unreserved) quantity of the SKU moves.
+          example: WH1-STOR-AMB-A07-03-02-B
+        toBin:
+          type: string
+          minLength: 1
+          description: Destination bin; must differ from fromBin and have room for quantity.
+          example: WH1-STOR-AMB-A01-01-01-A
+        quantity:
+          type: integer
+          format: int32
+          minimum: 1
+          example: 12
+        reason:
+          type: string
+          enum: [SLOTTING, CONSOLIDATION, MANUAL]
+          description: Why the stock moves. Absent means MANUAL.
+          example: SLOTTING
+        sourceRef:
+          type: string
+          maxLength: 200
+          description: The caller's correlation (a slot-plan move, a ticket). Optional.
+          example: plan-7/move-2
+
+    RelocationLeg:
+      type: object
+      description: One source StockUnit's contribution to the move.
+      properties:
+        stockUnitId:
+          type: string
+          example: su-164710cb-5e14-400b-849c-ed94d8256c6b
+        quantity:
+          type: integer
+          format: int32
+          example: 12
+
+    Relocation:
+      type: object
+      description: An applied intra-site relocation (ADR 0039). Immutable.
+      properties:
+        id:
+          type: string
+          description: Relocation id, formatted `rel-<uuid>`.
+          example: rel-0b7e2a54-3c1d-4f0e-9a8b-7c6d5e4f3a21
+        siteCode:
+          type: string
+          example: WH1
+        sku:
+          type: string
+          example: SKU-1
+        fromBin:
+          type: string
+          example: WH1-STOR-AMB-A07-03-02-B
+        toBin:
+          type: string
+          example: WH1-STOR-AMB-A01-01-01-A
+        quantity:
+          type: integer
+          format: int32
+          example: 12
+        reason:
+          type: string
+          enum: [SLOTTING, CONSOLIDATION, MANUAL, REPLENISHMENT]
+          description: >-
+            Why the stock moved. REPLENISHMENT (ADR 0041) appears only on
+            relocations made by a completed REPLENISH task; it is never
+            accepted on the request.
+          example: SLOTTING
+        sourceRef:
+          type: string
+          description: The caller's correlation; empty when none was given.
+          example: plan-7/move-2
+        destinationStockUnitId:
+          type: string
+          description: The StockUnit created in toBin (site custody = siteCode).
+          example: su-9a1e0f3c-2b4d-4c6e-8f00-112233445566
+        legs:
+          type: array
+          items:
+            $ref: "#/components/schemas/RelocationLeg"
+        occurredAt:
+          type: string
+          format: date-time
+          example: "2026-10-13T12:00:00Z"

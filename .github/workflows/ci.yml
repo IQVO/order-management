@@ -201,6 +201,26 @@ jobs:
       - name: Contract tests (Schemathesis over apis/openapi.yaml)
         run: ./scripts/contract-test.sh
 
+  # Consumer contract drift gate: every producer contract copy pinned in
+  # contracts/pinned.json must equal the producer's develop branch,
+  # byte for byte. A stale pin keeps the consumer's contract tests green
+  # while the producer moves on (the 2026-11-01 vendor-connectivity
+  # incident), so this job fails the build the moment a pinned copy
+  # drifts. Refresh = copy the producer's file over the pin, never edit it.
+  pinned-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Pins equal the producer's develop
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/harness/pinned_contract_gate.py
+      - name: The gate's own tests
+        run: python3 scripts/harness/test_pinned_contract_gate.py
+
   # The MCP eval gate as its own named check: the eval suites from
   # internal/adapters/inbound/mcp run inside the `test` job too; this job makes the gate
   # visible — and individually gating — on every push and PR.

@@ -1,0 +1,3378 @@
+asyncapi: 2.6.0
+info:
+  title: Fulfillment Execution Events API
+  version: 2.0.0
+  description: 'Kafka events produced and consumed by the **Fulfillment Execution** bounded context (WES
+    subdomain).
+
+
+    Every message — integration topic and analytics topic alike — is a **CloudEvents 1.0** event in the
+    Kafka protocol binding''s *structured* content mode (ADR-0032): the Kafka message value is the JSON
+    event, and every message carries the Kafka header `content-type: application/cloudevents+json; charset=UTF-8`
+    plus W3C `traceparent`/`tracestate`. There is no other envelope.
+
+
+    Required attributes: `specversion` (`1.0`), `id` (UUID v4, stable across outbox redelivery; the consumer
+    idempotency key), `source` (`/warehouse/fulfillment-execution` for this service), `type` (`com.warehouse.<subdomain>.<bounded-context>.<entity>.<EventName>`),
+    `subject` (aggregate id, equal to the Kafka key), `time` (occurred-at, UTC), `datacontenttype` (`application/json`)
+    and `dataschema` (`urn:warehouse:<repo>:<events|analytics>:<EventName>:v<N>`). `data` uses snake_case
+    keys.
+
+
+    An event that is published on both the integration and analytics topics carries the same CloudEvents
+    `type` attribute on each; `dataschema` names the payload shape. The `Analytics` prefix on the analytics
+    message components below (for example `AnalyticsTaskCompleted`) is only the AsyncAPI component `name`
+    (the `title` is the plain event name); the CloudEvents `type` const never carries it. A breaking payload
+    change ships as a new `.v2` type with a new dataschema version.'
+  contact:
+    name: Fulfillment Execution Team
+    url: https://github.com/claudioed/fulfillment-execution
+    email: fulfillment-execution@warehouse-systems.internal
+  license:
+    name: Proprietary
+    url: https://github.com/claudioed/fulfillment-execution
+tags:
+- name: fulfillment-execution
+  description: The Fulfillment Execution bounded context (WES subdomain core).
+- name: task
+  description: Events raised by the Task aggregate.
+- name: package
+  description: Events raised by the Package aggregate.
+- name: promise-feedback
+  description: Events closing the promise feedback loop with order-management (ADR-0025).
+- name: analytics
+  description: Internal analytics stream for the throughput data product (ADR-0012).
+- name: consumed
+  description: Events published by sibling contexts and consumed by this service.
+servers:
+  production:
+    url: kafka.warehouse-systems.internal:9092
+    protocol: kafka
+    description: Shared Kafka broker for warehouse-systems. Configured per service via KAFKA_BROKERS.
+defaultContentType: application/cloudevents+json
+channels:
+  warehouse.fulfillment.events:
+    description: Integration events published by Fulfillment Execution, keyed by aggregate id. Consumers
+      dispatch on the full CloudEvents `type`.
+    subscribe:
+      operationId: consumeFulfillmentIntegrationEvents
+      summary: Consume Fulfillment Execution integration events.
+      description: Receive the TaskAvailable, TaskClaimed, TaskCompleted, TaskCPTMissed, PackageManifested,
+        PackageDiverted, WeightDiscrepancyDetected, TransferPicked, TransferDispatched and TransferArrived
+        CloudEvents this bounded context publishes — plus the pick-batching WorkBatchFormed,
+        WorkBatchCompleted and WorkBatchAbandoned (ADR 0063, published only with PICK_BATCH_MODE on).
+      tags:
+      - name: fulfillment-execution
+      message:
+        oneOf:
+        - $ref: '#/components/messages/TaskAvailable'
+        - $ref: '#/components/messages/TaskClaimed'
+        - $ref: '#/components/messages/TaskCompleted'
+        - $ref: '#/components/messages/TaskCPTMissed'
+        - $ref: '#/components/messages/PackageManifested'
+        - $ref: '#/components/messages/PackageDiverted'
+        - $ref: '#/components/messages/WeightDiscrepancyDetected'
+        - $ref: '#/components/messages/TransferPicked'
+        - $ref: '#/components/messages/TransferDispatched'
+        - $ref: '#/components/messages/TransferArrived'
+        - $ref: '#/components/messages/WorkBatchFormed'
+        - $ref: '#/components/messages/WorkBatchCompleted'
+        - $ref: '#/components/messages/WorkBatchAbandoned'
+  warehouse.fulfillment.analytics:
+    description: Internal analytics stream (ADR-0012), keyed by aggregate id; read by this service's own
+      analytics projector.
+    subscribe:
+      operationId: consumeFulfillmentAnalyticsEvents
+      summary: Consume Fulfillment Execution analytics events.
+      description: Receive every analytics CloudEvent (dataschema `urn:warehouse:fulfillment-execution:analytics:*`).
+      tags:
+      - name: analytics
+      message:
+        oneOf:
+        - $ref: '#/components/messages/AnalyticsTaskCreated'
+        - $ref: '#/components/messages/AnalyticsTaskClaimed'
+        - $ref: '#/components/messages/AnalyticsLeaseExpired'
+        - $ref: '#/components/messages/AnalyticsTaskCompleted'
+        - $ref: '#/components/messages/AnalyticsItemPicked'
+        - $ref: '#/components/messages/AnalyticsPackageSealed'
+        - $ref: '#/components/messages/AnalyticsWeightDiscrepancyDetected'
+        - $ref: '#/components/messages/AnalyticsLabelApplied'
+        - $ref: '#/components/messages/AnalyticsPackageDiverted'
+        - $ref: '#/components/messages/AnalyticsPackageManifested'
+        - $ref: '#/components/messages/AnalyticsWorkBatchFormed'
+        - $ref: '#/components/messages/AnalyticsWorkBatchCompleted'
+        - $ref: '#/components/messages/AnalyticsWorkBatchAbandoned'
+  warehouse.work-planning.events:
+    description: wes-work-planning's integration topic; this service consumes WorkReleased from it (consumer
+      group `WORK_RELEASED_CONSUMER_GROUP`, default `fulfillment-execution`).
+    publish:
+      operationId: receiveWorkReleased
+      summary: Receive WorkReleased from wes-work-planning.
+      description: wes-work-planning publishes WorkReleased here; this service creates a Task for each
+        new CloudEvents id.
+      tags:
+      - name: consumed
+      message:
+        $ref: '#/components/messages/WorkReleased'
+  warehouse.process-path-management.events:
+    description: process-path-management's integration topic; this service replays ProcessPath* events
+      into its local catalogue only when `PATH_CATALOGUE_SOURCE=kafka` (default `file`). The consumer is
+      group-less (it reads the whole topic from the earliest offset on every start to rebuild an in-memory
+      cache), so it declares no consumer group.
+    publish:
+      operationId: receiveProcessPathEvents
+      summary: Receive process-path catalogue events.
+      description: process-path-management publishes ProcessPath* CloudEvents here; this service applies
+        them to its in-memory catalogue.
+      tags:
+      - name: consumed
+      message:
+        oneOf:
+        - $ref: '#/components/messages/ProcessPathCreated'
+        - $ref: '#/components/messages/ProcessPathUpdated'
+        - $ref: '#/components/messages/ProcessPathDeactivated'
+  warehouse.product-master.events:
+    description: product-master's integration topic (key and `subject` = SKU). This service runs two
+      independent consumers on it, each under its own consumer group (the two must differ). ProductClassified
+      feeds the local classification copy (ADR-0039) under `PRODUCT_CLASSIFICATION_CONSUMER_GROUP`, only
+      when `PRODUCT_CLASSIFICATION_MODE=kafka`. ProductPackLevelDeclared and ProductPackLevelRetired feed the
+      local PackView (ADR 0054) under the required `PACK_VIEW_CONSUMER_GROUP`, always on. Every other type
+      on the topic (ProductRegistered, ProductDescriptionChanged, ProductDimensionsDeclared, ProductMeasured)
+      is ignored.
+    publish:
+      operationId: receiveProductClassified
+      summary: Receive ProductClassified, ProductPackLevelDeclared and ProductPackLevelRetired from product-master.
+      description: product-master publishes the full classification of a SKU here. The CloudEvents `id` claim
+        and the version-guarded upsert of `product_classification_copy` commit in one transaction; the offset
+        is committed afterwards. A message is applied only when its `version` is greater than the stored one.
+        A message that is not a valid CloudEvent, or whose payload breaks the contract, is logged at WARN
+        and skipped. SealPackage reads the copy for its DOT hazard segregation check. The pack-level events
+        follow the same delivery contract (CloudEvents `id` claim and version-guarded write in one
+        transaction, offset committed afterwards; invalid payloads are logged at WARN and skipped).
+      tags:
+      - name: consumed
+      message:
+        oneOf:
+        - $ref: '#/components/messages/ProductClassified'
+        - $ref: '#/components/messages/ProductPackLevelDeclared'
+        - $ref: '#/components/messages/ProductPackLevelRetired'
+  warehouse.task-interleaving.events:
+    description: task-interleaving's integration topic (key and `subject` = the station id). This service
+      consumes only InterleavingHintIssued from it, into its local hint copy `interleaving_hints` (ADR-0051),
+      under the consumer group from `TASK_INTERLEAVING_CONSUMER_GROUP`, only when `TASK_INTERLEAVING_MODE=kafka`.
+      Every other type on the topic is ignored.
+    publish:
+      operationId: receiveInterleavingHintIssued
+      summary: Receive InterleavingHintIssued from task-interleaving.
+      description: task-interleaving publishes an advisory hint (never an assignment) of which open tasks
+        a station could work next. The CloudEvents `id` claim and the per-station superseding upsert of
+        `interleaving_hints` commit in one transaction; the offset is committed afterwards. One ACTIVE hint
+        per station — a newer hint supersedes the previous one. claimNext uses the station's active,
+        unexpired hint only as a tie-break inside one priority band (never across a CPT boundary) and fails
+        open when no hint applies. A message that is not a valid CloudEvent, or whose payload breaks the
+        contract, is logged at WARN and skipped.
+      tags:
+      - name: consumed
+      message:
+        $ref: '#/components/messages/InterleavingHintIssued'
+components:
+  messages:
+    TaskCompleted:
+      name: TaskCompleted
+      title: TaskCompleted
+      summary: A station finished a claimed task.
+      description: Raised when the station holding the active claim completes the task. Published on `warehouse.fulfillment.events`,
+        keyed (and `subject`-ed) by task id, enriched at publish time with `work_unit_id` (the task's
+        order reference, so Work Planning can call RecordCompletion), and `associate_id`, `duration_seconds`,
+        `task_type` for labor-performance (ADR-0014, ADR-0023), and the optional `order_ref` (the order
+        key inventory-storage uses to confirm picks, ADR-0040) and `line_no` (the order line, so it can
+        confirm that line's reservation, ADR-0041). A RELOCATE task's TaskCompleted also carries the
+        executed slot-plan move in the additive fields `sku`, `from_bin`, `to_bin`, `quantity` and
+        `relocation_ref` (ADR-0047), which inventory-storage applies to its ledger as a RelocateStock
+        (its ADR 0039); they are omitted on every other task type. A REPLENISH task's TaskCompleted
+        (ADR-0050) carries the same `sku`, `from_bin`, `to_bin` and `quantity` plus the additive
+        `request_ref` (the replenishment request id) instead of `relocation_ref`; inventory-storage
+        applies it as a RelocateStock with reason REPLENISHMENT (its ADR 0041), `source_ref` =
+        `request_ref`. Consumed by wes-work-planning,
+        labor-performance and inventory-storage.
+      contentType: application/cloudevents+json
+      tags:
+      - name: task
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.task.TaskCompleted
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:events:TaskCompleted:v1
+            data:
+              type: object
+              required:
+              - task_id
+              - station_id
+              - work_unit_id
+              properties:
+                task_id:
+                  type: string
+                  description: Completed task id.
+                station_id:
+                  type: string
+                  description: Station that completed the task.
+                work_unit_id:
+                  type: string
+                  description: The completed task's order reference (empty only when the task can no longer
+                    be found at publish time).
+                associate_id:
+                  type: string
+                  description: Occupant checked into the completing station at publish time; omitted when
+                    none (e.g. a robot station).
+                duration_seconds:
+                  type: integer
+                  description: Seconds between claim and completion; omitted when the claim time is unknown.
+                  format: int64
+                task_type:
+                  type: string
+                  enum:
+                  - PICK
+                  - PACK
+                  - SLAM
+                  - REBIN
+                  - DISPATCH
+                  - ARRIVAL
+                  - RELOCATE
+                  - REPLENISH
+                  description: The completed task's own type; omitted only when the task can no longer
+                    be found.
+                order_ref:
+                  type: string
+                  description: The order the completed task belongs to; the key inventory-storage uses to
+                    confirm picks. Optional and additive (the event stays v1) and omitted when the task
+                    has no order reference. Distinct from work_unit_id, which for order work is the per-line
+                    work unit id.
+                line_no:
+                  type: integer
+                  format: int32
+                  minimum: 1
+                  maximum: 2147483647
+                  description: The 1-based order line the completed task's work was released for (copied
+                    from WorkReleased.line_no, ADR-0041); with order_ref it lets inventory-storage confirm
+                    the pick of exactly that line's reservation. Optional and additive (the event stays
+                    v1) and omitted when unknown (transfer work, a release without line_no, or an older
+                    task). Never derived from the work_unit_id.
+                sku:
+                  type: string
+                  minLength: 1
+                  description: RELOCATE and REPLENISH only (ADR-0047, ADR-0050; additive, the event stays
+                    v1). The SKU the executed move relocated, from WorkReleased.data.relocation.sku /
+                    WorkReleased.data.replenishment.sku. Omitted on every other task type.
+                from_bin:
+                  type: string
+                  minLength: 1
+                  description: RELOCATE and REPLENISH only. The bin the stock left - the planned from_bin,
+                    or for a RELOCATE Assign move the bin the operator scanned at completion.
+                to_bin:
+                  type: string
+                  minLength: 1
+                  description: RELOCATE and REPLENISH only. The bin the stock went to - the planned to_bin,
+                    or for a RELOCATE Vacate move the reserve bin the operator scanned at completion.
+                    Always different from from_bin.
+                quantity:
+                  type: integer
+                  format: int32
+                  minimum: 1
+                  description: RELOCATE and REPLENISH only. The units the operator counted and confirmed
+                    at completion (RELOCATE v1 moves the whole on-hand quantity of the SKU at from_bin; for
+                    REPLENISH it is the confirmed count, which may differ from the planned quantity).
+                relocation_ref:
+                  type: string
+                  minLength: 3
+                  maxLength: 200
+                  description: RELOCATE only. The move reference `<plan_id>:<move_seq>` copied from
+                    WorkReleased.data.relocation; inventory-storage records it as the StockRelocated
+                    source_ref, and slotting-optimization matches it back to the plan's move.
+                request_ref:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+                  description: REPLENISH only (ADR-0050; additive, the event stays v1; mirrors
+                    relocation_ref). The replenishment request id copied from
+                    WorkReleased.data.replenishment.request_id; inventory-storage records it as the
+                    StockRelocated source_ref (reason REPLENISHMENT) and pick-face-replenishment closes
+                    the request by it. Omitted on every other task type.
+                batch_id:
+                  type: string
+                  minLength: 1
+                  description: PICK only, and only when the task completed into a work batch
+                    (ADR 0063; additive, the event stays v1). The walk the completed pick was a
+                    member of; with batch_size it lets labor-performance report batched and single
+                    picks apart. Omitted on every non-batched completion, so the pre-batching
+                    payload bytes are unchanged.
+                batch_size:
+                  type: integer
+                  format: int32
+                  minimum: 1
+                  description: PICK only, and only when batch_id is present (ADR 0063). How many
+                    tasks that walk held. Omitted together with batch_id.
+      examples:
+      - name: taskCompleted
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.task.TaskCompleted
+          subject: task-8a1f
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:events:TaskCompleted:v1
+          data:
+            task_id: task-8a1f
+            station_id: station-03
+            work_unit_id: wu-8a1f
+            associate_id: worker-42
+            duration_seconds: 245
+            task_type: PICK
+            order_ref: order-8a1f
+            line_no: 2
+      - name: taskCompletedRelocate
+        summary: A RELOCATE task (a Vacate move, destination scanned) - the additive relocation fields
+          are present and order_ref / line_no are absent (ADR-0047).
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.task.TaskCompleted
+          subject: task-rel-1
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:events:TaskCompleted:v1
+          data:
+            task_id: task-rel-1
+            station_id: station-07
+            work_unit_id: slot-plan-7-move-3
+            duration_seconds: 90
+            task_type: RELOCATE
+            sku: SKU-1
+            from_bin: FWD-A
+            to_bin: RSV-2
+            quantity: 12
+            relocation_ref: 'plan-7:3'
+      - name: taskCompletedReplenish
+        summary: A REPLENISH task (ADR-0050) - the operator confirmed 20 of the 24 planned units; the
+          additive fields are present with request_ref (no relocation_ref) and order_ref / line_no
+          are absent.
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.task.TaskCompleted
+          subject: task-rep-1
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:events:TaskCompleted:v1
+          data:
+            task_id: task-rep-1
+            station_id: station-07
+            work_unit_id: replenish-req-9
+            duration_seconds: 90
+            task_type: REPLENISH
+            sku: SKU-1
+            from_bin: WH1-RSV-AMB-B02-03-02-C
+            to_bin: WH1-FWD-AMB-A01-01-01-A
+            quantity: 20
+            request_ref: req-9
+    TaskCPTMissed:
+      name: TaskCPTMissed
+      title: TaskCPTMissed
+      summary: A task is still open (Pending or Claimed) past its CPT deadline.
+      description: Raised by the CPT-missed sweep (`POST /cpt-miss-sweeps`, ADR-0025). Re-fires
+        on every sweep pass while the task stays open past its CPT, so consumers must dedupe on their
+        own (order-management's RepromiseOrder is idempotent by design). Published on `warehouse.fulfillment.events`,
+        keyed by task id. Consumed by order-management.
+      contentType: application/cloudevents+json
+      tags:
+      - name: task
+      - name: promise-feedback
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.task.TaskCPTMissed
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:events:TaskCPTMissed:v1
+            data:
+              type: object
+              required:
+              - task_id
+              - order_ref
+              - cpt
+              properties:
+                task_id:
+                  type: string
+                  description: Task still open past its CPT.
+                order_ref:
+                  type: string
+                  description: The task's order reference.
+                task_type:
+                  type: string
+                  enum:
+                  - PICK
+                  - PACK
+                  - SLAM
+                  - REBIN
+                  - DISPATCH
+                  - ARRIVAL
+                  description: The overdue task's own type; omitted when unknown.
+                cpt:
+                  type: string
+                  description: The missed CPT deadline.
+                  format: date-time
+      examples:
+      - name: taskCPTMissed
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.task.TaskCPTMissed
+          subject: task-8a1f
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:events:TaskCPTMissed:v1
+          data:
+            task_id: task-8a1f
+            order_ref: wu-8a1f
+            task_type: PICK
+            cpt: '2026-09-30T14:55:00Z'
+    TaskAvailable:
+      name: TaskAvailable
+      title: TaskAvailable
+      summary: A task entered or re-entered the open-task pool and is claimable.
+      description: 'Raised in the same transaction as the state change, through the transactional outbox
+        (ADR-0020), whenever a task ENTERS the pool (released from WorkReleased, or created through
+        the API) or RE-ENTERS it (the lease-expiry sweep returned a claimed task to Pending, with a
+        new `available_at`). Never raised on an idempotent replay or a rejected command. Published
+        on `warehouse.fulfillment.events`, keyed by task id. Consumed by task-interleaving (its local
+        copy of the open-task pool). A task whose location this service cannot determine is NOT announced
+        (the consumer rejects an event without `site_id` and `from_location`): RELOCATE and REPLENISH
+        tasks carry bins, so they are announced (ADR-0049, ADR-0050), and a PICK task whose plan carries
+        both the site and the pick face (`WorkReleased.data.pick.site_id` + `from_bin`, the producer''s
+        additive omit-when-unknown contract) is announced too (ADR-0062): a pick missing either is NOT
+        announced, exactly like a move whose bins carry no site. A REPLENISH task knows both bins, so it
+        is announced with the source bin first and the destination (pick face) bin last. A PICK task is
+        announced with the pick face as both ends of the trip (the station it ends at is not known at
+        announce time). A PACK / SLAM / REBIN / transfer task has no location in this service.'
+      contentType: application/cloudevents+json
+      tags:
+      - name: task
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.task.TaskAvailable
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:events:TaskAvailable:v1
+            data:
+              type: object
+              required:
+              - task_id
+              - task_type
+              - site_id
+              - from_location
+              - to_location
+              - required_capabilities
+              - priority_band
+              - available_at
+              properties:
+                task_id:
+                  type: string
+                  description: The pooled task; also the Kafka key and CloudEvents subject.
+                task_type:
+                  type: string
+                  enum:
+                  - PICK
+                  - PACK
+                  - SLAM
+                  - REBIN
+                  - DISPATCH
+                  - ARRIVAL
+                  - RELOCATE
+                  - REPLENISH
+                  description: The task's type (the process path claimNext scans).
+                site_id:
+                  type: string
+                  description: The site the task is worked at - the first segment of the bin's facility-layout
+                    LocationCode (`site-area-zone-aisle-bay-level-position`), derived from the task's own
+                    bins, never looked up in another context. For a PICK (ADR-0062) it is the site of the
+                    release's pick plan (`WorkReleased.data.pick.site_id`), never derived from the bin.
+                from_location:
+                  type: string
+                  description: Where the operator must go first. RELOCATE - the source bin (for an Assign move,
+                    whose source the operator scans at completion, the destination bin). REPLENISH - the
+                    source (reserve) bin. PICK - the planned pick face (the plan's `from_bin`, ADR-0062).
+                to_location:
+                  type: string
+                  description: Where the operator ends. RELOCATE - the destination bin (for a Vacate move,
+                    whose destination the operator scans at completion, the source bin). REPLENISH - the
+                    destination (pick face) bin. PICK - the pick face again (the station the operator ends
+                    at is not known at announce time, so the one known point stands for both ends of the
+                    trip, exactly like the one known bin of a RELOCATE Assign or Vacate, ADR-0062).
+                required_capabilities:
+                  type: array
+                  description: The capabilities claimNext matches a station against, sorted; an empty array
+                    (never null) when the task requires none.
+                  items:
+                    type: string
+                cpt:
+                  type: string
+                  format: date-time
+                  description: The task's committed promise time (UTC). Omitted when the task has none.
+                priority_band:
+                  type: string
+                  description: 'OPAQUE. Equal across exactly the tasks claimNext orders as peers (same task type
+                    and same CPT instant), different for any two it orders strictly. Today `<task_type>:<cpt
+                    UTC RFC 3339>`; consumers compare for equality only and must not parse it (ADR-0049).
+                    claimNext orders by CPT only, so the NORMAL or URGENT priority of a REPLENISH task does
+                    not enter the band (ADR-0050).'
+                available_at:
+                  type: string
+                  format: date-time
+                  description: The instant the task became claimable (UTC) - the creation instant, or the
+                    sweep instant on re-entry after a lease expiry.
+      examples:
+      - name: taskAvailable
+        summary: A RELOCATE task released with a CPT and two required capabilities.
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.task.TaskAvailable
+          subject: task-rel-1
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:events:TaskAvailable:v1
+          data:
+            task_id: task-rel-1
+            task_type: RELOCATE
+            site_id: WH1
+            from_location: WH1-RSV-AMB-B02-03-02-C
+            to_location: WH1-FWD-AMB-A01-01-01-A
+            required_capabilities:
+            - forklift
+            - relocate
+            cpt: '2026-09-30T16:00:00Z'
+            priority_band: RELOCATE:2026-09-30T16:00:00Z
+            available_at: '2026-09-30T15:00:00Z'
+      - name: taskAvailableReplenish
+        summary: A REPLENISH task (ADR-0050) - both bins are known, so source bin first and pick face last.
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.task.TaskAvailable
+          subject: task-rep-1
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:events:TaskAvailable:v1
+          data:
+            task_id: task-rep-1
+            task_type: REPLENISH
+            site_id: WH1
+            from_location: WH1-RSV-AMB-B02-03-02-C
+            to_location: WH1-FWD-AMB-A01-01-01-A
+            required_capabilities:
+            - forklift
+            - replenish
+            cpt: '2026-09-30T16:00:00Z'
+            priority_band: REPLENISH:2026-09-30T16:00:00Z
+            available_at: '2026-09-30T15:00:00Z'
+    TaskClaimed:
+      name: TaskClaimed
+      title: TaskClaimed
+      summary: A station claimed a task; it left the open-task pool.
+      description: 'Raised in the same transaction as the claim, through the transactional outbox (ADR-0020),
+        for every task type. Never raised when the claim is rejected or loses the at-most-once race.
+        Published on `warehouse.fulfillment.events` (the richer integration row), keyed by task id; the
+        analytics-topic TaskClaimed `{task_id, task_type, station_id}` is unchanged. Consumed by
+        task-interleaving (removes the task from its pool copy and learns the station''s next position).'
+      contentType: application/cloudevents+json
+      tags:
+      - name: task
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.task.TaskClaimed
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:events:TaskClaimed:v1
+            data:
+              type: object
+              required:
+              - task_id
+              - task_type
+              - station_id
+              - claimed_at
+              properties:
+                task_id:
+                  type: string
+                  description: The claimed task; also the Kafka key and CloudEvents subject.
+                task_type:
+                  type: string
+                  enum:
+                  - PICK
+                  - PACK
+                  - SLAM
+                  - REBIN
+                  - DISPATCH
+                  - ARRIVAL
+                  - RELOCATE
+                  - REPLENISH
+                  description: The task's type; empty only if the task row can no longer be read.
+                station_id:
+                  type: string
+                  description: The station that now holds the lease.
+                claimed_at:
+                  type: string
+                  format: date-time
+                  description: The claim instant (UTC).
+      examples:
+      - name: taskClaimed
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.task.TaskClaimed
+          subject: task-rel-1
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:events:TaskClaimed:v1
+          data:
+            task_id: task-rel-1
+            task_type: RELOCATE
+            station_id: station-07
+            claimed_at: '2026-09-30T15:00:00Z'
+    PackageManifested:
+      name: PackageManifested
+      title: PackageManifested
+      summary: A package passed its SLAM weigh-check (the "SLAM pass").
+      description: Raised alongside `LabelApplied` when the SLAM weigh-check passes (ADR-0025); a diverted
+        package does not raise it. Published on `warehouse.fulfillment.events`, keyed by package id. Consumed
+        by order-management.
+      contentType: application/cloudevents+json
+      tags:
+      - name: package
+      - name: promise-feedback
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.package.PackageManifested
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:events:PackageManifested:v1
+            data:
+              type: object
+              required:
+              - package_id
+              - order_ref
+              properties:
+                package_id:
+                  type: string
+                  description: Manifested package id.
+                order_ref:
+                  type: string
+                  description: The package's order reference.
+                site_id:
+                  type: string
+                  description: >-
+                    Optional facility-layout siteCode the package ships from (ADR-0061).
+                    No source exists in the order-work chain yet, so this is omitted until
+                    a later wave lands one; never an empty string.
+                source_order_id:
+                  type: string
+                  description: >-
+                    Optional order-management OrderId the package ships for (ADR-0061).
+                    The correlated task's Task.SourceOrderId when stamped (WorkReleased.ref
+                    on release-created work, the posted orderRef on rebin-created PACK
+                    tasks); otherwise the package's order_ref by rebin caller convention,
+                    with a trailing "-line-N" work-unit suffix stripped. Omitted when
+                    unknown.
+                cpt:
+                  type: string
+                  format: date-time
+                  description: >-
+                    Optional RFC3339 Critical Pull Time of the manifest's SLAM task
+                    (ADR-0061) — the same SLAM-leg correlation as the on-time-to-CPT
+                    KPI. Omitted when no SLAM task correlates.
+                weight_g:
+                  type: number
+                  format: double
+                  description: >-
+                    Optional actual SLAM weigh-check measurement in grams (ADR-0061),
+                    the same unit discipline as WeightDiscrepancyDetected.actual_g.
+                    Omitted when not recorded.
+      examples:
+      - name: packageManifested
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.package.PackageManifested
+          subject: pkg-1029
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:events:PackageManifested:v1
+          data:
+            package_id: pkg-1029
+            order_ref: wu-8a1f
+      - name: packageManifestedShipCorrelation
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.package.PackageManifested
+          subject: pkg-1030
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:events:PackageManifested:v1
+          data:
+            package_id: pkg-1030
+            order_ref: order-88421
+            source_order_id: order-88421
+            cpt: '2026-09-30T15:30:00Z'
+            weight_g: 1240.5
+    PackageDiverted:
+      name: PackageDiverted
+      title: PackageDiverted
+      summary: A package was diverted off the standard path to the problem-solve area.
+      description: A package failed its SLAM weigh-check and was routed to the problem-solve area
+        instead of being labelled. Published on `warehouse.fulfillment.events` (keyed by package id)
+        with the same type, subject and data as the analytics occurrence (ADR-0053); also published
+        on `warehouse.fulfillment.analytics`. Consumed by exception-management, which opens its
+        problem-solve case on it.
+      contentType: application/cloudevents+json
+      tags:
+      - name: package
+      - name: fulfillment-execution
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.package.PackageDiverted
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:events:PackageDiverted:v1
+            data:
+              type: object
+              required:
+              - package_id
+              properties:
+                package_id:
+                  type: string
+                  description: Diverted package id.
+      examples:
+      - name: packageDiverted
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.package.PackageDiverted
+          subject: p1
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:events:PackageDiverted:v1
+          data:
+            package_id: p1
+    WeightDiscrepancyDetected:
+      name: WeightDiscrepancyDetected
+      title: WeightDiscrepancyDetected
+      summary: SLAM found a package weight out of tolerance.
+      description: The SLAM weigh-check measured a weight outside tolerance — the fact that causes a
+        divert. Published on `warehouse.fulfillment.events` (keyed by package id) with the same type,
+        subject and data as the analytics occurrence (ADR-0053); also published on
+        `warehouse.fulfillment.analytics`. Consumed by exception-management.
+      contentType: application/cloudevents+json
+      tags:
+      - name: package
+      - name: fulfillment-execution
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.package.WeightDiscrepancyDetected
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:events:WeightDiscrepancyDetected:v1
+            data:
+              type: object
+              required:
+              - package_id
+              - expected_g
+              - actual_g
+              properties:
+                package_id:
+                  type: string
+                  description: Package id.
+                expected_g:
+                  type: number
+                  description: Expected weight.
+                  format: double
+                actual_g:
+                  type: number
+                  description: Measured weight.
+                  format: double
+      examples:
+      - name: weightDiscrepancyDetected
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.package.WeightDiscrepancyDetected
+          subject: p1
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:events:WeightDiscrepancyDetected:v1
+          data:
+            package_id: p1
+            expected_g: 1000
+            actual_g: 1200
+    AnalyticsTaskCreated:
+      name: AnalyticsTaskCreated
+      title: TaskCreated
+      summary: Analytics occurrence of TaskCreated for the throughput data product.
+      description: A task entered the pool. Published on the internal `warehouse.fulfillment.analytics`
+        topic (ADR-0012) and consumed only by this service's own analytics projector (`cmd/fulfillment-projector`).
+      contentType: application/cloudevents+json
+      tags:
+      - name: task
+      - name: analytics
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.task.TaskCreated
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:analytics:TaskCreated:v1
+            data:
+              type: object
+              required:
+              - task_id
+              - task_type
+              properties:
+                task_id:
+                  type: string
+                  description: Task id.
+                task_type:
+                  type: string
+                  enum:
+                  - ''
+                  - PICK
+                  - PACK
+                  - SLAM
+                  - REBIN
+                  description: The task's process path, enriched via a TaskRepo lookup; empty when the
+                    task cannot be found.
+      examples:
+      - name: analyticsTaskCreated
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.task.TaskCreated
+          subject: t1
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:analytics:TaskCreated:v1
+          data:
+            task_id: t1
+            task_type: PICK
+    AnalyticsTaskClaimed:
+      name: AnalyticsTaskClaimed
+      title: TaskClaimed
+      summary: Analytics occurrence of TaskClaimed for the throughput data product.
+      description: A station claimed a task (projects into claims). Published on the internal `warehouse.fulfillment.analytics`
+        topic (ADR-0012) and consumed only by this service's own analytics projector (`cmd/fulfillment-projector`).
+      contentType: application/cloudevents+json
+      tags:
+      - name: task
+      - name: analytics
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.task.TaskClaimed
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:analytics:TaskClaimed:v1
+            data:
+              type: object
+              required:
+              - task_id
+              - task_type
+              - station_id
+              properties:
+                task_id:
+                  type: string
+                  description: Task id.
+                task_type:
+                  type: string
+                  enum:
+                  - ''
+                  - PICK
+                  - PACK
+                  - SLAM
+                  - REBIN
+                  description: The task's process path, enriched via a TaskRepo lookup; empty when the
+                    task cannot be found.
+                station_id:
+                  type: string
+                  description: Station id.
+      examples:
+      - name: analyticsTaskClaimed
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.task.TaskClaimed
+          subject: t1
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:analytics:TaskClaimed:v1
+          data:
+            task_id: t1
+            task_type: PICK
+            station_id: s1
+    AnalyticsLeaseExpired:
+      name: AnalyticsLeaseExpired
+      title: LeaseExpired
+      summary: Analytics occurrence of LeaseExpired for the throughput data product.
+      description: A claim lease expired (projects into lease expiries). Published on the internal `warehouse.fulfillment.analytics`
+        topic (ADR-0012) and consumed only by this service's own analytics projector (`cmd/fulfillment-projector`).
+      contentType: application/cloudevents+json
+      tags:
+      - name: task
+      - name: analytics
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.task.LeaseExpired
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:analytics:LeaseExpired:v1
+            data:
+              type: object
+              required:
+              - task_id
+              - task_type
+              properties:
+                task_id:
+                  type: string
+                  description: Task id.
+                task_type:
+                  type: string
+                  enum:
+                  - ''
+                  - PICK
+                  - PACK
+                  - SLAM
+                  - REBIN
+                  description: The task's process path, enriched via a TaskRepo lookup; empty when the
+                    task cannot be found.
+      examples:
+      - name: analyticsLeaseExpired
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.task.LeaseExpired
+          subject: t1
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:analytics:LeaseExpired:v1
+          data:
+            task_id: t1
+            task_type: PICK
+    AnalyticsTaskCompleted:
+      name: AnalyticsTaskCompleted
+      title: TaskCompleted
+      summary: Analytics occurrence of TaskCompleted for the throughput data product.
+      description: A task was completed (projects into completions). Published on the internal `warehouse.fulfillment.analytics`
+        topic (ADR-0012) and consumed only by this service's own analytics projector (`cmd/fulfillment-projector`).
+      contentType: application/cloudevents+json
+      tags:
+      - name: task
+      - name: analytics
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.task.TaskCompleted
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:analytics:TaskCompleted:v1
+            data:
+              type: object
+              required:
+              - task_id
+              - task_type
+              - station_id
+              properties:
+                task_id:
+                  type: string
+                  description: Task id.
+                task_type:
+                  type: string
+                  enum:
+                  - ''
+                  - PICK
+                  - PACK
+                  - SLAM
+                  - REBIN
+                  description: The task's process path, enriched via a TaskRepo lookup; empty when the
+                    task cannot be found.
+                station_id:
+                  type: string
+                  description: Station id.
+                order_ref:
+                  type: string
+                  description: The order the completed task belongs to; the key inventory-storage uses to
+                    confirm picks. Optional and additive (the event stays v1) and omitted when the task
+                    has no order reference or cannot be found.
+                line_no:
+                  type: integer
+                  format: int32
+                  minimum: 1
+                  maximum: 2147483647
+                  description: The 1-based order line the completed task's work was released for (ADR-0041).
+                    Optional and additive (the event stays v1) and omitted when unknown or when the task
+                    cannot be found.
+      examples:
+      - name: analyticsTaskCompleted
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.task.TaskCompleted
+          subject: t1
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:analytics:TaskCompleted:v1
+          data:
+            task_id: t1
+            task_type: PICK
+            station_id: s1
+            order_ref: order-1
+            line_no: 2
+    AnalyticsItemPicked:
+      name: AnalyticsItemPicked
+      title: ItemPicked
+      summary: Analytics occurrence of ItemPicked for the throughput data product.
+      description: A Pick task recorded an item retrieval. Published on the internal `warehouse.fulfillment.analytics`
+        topic (ADR-0012) and consumed only by this service's own analytics projector (`cmd/fulfillment-projector`).
+      contentType: application/cloudevents+json
+      tags:
+      - name: task
+      - name: analytics
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.task.ItemPicked
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:analytics:ItemPicked:v1
+            data:
+              type: object
+              required:
+              - task_id
+              - task_type
+              properties:
+                task_id:
+                  type: string
+                  description: Task id.
+                task_type:
+                  type: string
+                  enum:
+                  - ''
+                  - PICK
+                  - PACK
+                  - SLAM
+                  - REBIN
+                  description: The task's process path, enriched via a TaskRepo lookup; empty when the
+                    task cannot be found.
+      examples:
+      - name: analyticsItemPicked
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.task.ItemPicked
+          subject: t1
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:analytics:ItemPicked:v1
+          data:
+            task_id: t1
+            task_type: PICK
+    AnalyticsPackageSealed:
+      name: AnalyticsPackageSealed
+      title: PackageSealed
+      summary: Analytics occurrence of PackageSealed for the throughput data product.
+      description: A package was sealed. Published on the internal `warehouse.fulfillment.analytics` topic
+        (ADR-0012) and consumed only by this service's own analytics projector (`cmd/fulfillment-projector`).
+      contentType: application/cloudevents+json
+      tags:
+      - name: package
+      - name: analytics
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.package.PackageSealed
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:analytics:PackageSealed:v1
+            data:
+              type: object
+              required:
+              - package_id
+              properties:
+                package_id:
+                  type: string
+                  description: Package id.
+                ship_in_own_container:
+                  type: boolean
+                  description: Optional and additive (ADR-0056, v1 stays v1). Present, always `true`, only when the
+                    package was sealed in its own container (an order line that is exactly one full active CASE);
+                    omitted from an ordinary carton, whose payload is unchanged.
+                container_source:
+                  type: string
+                  enum:
+                  - CASE
+                  description: Optional. What the package ships in; present exactly when `ship_in_own_container` is.
+                container_gtin:
+                  type: string
+                  pattern: ^[0-9]{14}$
+                  description: Optional. The case GTIN (14 digits); present exactly when `ship_in_own_container` is.
+                container_dims:
+                  type: object
+                  description: Optional. The declared dimensions (mm) and weight (g) of the case, copied at seal
+                    time; present exactly when `ship_in_own_container` is.
+                  required:
+                  - length_mm
+                  - width_mm
+                  - height_mm
+                  - weight_g
+                  properties:
+                    length_mm:
+                      type: integer
+                      minimum: 1
+                    width_mm:
+                      type: integer
+                      minimum: 1
+                    height_mm:
+                      type: integer
+                      minimum: 1
+                    weight_g:
+                      type: integer
+                      minimum: 1
+      examples:
+      - name: analyticsPackageSealed
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.package.PackageSealed
+          subject: p1
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:analytics:PackageSealed:v1
+          data:
+            package_id: p1
+      - name: analyticsPackageSealedInOwnContainer
+        summary: The package shipped in its own CASE (ship-in-own-container, ADR-0056).
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 0d3b5a7c-91e2-4c48-b6f0-7a2e9c1d4b86
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.package.PackageSealed
+          subject: p2
+          time: '2026-09-30T15:05:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:analytics:PackageSealed:v1
+          data:
+            package_id: p2
+            ship_in_own_container: true
+            container_source: CASE
+            container_gtin: '24006381333935'
+            container_dims:
+              length_mm: 400
+              width_mm: 300
+              height_mm: 200
+              weight_g: 6500
+    AnalyticsWeightDiscrepancyDetected:
+      name: AnalyticsWeightDiscrepancyDetected
+      title: WeightDiscrepancyDetected
+      summary: Analytics occurrence of WeightDiscrepancyDetected for the throughput data product.
+      description: SLAM found the weight out of tolerance (projects into SLAM diverts). Published on the
+        internal `warehouse.fulfillment.analytics` topic (ADR-0012) and consumed only by this service's
+        own analytics projector (`cmd/fulfillment-projector`).
+      contentType: application/cloudevents+json
+      tags:
+      - name: package
+      - name: analytics
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.package.WeightDiscrepancyDetected
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:analytics:WeightDiscrepancyDetected:v1
+            data:
+              type: object
+              required:
+              - package_id
+              - expected_g
+              - actual_g
+              properties:
+                package_id:
+                  type: string
+                  description: Package id.
+                expected_g:
+                  type: number
+                  description: Expected weight.
+                  format: double
+                actual_g:
+                  type: number
+                  description: Measured weight.
+                  format: double
+      examples:
+      - name: analyticsWeightDiscrepancyDetected
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.package.WeightDiscrepancyDetected
+          subject: p1
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:analytics:WeightDiscrepancyDetected:v1
+          data:
+            package_id: p1
+            expected_g: 1000
+            actual_g: 1200
+    AnalyticsLabelApplied:
+      name: AnalyticsLabelApplied
+      title: LabelApplied
+      summary: Analytics occurrence of LabelApplied for the throughput data product.
+      description: SLAM applied the shipping label. Published on the internal `warehouse.fulfillment.analytics`
+        topic (ADR-0012) and consumed only by this service's own analytics projector (`cmd/fulfillment-projector`).
+      contentType: application/cloudevents+json
+      tags:
+      - name: package
+      - name: analytics
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.package.LabelApplied
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:analytics:LabelApplied:v1
+            data:
+              type: object
+              required:
+              - package_id
+              properties:
+                package_id:
+                  type: string
+                  description: Package id.
+      examples:
+      - name: analyticsLabelApplied
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.package.LabelApplied
+          subject: p1
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:analytics:LabelApplied:v1
+          data:
+            package_id: p1
+    AnalyticsPackageDiverted:
+      name: AnalyticsPackageDiverted
+      title: PackageDiverted
+      summary: Analytics occurrence of PackageDiverted for the throughput data product.
+      description: A package was diverted off the standard path. Published on the internal `warehouse.fulfillment.analytics`
+        topic (ADR-0012) and consumed only by this service's own analytics projector (`cmd/fulfillment-projector`).
+      contentType: application/cloudevents+json
+      tags:
+      - name: package
+      - name: analytics
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.package.PackageDiverted
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:analytics:PackageDiverted:v1
+            data:
+              type: object
+              required:
+              - package_id
+              properties:
+                package_id:
+                  type: string
+                  description: Package id.
+      examples:
+      - name: analyticsPackageDiverted
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.package.PackageDiverted
+          subject: p1
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:analytics:PackageDiverted:v1
+          data:
+            package_id: p1
+    AnalyticsPackageManifested:
+      name: AnalyticsPackageManifested
+      title: PackageManifested
+      summary: Analytics occurrence of PackageManifested for the throughput data product.
+      description: A package passed SLAM (projects into the on-time-to-CPT KPI). Published on the internal
+        `warehouse.fulfillment.analytics` topic (ADR-0012) and consumed only by this service's own analytics
+        projector (`cmd/fulfillment-projector`).
+      contentType: application/cloudevents+json
+      tags:
+      - name: package
+      - name: analytics
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.package.PackageManifested
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:analytics:PackageManifested:v1
+            data:
+              type: object
+              required:
+              - package_id
+              - order_ref
+              - task_type
+              - station_id
+              - on_time
+              - resolved
+              properties:
+                package_id:
+                  type: string
+                  description: Package id.
+                order_ref:
+                  type: string
+                  description: The package's order reference.
+                task_type:
+                  type: string
+                  enum:
+                  - ''
+                  - PICK
+                  - PACK
+                  - SLAM
+                  - REBIN
+                  description: Originating SLAM task type; empty when unresolved.
+                station_id:
+                  type: string
+                  description: Originating SLAM station; empty when unresolved.
+                on_time:
+                  type: boolean
+                  description: Manifested at or before the originating SLAM task's CPT (ADR-0026).
+                resolved:
+                  type: boolean
+                  description: Whether the originating SLAM task could be resolved; when false the projector
+                    skips recording.
+      examples:
+      - name: analyticsPackageManifested
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.package.PackageManifested
+          subject: p1
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:analytics:PackageManifested:v1
+          data:
+            package_id: p1
+            order_ref: wu-8a1f
+            task_type: SLAM
+            station_id: station-09
+            on_time: true
+            resolved: true
+    WorkReleased:
+      name: WorkReleased
+      title: WorkReleased
+      summary: Work Planning released a work unit (consumed).
+      description: Published by wes-work-planning on `warehouse.work-planning.events`; consumed here to
+        create a Task via CreateTask. Dispatch is on the full `type`; dedupe is on the CloudEvents `id`.
+        A message that is not a valid CloudEvents 1.0 event is dead-lettered to `warehouse.work-planning.events.dlq`.
+      contentType: application/cloudevents+json
+      tags:
+      - name: consumed
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.work-planning.workunit.WorkReleased
+            source:
+              type: string
+              const: /warehouse/wes-work-planning
+            dataschema:
+              type: string
+              const: urn:warehouse:wes-work-planning:events:WorkReleased:v1
+            data:
+              type: object
+              required:
+              - path_id
+              - work_unit_id
+              - cpt
+              properties:
+                path_id:
+                  type: string
+                  description: Process path id, resolved against the process-path catalogue.
+                work_unit_id:
+                  type: string
+                  description: Becomes the Task's order reference.
+                cpt:
+                  type: string
+                  description: CPT deadline.
+                  format: date-time
+                ref:
+                  type: string
+                  description: Release reference. For order-originated work this is the order id; it is kept
+                    on the Task and published as TaskCompleted.order_ref (ADR-0040). For transfer work it is the demand id.
+                    For RELOCATE work it is the slot plan id and is not kept (ADR-0047); for REPLENISH work it
+                    is the request id and is not kept either (ADR-0050).
+                line_no:
+                  type: integer
+                  format: int32
+                  minimum: 1
+                  maximum: 2147483647
+                  description: Optional (additive; the event stays v1). The 1-based order line this work
+                    unit is for; wes-work-planning sets it for order-originated work (explicitly, not encoded
+                    in work_unit_id). It is kept on the Task as source_line_no and published as
+                    TaskCompleted.line_no (ADR-0041). Absent from producers that predate it, and never
+                    honoured for transfer work. A value above 2147483647 (the 32-bit column width) is
+                    ignored by this consumer rather than rejected, so the task is still created with its
+                    line unknown.
+                fragile:
+                  type: boolean
+                  description: Optional fragile packing hint (default false).
+                gift_wrap:
+                  type: boolean
+                  description: Optional gift-wrap request (default false).
+                transfer_ref:
+                  type: string
+                  description: Present only for inter-warehouse-transfer work (the transfer saga's
+                    correlation id). Its presence turns the created Task into transfer work whose
+                    completion publishes exactly one transfer fact.
+                work_kind:
+                  type: string
+                  enum:
+                  - TRANSFER_PICK
+                  - TRANSFER_DISPATCH
+                  - TRANSFER_ARRIVAL
+                  description: Kind of transfer work; selects the completion fact. Required whenever
+                    transfer_ref is present, unknown values are rejected.
+                site_id:
+                  type: string
+                  description: Site the transfer fact is about (origin for pick/dispatch, destination
+                    for arrival).
+                sku:
+                  type: string
+                  description: SKU the transfer moves.
+                quantity:
+                  type: integer
+                  description: Units of sku the transfer moves.
+                relocation:
+                  type: object
+                  description: Present ONLY on work released on the RELOCATE process path (ADR-0047;
+                    additive, the event stays v1). One move of an approved slot plan
+                    (slotting-optimization SlotPlanApproved, planned by wes-work-planning). It turns the
+                    created Task into a RELOCATE task whose completion takes the operator-confirmed
+                    quantity and scanned bins and publishes them on TaskCompleted. A RELOCATE release
+                    without this object, this object on any other path, or an object that is not a valid
+                    move (missing move_seq, unknown kind, a bin the kind requires missing, from_bin equal
+                    to to_bin, blank plan_id or sku) is rejected and dead-lettered; no task is created.
+                  required:
+                  - plan_id
+                  - move_seq
+                  - kind
+                  - sku
+                  properties:
+                    plan_id:
+                      type: string
+                      minLength: 1
+                      description: The approved slot plan's id (SlotPlanApproved.data.plan_id).
+                    move_seq:
+                      type: integer
+                      format: int32
+                      minimum: 0
+                      description: The move's 0-based position in SlotPlanApproved.data.moves. With
+                        plan_id it forms the move reference `<plan_id>:<move_seq>` published as
+                        TaskCompleted.relocation_ref (keep plan_id + move_seq within 200 characters).
+                    kind:
+                      type: string
+                      enum:
+                      - Relocate
+                      - Assign
+                      - Vacate
+                      description: The SlotPlanApproved move kind, exact case. Relocate needs from_bin and
+                        to_bin; Assign needs to_bin (the source is scanned at completion); Vacate needs
+                        from_bin (the reserve destination is scanned at completion).
+                    sku:
+                      type: string
+                      minLength: 1
+                      description: The SKU to move (SlotPlanApproved move sku).
+                    from_bin:
+                      type: string
+                      minLength: 1
+                      description: Source bin (SlotPlanApproved move from_slot). Omitted for an Assign
+                        (the operator scans the source); if sent for an Assign it is fixed.
+                    to_bin:
+                      type: string
+                      minLength: 1
+                      description: Destination bin (SlotPlanApproved move to_slot). Omitted for a Vacate
+                        (the operator scans a reserve bin); if sent for a Vacate it is fixed.
+                replenishment:
+                  type: object
+                  description: Present ONLY on work released on the REPLENISH process path (ADR-0050;
+                    additive, the event stays v1). One pick-face replenishment request of
+                    pick-face-replenishment, planned by wes-work-planning. It turns the created Task into a
+                    REPLENISH task whose completion takes the operator-confirmed quantity and publishes the
+                    executed move on TaskCompleted with request_ref. A REPLENISH release without this
+                    object, this object on any other path (the RELOCATE path included), a `relocation`
+                    object on the REPLENISH path, or an object that is not a valid move (a blank request_id,
+                    sku or bin, from_bin equal to to_bin, a missing or non-positive quantity, a priority other
+                    than NORMAL or URGENT) is rejected and dead-lettered; no task is created.
+                  required:
+                  - request_id
+                  - sku
+                  - from_bin
+                  - to_bin
+                  - quantity
+                  - priority
+                  properties:
+                    request_id:
+                      type: string
+                      minLength: 1
+                      maxLength: 200
+                      description: The replenishment request id (pick-face-replenishment). Published as
+                        TaskCompleted.request_ref.
+                    sku:
+                      type: string
+                      minLength: 1
+                      description: The SKU to replenish.
+                    from_bin:
+                      type: string
+                      minLength: 1
+                      description: Source (reserve) bin.
+                    to_bin:
+                      type: string
+                      minLength: 1
+                      description: Destination bin (the pick face). Always different from from_bin.
+                    quantity:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                      description: The planned units to move. The operator confirms the actual count at
+                        completion; it may differ.
+                    priority:
+                      type: string
+                      enum:
+                      - NORMAL
+                      - URGENT
+                      description: The request urgency. Recorded on the task and shown on its read model;
+                        claimNext orders by CPT only (ADR-0050), so urgency is expressed upstream by an earlier CPT.
+                pick:
+                  type: object
+                  description: Present ONLY on work released on the PICK path with scan confirmation
+                    (ADR 0054; additive, the event stays v1). The pick plan the station scans against
+                    (`POST /tasks/{id}/scans`). Absent on every other release and on a PICK released without
+                    scan confirmation. A present object that is not a valid plan (blank sku, missing or
+                    non-positive quantity, a unit other than EACH or CASE) is rejected and dead-lettered;
+                    no task is created.
+                  required:
+                  - sku
+                  - quantity
+                  - unit
+                  properties:
+                    sku:
+                      type: string
+                      minLength: 1
+                      description: The SKU to pick.
+                    quantity:
+                      type: integer
+                      minimum: 1
+                      description: The planned quantity in EACHES (the ledger unit), whatever the unit.
+                    unit:
+                      type: string
+                      enum:
+                      - EACH
+                      - CASE
+                      description: The unit the operator scans.
+                    site_id:
+                      type: string
+                      description: 'Optional site the pick is worked at (ADR 0062; additive,
+                        omit-when-unknown: the producer stamps it whenever it knows one). Together
+                        with from_bin it is what makes the released PICK announcable to the
+                        open-task pool: a pick missing either is not announced and completes
+                        exactly as before.'
+                    from_bin:
+                      type: string
+                      description: Optional source bin (the pick face).
+                case_break:
+                  type: object
+                  description: Present ONLY on work released on the BREAK_CASE path (ADR 0054; additive,
+                    the event stays v1). Break the sealed case `lpn` of `sku` into `loose_bin` for the EACH
+                    pick `pick_task_id`. Absent on every other release. An object with a blank field or an
+                    `lpn` that is not 1-64 characters of [A-Za-z0-9._-] is rejected and dead-lettered; no
+                    task is created.
+                  required:
+                  - lpn
+                  - sku
+                  - loose_bin
+                  - pick_task_id
+                  properties:
+                    lpn:
+                      type: string
+                      minLength: 1
+                      maxLength: 64
+                      pattern: '^[A-Za-z0-9._-]+$'
+                      description: The sealed case's licence plate number.
+                    sku:
+                      type: string
+                      minLength: 1
+                    loose_bin:
+                      type: string
+                      minLength: 1
+                      description: The bin the case is broken into.
+                    pick_task_id:
+                      type: string
+                      minLength: 1
+                      description: The EACH pick task this break serves.
+      examples:
+      - name: workReleased
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/wes-work-planning
+          type: com.warehouse.wes.work-planning.workunit.WorkReleased
+          subject: wu-8a1f
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:wes-work-planning:events:WorkReleased:v1
+          data:
+            path_id: pick-zone-a
+            work_unit_id: wu-8a1f
+            cpt: '2026-09-30T18:00:00Z'
+            ref: release-1
+            line_no: 2
+      - name: workReleasedRelocate
+        summary: RELOCATE work (ADR-0047) - one move of an approved slot plan; ref is the plan id and
+          the relocation object carries the move (an Assign, so from_bin is omitted and scanned at
+          completion).
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 0b6d9a52-3c1e-4f7a-9d2b-5e8f7a6c4d31
+          source: /warehouse/wes-work-planning
+          type: com.warehouse.wes.work-planning.workunit.WorkReleased
+          subject: slot-plan-7-move-3
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:wes-work-planning:events:WorkReleased:v1
+          data:
+            path_id: RELOCATE
+            work_unit_id: slot-plan-7-move-3
+            cpt: '2026-09-30T23:00:00Z'
+            ref: plan-7
+            relocation:
+              plan_id: plan-7
+              move_seq: 3
+              kind: Assign
+              sku: SKU-1
+              to_bin: WH1-FWD-A01-01-01-A
+      - name: workReleasedReplenish
+        summary: REPLENISH work (ADR-0050) - one pick-face replenishment request; ref is the request id and
+          the replenishment object carries the move.
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 3c8e1f47-9a2d-4b6e-8f10-7d5a2c9e4b68
+          source: /warehouse/wes-work-planning
+          type: com.warehouse.wes.work-planning.workunit.WorkReleased
+          subject: replenish-req-9
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:wes-work-planning:events:WorkReleased:v1
+          data:
+            path_id: REPLENISH
+            work_unit_id: replenish-req-9
+            cpt: '2026-09-30T16:00:00Z'
+            ref: req-9
+            replenishment:
+              request_id: req-9
+              sku: SKU-1
+              from_bin: WH1-RSV-AMB-B02-03-02-C
+              to_bin: WH1-FWD-AMB-A01-01-01-A
+              quantity: 24
+              priority: URGENT
+    TransferPicked:
+      name: TransferPicked
+      title: TransferPicked
+      summary: A TRANSFER_PICK task completed — transfer stock was picked at the origin site.
+      description: Published on `warehouse.fulfillment.events` when a task carrying an inter-warehouse-transfer
+        correlation block with work_kind TRANSFER_PICK completes. Exactly one transfer fact is selected
+        by work_kind at completion (see the transfer-task-facts ADR); non-transfer tasks never publish
+        one. Keyed (and `subject`-ed) by task id, `time` is the completion time. Consumed by the
+        transfer saga (network-inventory-planning) and destination receipt correlation.
+      contentType: application/cloudevents+json
+      tags:
+      - name: transfer
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.transfer.TransferPicked
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:events:TransferPicked:v1
+            data:
+              $ref: '#/components/schemas/TransferFactData'
+      examples:
+      - name: transferPicked
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.transfer.TransferPicked
+          subject: task-tr-8a1f
+          time: '2026-10-06T15:04:05Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:events:TransferPicked:v1
+          data:
+            transfer_ref: tr-9f2a
+            demand_id: demand-77
+            work_unit_id: wu-tr-8a1f
+            task_id: task-tr-8a1f
+            work_kind: TRANSFER_PICK
+            site_id: site-north
+            sku: SKU-0042
+            quantity: 12
+    TransferDispatched:
+      name: TransferDispatched
+      title: TransferDispatched
+      summary: A TRANSFER_DISPATCH task completed — the transfer left the origin site.
+      description: Published on `warehouse.fulfillment.events` when a task carrying an inter-warehouse-transfer
+        correlation block with work_kind TRANSFER_DISPATCH completes. Same envelope and selection
+        rules as TransferPicked.
+      contentType: application/cloudevents+json
+      tags:
+      - name: transfer
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.transfer.TransferDispatched
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:events:TransferDispatched:v1
+            data:
+              $ref: '#/components/schemas/TransferFactData'
+      examples:
+      - name: transferDispatched
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.transfer.TransferDispatched
+          subject: task-tr-8a1f
+          time: '2026-10-06T15:04:05Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:events:TransferDispatched:v1
+          data:
+            transfer_ref: tr-9f2a
+            demand_id: demand-77
+            work_unit_id: wu-tr-8a1f
+            task_id: task-tr-8a1f
+            work_kind: TRANSFER_DISPATCH
+            site_id: site-north
+            sku: SKU-0042
+            quantity: 12
+    TransferArrived:
+      name: TransferArrived
+      title: TransferArrived
+      summary: A TRANSFER_ARRIVAL task completed — the transfer reached the destination site.
+      description: Published on `warehouse.fulfillment.events` when a task carrying an inter-warehouse-transfer
+        correlation block with work_kind TRANSFER_ARRIVAL completes. Same envelope and selection
+        rules as TransferPicked; destination receipt/stow correlates on transfer_ref.
+      contentType: application/cloudevents+json
+      tags:
+      - name: transfer
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.transfer.TransferArrived
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:events:TransferArrived:v1
+            data:
+              $ref: '#/components/schemas/TransferFactData'
+      examples:
+      - name: transferArrived
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.transfer.TransferArrived
+          subject: task-tr-8a1f
+          time: '2026-10-06T15:04:05Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:events:TransferArrived:v1
+          data:
+            transfer_ref: tr-9f2a
+            demand_id: demand-77
+            work_unit_id: wu-tr-8a1f
+            task_id: task-tr-8a1f
+            work_kind: TRANSFER_ARRIVAL
+            site_id: site-south
+            sku: SKU-0042
+            quantity: 12
+    ProcessPathCreated:
+      name: ProcessPathCreated
+      title: ProcessPathCreated
+      summary: Process-path catalogue event ProcessPathCreated (consumed).
+      description: Published by process-path-management on `warehouse.process-path-management.events`;
+        replayed from FirstOffset into the in-memory process-path catalogue when `PATH_CATALOGUE_SOURCE=kafka`.
+        A message that is not a valid CloudEvents 1.0 event is logged at WARN and skipped.
+      contentType: application/cloudevents+json
+      tags:
+      - name: consumed
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.process-path-management.processpath.ProcessPathCreated
+            source:
+              type: string
+              const: /warehouse/process-path-management
+            dataschema:
+              type: string
+              const: urn:warehouse:process-path-management:events:ProcessPathCreated:v1
+            data:
+              type: object
+              required:
+              - path_id
+              properties:
+                path_id:
+                  type: string
+                  description: Process path id.
+                match_prefix:
+                  type: string
+                  description: Case-insensitive path_id prefix this path matches.
+                direct:
+                  type: boolean
+                  description: Direct (non-sortable) path.
+                required_capabilities:
+                  type: array
+                  items:
+                    type: string
+                  description: Station capabilities required.
+                destination_location_role:
+                  type: string
+                  description: Optional destination location role.
+      examples:
+      - name: processPathCreated
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/process-path-management
+          type: com.warehouse.wes.process-path-management.processpath.ProcessPathCreated
+          subject: PICK
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:process-path-management:events:ProcessPathCreated:v1
+          data:
+            path_id: PICK
+            match_prefix: pick
+            direct: true
+            required_capabilities:
+            - pick
+    ProcessPathUpdated:
+      name: ProcessPathUpdated
+      title: ProcessPathUpdated
+      summary: Process-path catalogue event ProcessPathUpdated (consumed).
+      description: Published by process-path-management on `warehouse.process-path-management.events`;
+        replayed from FirstOffset into the in-memory process-path catalogue when `PATH_CATALOGUE_SOURCE=kafka`.
+        A message that is not a valid CloudEvents 1.0 event is logged at WARN and skipped.
+      contentType: application/cloudevents+json
+      tags:
+      - name: consumed
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.process-path-management.processpath.ProcessPathUpdated
+            source:
+              type: string
+              const: /warehouse/process-path-management
+            dataschema:
+              type: string
+              const: urn:warehouse:process-path-management:events:ProcessPathUpdated:v1
+            data:
+              type: object
+              required:
+              - path_id
+              properties:
+                path_id:
+                  type: string
+                  description: Process path id.
+                match_prefix:
+                  type: string
+                  description: Case-insensitive path_id prefix this path matches.
+                direct:
+                  type: boolean
+                  description: Direct (non-sortable) path.
+                required_capabilities:
+                  type: array
+                  items:
+                    type: string
+                  description: Station capabilities required.
+                destination_location_role:
+                  type: string
+                  description: Optional destination location role.
+      examples:
+      - name: processPathUpdated
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/process-path-management
+          type: com.warehouse.wes.process-path-management.processpath.ProcessPathUpdated
+          subject: PICK
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:process-path-management:events:ProcessPathUpdated:v1
+          data:
+            path_id: PICK
+            match_prefix: pick
+            direct: true
+            required_capabilities:
+            - pick
+            - hazmat
+    ProcessPathDeactivated:
+      name: ProcessPathDeactivated
+      title: ProcessPathDeactivated
+      summary: Process-path catalogue event ProcessPathDeactivated (consumed).
+      description: Published by process-path-management on `warehouse.process-path-management.events`;
+        replayed from FirstOffset into the in-memory process-path catalogue when `PATH_CATALOGUE_SOURCE=kafka`.
+        A message that is not a valid CloudEvents 1.0 event is logged at WARN and skipped.
+      contentType: application/cloudevents+json
+      tags:
+      - name: consumed
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.process-path-management.processpath.ProcessPathDeactivated
+            source:
+              type: string
+              const: /warehouse/process-path-management
+            dataschema:
+              type: string
+              const: urn:warehouse:process-path-management:events:ProcessPathDeactivated:v1
+            data:
+              type: object
+              required:
+              - path_id
+              properties:
+                path_id:
+                  type: string
+                  description: Process path id.
+                match_prefix:
+                  type: string
+                  description: Case-insensitive path_id prefix this path matches.
+                direct:
+                  type: boolean
+                  description: Direct (non-sortable) path.
+                required_capabilities:
+                  type: array
+                  items:
+                    type: string
+                  description: Station capabilities required.
+                destination_location_role:
+                  type: string
+                  description: Optional destination location role.
+      examples:
+      - name: processPathDeactivated
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/process-path-management
+          type: com.warehouse.wes.process-path-management.processpath.ProcessPathDeactivated
+          subject: PICK
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:process-path-management:events:ProcessPathDeactivated:v1
+          data:
+            path_id: PICK
+    ProductPackLevelDeclared:
+      name: ProductPackLevelDeclared
+      title: ProductPackLevelDeclared
+      summary: product-master declared or revised a pack level of a SKU (consumed).
+      description: Published by product-master on `warehouse.product-master.events` (its AsyncAPI is the
+        source of truth); consumed here into the local PackView read per scanned GTIN at scan time (ADR 0054),
+        by the always-on consumer under the required `PACK_VIEW_CONSUMER_GROUP`.
+      contentType: application/cloudevents+json
+      tags:
+      - name: consumed
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wms.product-master.product.ProductPackLevelDeclared
+            source:
+              type: string
+              const: /warehouse/product-master
+            dataschema:
+              type: string
+              const: urn:warehouse:product-master:events:ProductPackLevelDeclared:v1
+            data:
+              type: object
+              required:
+              - sku
+              - level
+              - gtin
+              - units_per_pack
+              - effective_from
+              - version
+              properties:
+                sku:
+                  type: string
+                  description: The SKU (also the Kafka key and the CloudEvents `subject`). Must not be blank.
+                level:
+                  type: string
+                  enum:
+                  - EACH
+                  - INNER
+                  - CASE
+                  - PALLET
+                  description: Any other level makes the payload invalid.
+                gtin:
+                  type: string
+                  description: Must parse as a GTIN (normalised to 14 digits).
+                child_gtin:
+                  type: string
+                  description: Optional; must parse as a GTIN when present.
+                qty_of_child:
+                  type: integer
+                  minimum: 2
+                  description: Absent for EACH.
+                units_per_pack:
+                  type: integer
+                  minimum: 1
+                  description: Direct factor to eaches; 1 for EACH.
+                is_orderable:
+                  type: boolean
+                  description: Carried by the producer; ignored by this consumer.
+                is_despatch_unit:
+                  type: boolean
+                  description: Carried by the producer; ignored by this consumer.
+                dims:
+                  type: object
+                  description: Optional DECLARED dimensions and weight of the level, used by ship-in-own-container
+                    (ADR 0056). Kept only when all four measures are positive; otherwise dropped (the level is
+                    still applied, but cannot ship in its own container).
+                  properties:
+                    length_mm:
+                      type: integer
+                      description: Length in millimetres.
+                    width_mm:
+                      type: integer
+                      description: Width in millimetres.
+                    height_mm:
+                      type: integer
+                      description: Height in millimetres.
+                    weight_g:
+                      type: integer
+                      description: Weight in grams.
+                effective_from:
+                  type: string
+                  format: date-time
+                version:
+                  type: integer
+                  minimum: 1
+
+    ProductPackLevelRetired:
+      name: ProductPackLevelRetired
+      title: ProductPackLevelRetired
+      summary: product-master retired a pack level of a SKU (consumed).
+      description: Published by product-master on `warehouse.product-master.events` (its AsyncAPI is the
+        source of truth); consumed here into the local PackView read per scanned GTIN at scan time (ADR 0054),
+        by the always-on consumer under the required `PACK_VIEW_CONSUMER_GROUP`.
+      contentType: application/cloudevents+json
+      tags:
+      - name: consumed
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wms.product-master.product.ProductPackLevelRetired
+            source:
+              type: string
+              const: /warehouse/product-master
+            dataschema:
+              type: string
+              const: urn:warehouse:product-master:events:ProductPackLevelRetired:v1
+            data:
+              type: object
+              required:
+              - sku
+              - level
+              - gtin
+              - effective_to
+              - reason
+              - version
+              properties:
+                sku:
+                  type: string
+                level:
+                  type: string
+                gtin:
+                  type: string
+                effective_to:
+                  type: string
+                  format: date-time
+                reason:
+                  type: string
+                version:
+                  type: integer
+                  minimum: 1
+
+    ProductClassified:
+      name: ProductClassified
+      title: ProductClassified
+      summary: product-master set or replaced a SKU's handling classification (consumed).
+      description: Published by product-master on `warehouse.product-master.events` (its AsyncAPI is the
+        source of truth); consumed here into the local classification copy (ADR-0039). Full-state replacement
+        of the classification; optional fields are omitted when unset. Applied only when `version` is greater
+        than the stored version; dedupe on the CloudEvents `id`.
+      contentType: application/cloudevents+json
+      tags:
+      - name: consumed
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wms.product-master.product.ProductClassified
+            source:
+              type: string
+              const: /warehouse/product-master
+            dataschema:
+              type: string
+              const: urn:warehouse:product-master:events:ProductClassified:v1
+            data:
+              type: object
+              required:
+              - sku
+              - version
+              properties:
+                sku:
+                  type: string
+                  description: The SKU (also the Kafka key and the CloudEvents `subject`). An empty sku makes the payload invalid.
+                handling_tags:
+                  type: array
+                  items:
+                    type: string
+                    enum:
+                    - Hazmat
+                    - Fragile
+                    - TemperatureSensitive
+                    - Oversized
+                    - HighValue
+                  description: Handling tags in stable order. Hazmat and Fragile feed ClassificationInfo; the
+                    others are stored but unused here.
+                temperature_class:
+                  type: string
+                  enum:
+                  - Ambient
+                  - Chilled
+                  - Frozen
+                  description: Omitted when unset.
+                dot_hazard_class:
+                  type: integer
+                  minimum: 1
+                  maximum: 9
+                  description: DOT hazard class; omitted when unset. Drives SealPackage's same-package segregation
+                    (ADR-0010).
+                classification_source:
+                  type: string
+                  enum:
+                  - native
+                  - legacy-import
+                  description: Migration artefact of product-master (its ADR 0003); optional and not used here.
+                version:
+                  type: integer
+                  minimum: 1
+                  format: int64
+                  description: Product aggregate version after the change; the local copy's guard.
+      examples:
+      - name: productClassified
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+        payload:
+          specversion: "1.0"
+          id: 0f6d8a2b-3c4e-4d5f-8a9b-7c6d5e4f3a2b
+          source: /warehouse/product-master
+          type: com.warehouse.wms.product-master.product.ProductClassified
+          subject: SKU-1
+          time: '2026-10-06T21:02:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:product-master:events:ProductClassified:v1
+          data:
+            sku: SKU-1
+            handling_tags:
+            - Hazmat
+            - TemperatureSensitive
+            temperature_class: Frozen
+            dot_hazard_class: 3
+            classification_source: native
+            version: 3
+    InterleavingHintIssued:
+      name: InterleavingHintIssued
+      title: InterleavingHintIssued
+      summary: task-interleaving recommended which open tasks a station could work next (consumed).
+      description: Published by task-interleaving on `warehouse.task-interleaving.events` (its AsyncAPI
+        is the source of truth); consumed here into the local hint copy (ADR-0051). Kafka key and `subject`
+        = the station id. `candidates` is non-empty and ranked from 1 by `detour_m` ascending then `task_id`.
+        The hint is advisory and valid until `expires_at`; one ACTIVE hint per station, a newer hint
+        supersedes; dedupe on the CloudEvents `id`.
+      contentType: application/cloudevents+json
+      tags:
+      - name: consumed
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.task-interleaving.stationtrip.InterleavingHintIssued
+            source:
+              type: string
+              const: /warehouse/task-interleaving
+            dataschema:
+              type: string
+              const: urn:warehouse:task-interleaving:events:InterleavingHintIssued:v1
+            data:
+              type: object
+              required:
+              - hint_id
+              - station_id
+              - site_id
+              - expires_at
+              - candidates
+              properties:
+                hint_id:
+                  type: string
+                  description: The hint id.
+                station_id:
+                  type: string
+                  description: The station the hint is for (also the Kafka key and the CloudEvents `subject`).
+                site_id:
+                  type: string
+                  description: The site the station belongs to.
+                after_task_id:
+                  type: string
+                  description: The task whose completion triggered the hint. Not used here.
+                origin_location:
+                  type: string
+                  description: Where the operator finished `after_task_id`. Not used here.
+                expires_at:
+                  type: string
+                  format: date-time
+                  description: The hint is ignored at and after this instant (fail-open).
+                policy_version:
+                  type: integer
+                  description: The interleaving policy version the hint was issued under. Not used here.
+                candidates:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required:
+                    - rank
+                    - task_id
+                    properties:
+                      rank:
+                        type: integer
+                        minimum: 1
+                        description: 1 = the producer's preferred candidate.
+                      task_id:
+                        type: string
+                        description: A task of this context's open pool.
+                      task_type:
+                        type: string
+                        description: Not used here (claimNext scans one type per call).
+                      location:
+                        type: string
+                        description: Not used here.
+                      detour_m:
+                        type: number
+                        description: Not used here.
+      examples:
+      - name: twoCandidates
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+        payload:
+          specversion: "1.0"
+          id: 6f1d2c3b-4a5e-4b7c-8d9e-0a1b2c3d4e5f
+          source: /warehouse/task-interleaving
+          type: com.warehouse.wes.task-interleaving.stationtrip.InterleavingHintIssued
+          subject: STN-07
+          time: '2026-10-17T12:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:task-interleaving:events:InterleavingHintIssued:v1
+          data:
+            hint_id: hint-3b0e8d2a-7c41-4f6a-9d15-2a8b6c4e1f07
+            station_id: STN-07
+            site_id: SITE-1
+            after_task_id: task-8a1f
+            origin_location: WH1-FWD-A01-01-01-A
+            expires_at: '2026-10-17T12:01:30Z'
+            policy_version: 2
+            candidates:
+            - rank: 1
+              task_id: task-9c2e
+              task_type: PICK
+              location: WH1-FWD-A01-02-01-A
+              detour_m: 4.5
+            - rank: 2
+              task_id: task-9d10
+              task_type: REPLENISH
+              location: WH1-FWD-A02-01-01-A
+              detour_m: 12.0
+    WorkBatchFormed:
+      x-no-consumer-reason: "pending: published only with PICK_BATCH_MODE on (ADR 0063); the contract names labor-performance (batch_size reporting) as the intended consumer, but labor-performance has no handler for it on develop."
+      name: WorkBatchFormed
+      title: WorkBatchFormed
+      summary: A station's pick walk formed (ADR 0063).
+      description: Raised when POST /stations/{stationId}/work-batches forms a walk, inside the
+        same transaction that persists the batch. Published on `warehouse.fulfillment.events`,
+        keyed (and `subject`-ed) by batch id. The anchor is exactly the task ClaimNext would
+        have returned, so a consumer can treat the first member as today's dispatch and the
+        rest as additions. Published only with PICK_BATCH_MODE on; with the fleet default off
+        nothing is published. The intended consumer is labor-performance (batch_size reporting; no
+        handler for it on its develop yet); also available to the warehouse console.
+      contentType: application/cloudevents+json
+      tags:
+      - name: workbatch
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.workbatch.WorkBatchFormed
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:events:WorkBatchFormed:v1
+            data:
+              type: object
+              required:
+              - batch_id
+              - station_id
+              - cpt
+              - formed_at
+              - version
+              - members
+              properties:
+                batch_id:
+                  type: string
+                  description: The formed batch's id.
+                station_id:
+                  type: string
+                  description: The station holding the walk.
+                cpt:
+                  type: string
+                  format: date-time
+                  description: The batch's priority band — every member shares this CPT instant (D3).
+                formed_at:
+                  type: string
+                  format: date-time
+                  description: Formation instant; WorkBatchCompleted's walk_seconds is measured from it.
+                version:
+                  type: integer
+                  format: int64
+                  description: Aggregate version at formation (1).
+                members:
+                  type: array
+                  minItems: 1
+                  description: The stops in visit order (hint rank order, D6).
+                  items:
+                    type: object
+                    required:
+                    - task_id
+                    - stop_seq
+                    - compartment
+                    properties:
+                      task_id:
+                        type: string
+                        description: The member PICK task's id.
+                      stop_seq:
+                        type: integer
+                        minimum: 1
+                        description: The 1-based visit order of this stop.
+                      compartment:
+                        type: integer
+                        minimum: 1
+                        description: The cart position holding this task's items.
+      examples:
+      - name: workBatchFormed
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 7a2d3e4f-5a6b-7c80-9d0e-1f2a3b4c5d6e
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.workbatch.WorkBatchFormed
+          subject: wb-20260930T150000.000000000
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:events:WorkBatchFormed:v1
+          data:
+            batch_id: wb-20260930T150000.000000000
+            station_id: STN-07
+            cpt: '2026-09-30T18:00:00Z'
+            formed_at: '2026-09-30T15:00:00Z'
+            version: 1
+            members:
+            - task_id: task-8a1f
+              stop_seq: 1
+              compartment: 1
+            - task_id: task-9c2e
+              stop_seq: 2
+              compartment: 2
+    WorkBatchCompleted:
+      x-no-consumer-reason: "pending: published only with PICK_BATCH_MODE on (ADR 0063); the contract names labor-performance (batch_size reporting) as the intended consumer, but labor-performance has no handler for it on develop."
+      name: WorkBatchCompleted
+      title: WorkBatchCompleted
+      summary: The walk's last open stop completed (ADR 0063).
+      description: Raised when the last still-open member completes, in the same transaction
+        that flips the batch to COMPLETED. Published on `warehouse.fulfillment.events`, keyed
+        (and `subject`-ed) by batch id. walk_seconds is completion minus formation — the whole
+        walk, not per-stop labor (per-stop durations stay on each member's own TaskCompleted,
+        ADR 0064). Published only with PICK_BATCH_MODE on.
+      contentType: application/cloudevents+json
+      tags:
+      - name: workbatch
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.workbatch.WorkBatchCompleted
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:events:WorkBatchCompleted:v1
+            data:
+              type: object
+              required:
+              - batch_id
+              - station_id
+              - member_count
+              - walk_seconds
+              - completed_at
+              - version
+              properties:
+                batch_id:
+                  type: string
+                  description: The completed batch's id.
+                station_id:
+                  type: string
+                  description: The station that walked it.
+                member_count:
+                  type: integer
+                  minimum: 1
+                  description: How many tasks the walk held at formation.
+                walk_seconds:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                  description: Completion minus formation, whole seconds.
+                completed_at:
+                  type: string
+                  format: date-time
+                  description: When the last open member completed.
+                version:
+                  type: integer
+                  format: int64
+                  description: Aggregate version at completion.
+      examples:
+      - name: workBatchCompleted
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 8b3e4f5a-6b7c-8d90-0e1f-2a3b4c5d6e7f
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.workbatch.WorkBatchCompleted
+          subject: wb-20260930T150000.000000000
+          time: '2026-09-30T15:07:30Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:events:WorkBatchCompleted:v1
+          data:
+            batch_id: wb-20260930T150000.000000000
+            station_id: STN-07
+            member_count: 2
+            walk_seconds: 450
+            completed_at: '2026-09-30T15:07:30Z'
+            version: 3
+    WorkBatchAbandoned:
+      x-no-consumer-reason: "pending: published only with PICK_BATCH_MODE on (ADR 0063); the contract names labor-performance (batch_size reporting) as the intended consumer, but labor-performance has no handler for it on develop."
+      name: WorkBatchAbandoned
+      title: WorkBatchAbandoned
+      summary: Every member left the walk without completing (ADR 0063).
+      description: Raised when the last still-open member detaches — its lease expired and the
+        task returned to the pool through the existing sweep — in the same transaction that
+        flips the batch to ABANDONED. The tasks themselves are NOT lost — each detaches through
+        the ordinary lease-expiry path and stays claimable. Published on
+        `warehouse.fulfillment.events`, keyed (and `subject`-ed) by batch id. Published only
+        with PICK_BATCH_MODE on.
+      contentType: application/cloudevents+json
+      tags:
+      - name: workbatch
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.workbatch.WorkBatchAbandoned
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:events:WorkBatchAbandoned:v1
+            data:
+              type: object
+              required:
+              - batch_id
+              - station_id
+              - member_count
+              - abandoned_at
+              - version
+              properties:
+                batch_id:
+                  type: string
+                  description: The abandoned batch's id.
+                station_id:
+                  type: string
+                  description: The station that held it.
+                member_count:
+                  type: integer
+                  minimum: 1
+                  description: How many tasks the walk held at formation.
+                abandoned_at:
+                  type: string
+                  format: date-time
+                  description: When the last open member detached.
+                version:
+                  type: integer
+                  format: int64
+                  description: Aggregate version at abandonment.
+      examples:
+      - name: workBatchAbandoned
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 9c4f5a6b-7c8d-9e01-1f2a-3b4c5d6e7f8a
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.workbatch.WorkBatchAbandoned
+          subject: wb-20260930T150000.000000000
+          time: '2026-09-30T15:10:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:events:WorkBatchAbandoned:v1
+          data:
+            batch_id: wb-20260930T150000.000000000
+            station_id: STN-07
+            member_count: 2
+            abandoned_at: '2026-09-30T15:10:00Z'
+            version: 3
+    AnalyticsWorkBatchFormed:
+      name: AnalyticsWorkBatchFormed
+      title: WorkBatchFormed
+      summary: Analytics occurrence of WorkBatchFormed for the batching data product.
+      description: A walk formed (ADR 0063). Published on the internal `warehouse.fulfillment.analytics`
+        topic (ADR-0012) and consumed only by this service's own analytics projector
+        (`cmd/fulfillment-projector`); the `data` bytes are identical to the integration
+        occurrence. Wave 4's batch-effectiveness report reads these to measure would-be batch
+        sizes and detour against the anchor-only walk.
+      contentType: application/cloudevents+json
+      tags:
+      - name: workbatch
+      - name: analytics
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.workbatch.WorkBatchFormed
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:analytics:WorkBatchFormed:v1
+            data:
+              type: object
+              required:
+              - batch_id
+              - station_id
+              - cpt
+              - formed_at
+              - version
+              - members
+              properties:
+                batch_id:
+                  type: string
+                  description: Batch id.
+                station_id:
+                  type: string
+                  description: Station id.
+                cpt:
+                  type: string
+                  format: date-time
+                  description: The batch's priority band.
+                formed_at:
+                  type: string
+                  format: date-time
+                  description: Formation instant.
+                version:
+                  type: integer
+                  format: int64
+                  description: Aggregate version at formation.
+                members:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required:
+                    - task_id
+                    - stop_seq
+                    - compartment
+                    properties:
+                      task_id:
+                        type: string
+                      stop_seq:
+                        type: integer
+                      compartment:
+                        type: integer
+    AnalyticsWorkBatchCompleted:
+      name: AnalyticsWorkBatchCompleted
+      title: WorkBatchCompleted
+      summary: Analytics occurrence of WorkBatchCompleted for the batching data product.
+      description: A walk completed (ADR 0063) — member_count and walk_seconds (completion
+        minus formation) per batch. Published on the internal `warehouse.fulfillment.analytics`
+        topic (ADR-0012) and consumed only by this service's own analytics projector
+        (`cmd/fulfillment-projector`); the `data` bytes are identical to the integration
+        occurrence.
+      contentType: application/cloudevents+json
+      tags:
+      - name: workbatch
+      - name: analytics
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.workbatch.WorkBatchCompleted
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:analytics:WorkBatchCompleted:v1
+            data:
+              type: object
+              required:
+              - batch_id
+              - station_id
+              - member_count
+              - walk_seconds
+              - completed_at
+              - version
+              properties:
+                batch_id:
+                  type: string
+                station_id:
+                  type: string
+                member_count:
+                  type: integer
+                walk_seconds:
+                  type: integer
+                  format: int64
+                completed_at:
+                  type: string
+                  format: date-time
+                version:
+                  type: integer
+                  format: int64
+    AnalyticsWorkBatchAbandoned:
+      name: AnalyticsWorkBatchAbandoned
+      title: WorkBatchAbandoned
+      summary: Analytics occurrence of WorkBatchAbandoned for the batching data product.
+      description: A walk abandoned (ADR 0063) — every member left without completing.
+        Published on the internal `warehouse.fulfillment.analytics` topic (ADR-0012) and
+        consumed only by this service's own analytics projector
+        (`cmd/fulfillment-projector`); the `data` bytes are identical to the integration
+        occurrence.
+      contentType: application/cloudevents+json
+      tags:
+      - name: workbatch
+      - name: analytics
+      headers:
+        $ref: '#/components/schemas/KafkaHeaders'
+      payload:
+        allOf:
+        - $ref: '#/components/schemas/CloudEvent'
+        - type: object
+          required:
+          - type
+          - source
+          - dataschema
+          - data
+          properties:
+            type:
+              type: string
+              const: com.warehouse.wes.fulfillment-execution.workbatch.WorkBatchAbandoned
+            source:
+              type: string
+              const: /warehouse/fulfillment-execution
+            dataschema:
+              type: string
+              const: urn:warehouse:fulfillment-execution:analytics:WorkBatchAbandoned:v1
+            data:
+              type: object
+              required:
+              - batch_id
+              - station_id
+              - member_count
+              - abandoned_at
+              - version
+              properties:
+                batch_id:
+                  type: string
+                station_id:
+                  type: string
+                member_count:
+                  type: integer
+                abandoned_at:
+                  type: string
+                  format: date-time
+                version:
+                  type: integer
+                  format: int64
+  schemas:
+    TransferFactData:
+      type: object
+      required:
+      - transfer_ref
+      - work_unit_id
+      - task_id
+      - work_kind
+      description: The payload every transfer fact (TransferPicked / TransferDispatched /
+        TransferArrived) carries — the transfer correlation block the completed Task carried,
+        stamped at release time.
+      properties:
+        transfer_ref:
+          type: string
+          description: The transfer saga's correlation id.
+        demand_id:
+          type: string
+          description: The work-demand reference the release carried; omitted when absent.
+        work_unit_id:
+          type: string
+          description: The completed task's work unit id (its order reference).
+        task_id:
+          type: string
+          description: The completing task id — also the Kafka key and CloudEvents subject.
+        work_kind:
+          type: string
+          enum:
+          - TRANSFER_PICK
+          - TRANSFER_DISPATCH
+          - TRANSFER_ARRIVAL
+        site_id:
+          type: string
+          description: Site the fact is about; omitted when the release carried none.
+        sku:
+          type: string
+          description: SKU the transfer moves; omitted when the release carried none.
+        quantity:
+          type: integer
+          description: Units of sku; omitted when the release carried none.
+    KafkaHeaders:
+      type: object
+      description: Kafka message headers carried by every message.
+      required:
+      - content-type
+      properties:
+        content-type:
+          type: string
+          const: application/cloudevents+json; charset=UTF-8
+          description: CloudEvents structured-mode media type.
+        traceparent:
+          type: string
+          description: W3C traceparent of the publishing span.
+        tracestate:
+          type: string
+          description: W3C tracestate, present only when a vendor added entries.
+    CloudEvent:
+      type: object
+      description: CloudEvents 1.0 context attributes; every attribute is required in this fleet.
+      required:
+      - specversion
+      - id
+      - source
+      - type
+      - subject
+      - time
+      - datacontenttype
+      - dataschema
+      - data
+      properties:
+        specversion:
+          type: string
+          const: "1.0"
+          description: CloudEvents spec version.
+        id:
+          type: string
+          format: uuid
+          description: UUID v4, minted once per occurrence and stable across outbox redelivery.
+        source:
+          type: string
+          format: uri-reference
+          description: Producing service, `/warehouse/<repo>`.
+        type:
+          type: string
+          description: '`com.warehouse.<subdomain>.<bounded-context>.<entity>.<EventName>`.'
+        subject:
+          type: string
+          minLength: 1
+          description: Aggregate instance id; equal to the Kafka message key.
+        time:
+          type: string
+          format: date-time
+          description: Domain occurred-at, UTC, RFC 3339.
+        datacontenttype:
+          type: string
+          const: application/json
+          description: Content type of `data`.
+        dataschema:
+          type: string
+          format: uri
+          description: '`urn:warehouse:<repo>:<events|analytics>:<EventName>:v<N>`.'
+        data:
+          type: object
+          description: Event payload (snake_case keys).

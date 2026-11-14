@@ -1,0 +1,1976 @@
+asyncapi: 2.6.0
+
+info:
+  title: warehouse-planning Domain Events
+  version: "0.7.0"
+  contact:
+    name: warehouse-planning maintainers
+    url: https://github.com/IQVO/warehouse-planning
+    email: warehouse-planning@iqvo.example.com
+  license:
+    name: UNLICENSED
+  description: |
+    Event catalog for the **warehouse-planning** bounded context (WES
+    subdomain): *can this warehouse process the demand assigned to it?*
+
+    **Published (Phase 4).** The `CapacityPlan` aggregate raises four events,
+    published to `warehouse.warehouse-planning.events` through a
+    **transactional outbox**: the plan and its already-encoded events are
+    written in ONE database transaction, and a relay drains them to Kafka
+    (at-least-once; the CloudEvents `id` is persisted with the outbox row, so
+    a retry republishes the same `id` -- consumers dedupe on it). Per plan:
+    `CapacityPlanCreated` on creation; on publication
+    `CapacityPlanPublished`, plus `CapacityShortageDetected` and
+    `BottleneckDetected` only when the plan has a shortage.
+    The `ProcessCapacity` aggregate publishes on the same topic and the same
+    outbox: `ProcessCapacityRegistered` when its first (native) constraint
+    brings it into being, `ProcessCapacityChanged` when a registration
+    moves the effective rate (the minimum rate value, the binding
+    constraint, or both); a registration the effective rate does not notice
+    raises nothing. ProcessCapacity events are integration-stream only: the
+    analytics fanout carries plan facts only (ADR 0005).
+
+    **Consumed (Phase 3).** `ShiftPlanCommitted` (workforce-management) and
+    `LocationSlotRegistered`/`LocationSlotDecommissioned` (facility-layout) keep
+    local ProcessCapacity read models current; this context never makes a
+    live cross-context call.
+
+    **Consumed (ADR 0004).** `OrderAllocated` and
+    `OrderPartiallyAllocated` (order-management, topic
+    `warehouse.order-management.events`) keep a local expected-demand read
+    model current under the REQUIRED consumer group `DEMAND_CONSUMER_GROUP`.
+    Each order is counted once, at its latest promise cutoff, and attributed to
+    the ONE configured site (`DEMAND_SITE_ID`): order-management's events carry
+    no fulfillment site. `OrderRepromised` and every other type are ignored.
+
+    **Consumed (ADR 0017, source switched by ADR 0020).** dock-scheduling's
+    `DockAppointmentBooked`, `DockAppointmentRescheduled`,
+    `DockAppointmentCancelled` and `DockAppointmentNoShow` (topic
+    `warehouse.dock-scheduling.events`, group `DOCK_APPOINTMENT_CONSUMER_GROUP`)
+    keep a local inbound-demand read model current: a capacity plan carries the
+    INBOUND dock appointments of its window and the labour the operator-declared
+    inbound standard attributes to them. Each appointment is attributed to the
+    `site_id` of its events; the producer's aggregate `version` orders them (a
+    Cancelled that arrives before its Booked wins). inbound-receiving's
+    appointment events are NO LONGER consumed, and a deployment that still sets
+    `INBOUND_DEMAND_CONSUMER_GROUP` is refused at boot. `TaskCompleted`
+    (fulfillment-execution, topic `warehouse.fulfillment.events`, group
+    `OBSERVED_CAPACITY_CONSUMER_GROUP`) keeps a local observed-capacity read
+    model current that feeds an ADVISORY planned-versus-observed variance; it
+    never changes a planned capacity and is attributed to the configured site
+    (`DEMAND_SITE_ID`). Both consumers dead-letter unusable payloads to
+    `<topic>.dlq`.
+
+    **Analytics stream (ADR 0005).** The same four events are ALSO written to
+    `warehouse.warehouse-planning.analytics` in the SAME outbox transaction
+    (two outbox rows per event, one per topic), as CloudEvents 1.0 with the
+    SAME `type` and the SAME `id` per occurrence but
+    `dataschema=urn:warehouse:warehouse-planning:analytics:<EventName>:v1`.
+    The integration messages are byte-identical to what they were before the
+    stream existed. The analytics payloads are the integration payloads plus
+    additive, analytics-only fields: today `binding_constraint` on
+    `CapacityPlanPublished` (the constraint type -- LABOR, STATION, ... --
+    binding the bottleneck step; `""` for a plan created before it was
+    recorded). Only this service's own `planning-projector` consumes it (fixed
+    consumer group, at-least-once, offsets committed after the projection
+    committed), into a SEPARATE analytical database that
+    `planning-reports` serves read-only. Poison messages go to
+    `warehouse.warehouse-planning.analytics.dlq`.
+
+    **Envelope (mandatory).** Every message is a CloudEvents 1.0 event in
+    *structured content mode* (Kafka value = JSON event format) with the Kafka
+    header `content-type: application/cloudevents+json; charset=UTF-8`.
+    Optional W3C trace-context headers (`traceparent`, and `tracestate` /
+    `baggage` when present) carry the trace of the request that wrote the
+    outbox row (ADR 0014); consumers may extract them, and must not require
+    them. All of
+    `specversion` (`1.0`), `id`, `source` (`/warehouse/warehouse-planning`),
+    `type`, `subject`, `time`, `datacontenttype` (`application/json`) and
+    `dataschema` are required; the payload sits under `data`. No flat
+    envelope, no toggle.
+
+    **Type naming.** `com.warehouse.wes.warehouse-planning.<entity>.<EventName>`
+    where `<entity>` is the aggregate that raised the event, lowercase, no
+    separators -- `capacityplan` or `processcapacity`. **dataschema** =
+    `urn:warehouse:warehouse-planning:events:<EventName>:v1`. **subject** and
+    the Kafka message key = the aggregate's id: the capacity plan id, or
+    `<processType>/<location>/<windowStart>/<windowEnd>` for a
+    ProcessCapacity (one aggregate's events stay ordered on one partition).
+    A breaking payload change gets a new `.v2` type and dataschema, never a
+    mutation.
+
+servers:
+  production:
+    url: "{brokers}"
+    protocol: kafka
+    description: Fleet-shared Kafka broker (host supplied by the deployment environment).
+    variables:
+      brokers:
+        default: "kafka.warehouse-systems.internal:9092"
+
+defaultContentType: application/cloudevents+json
+
+tags:
+  - name: warehouse-planning
+    description: The warehouse-planning bounded context (WES subdomain).
+  - name: capacity-plan
+    description: Events raised by the CapacityPlan aggregate (published, Phase 4).
+  - name: process-capacity
+    description: Events raised by the ProcessCapacity aggregate on constraint registration (published).
+  - name: consumed
+    description: Events produced by sibling contexts that this service consumes (Phase 3).
+  - name: analytics
+    description: "The analytics stream (ADR 0005): the same capacity-plan events on this service's own analytics topic, consumed only by planning-projector."
+
+channels:
+  warehouse.warehouse-planning.events:
+    description: |
+      This service's integration topic (`Topic` in
+      `internal/adapters/outbound/kafka/encoder.go`). Written by the outbox
+      relay; key = the raising aggregate's id (plan id, or
+      processType/location/window for a ProcessCapacity); every message
+      carries the `content-type: application/cloudevents+json; charset=UTF-8`
+      header (plus the optional W3C `traceparent` of the writing request,
+      ADR 0014). Dispatch on the full `type`, ignore unknown types, dedupe
+      on `id`.
+    subscribe:
+      operationId: receiveWarehousePlanningEvents
+      summary: Receive CapacityPlan and ProcessCapacity events.
+      description: |
+        Subscribe to this service's event stream. Route on the full `type`:
+        `com.warehouse.wes.warehouse-planning.capacityplan.<EventName>` for
+        CapacityPlan events,
+        `com.warehouse.wes.warehouse-planning.processcapacity.<EventName>`
+        for ProcessCapacity events.
+      tags:
+        - name: capacity-plan
+        - name: process-capacity
+      message:
+        oneOf:
+          - $ref: "#/components/messages/CapacityPlanCreated"
+          - $ref: "#/components/messages/CapacityPlanPublished"
+          - $ref: "#/components/messages/CapacityShortageDetected"
+          - $ref: "#/components/messages/BottleneckDetected"
+          - $ref: "#/components/messages/ProcessCapacityRegistered"
+          - $ref: "#/components/messages/ProcessCapacityChanged"
+
+  warehouse.warehouse-planning.analytics:
+    description: |
+      This service's analytics topic (`AnalyticsTopic` in
+      `internal/adapters/outbound/kafka/analytics_encoder.go`; ADR 0005). Written by
+      the SAME outbox relay, from rows inserted in the same transaction as the
+      integration rows; key = capacity plan id. Consumed ONLY by this service's
+      `planning-projector` under a fixed consumer group read from env
+      `ANALYTICS_CONSUMER_GROUP` (at-least-once; the offset is committed after the
+      projection and the dedupe mark committed together in the analytical database).
+      The projector dedupes on `id`, ignores unknown types, skips (with a rate-limited
+      WARN) anything that is not CloudEvents 1.0, and dead-letters a known type with an
+      unusable payload to `warehouse.warehouse-planning.analytics.dlq` (raw bytes plus
+      `x-dlq-*` headers). Not an integration contract: other contexts consume the
+      integration topic.
+    subscribe:
+      operationId: receiveCapacityPlanAnalyticsEvents
+      summary: Receive the CapacityPlan analytics events.
+      description: |
+        Route on the full `type`; the payloads are the integration payloads plus
+        the additive analytics-only fields documented per message.
+      tags:
+        - name: analytics
+      message:
+        oneOf:
+          - $ref: "#/components/messages/CapacityPlanCreatedAnalytics"
+          - $ref: "#/components/messages/CapacityPlanPublishedAnalytics"
+          - $ref: "#/components/messages/CapacityShortageDetectedAnalytics"
+          - $ref: "#/components/messages/BottleneckDetectedAnalytics"
+
+  warehouse.workforce.events:
+    description: |
+      workforce-management's integration topic (`LaborTopic`). This service
+      consumes it with its own consumer group (env `LABOR_CAPACITY_CONSUMER_GROUP`).
+      Only `ShiftPlanCommitted` is acted on; every other `type`, a message that is not
+      CloudEvents 1.0, or an unusable payload is skipped (WARN) and its offset committed. A
+      transient failure is retried up to 5 attempts, then the message is published to
+      `warehouse.workforce.events.dlq` (raw bytes plus `x-dlq-*` headers).
+    publish:
+      operationId: consumeShiftPlanCommitted
+      summary: Consume workforce-management's ShiftPlanCommitted.
+      description: |
+        Consumed by this service: one message per PathPlan line becomes a
+        LABOR capacity constraint. Offsets are committed only after the
+        effect and its idempotency claim committed atomically.
+      tags:
+        - name: consumed
+      message:
+        $ref: "#/components/messages/ShiftPlanCommitted"
+
+  warehouse.facility.events:
+    description: |
+      facility-layout's integration topic (`FacilityTopic`). This service
+      consumes it with its own consumer group (env `STORAGE_CAPACITY_CONSUMER_GROUP`).
+      Only `LocationSlotRegistered` and `LocationSlotDecommissioned` are acted on; every other
+      `type`, a message that is not CloudEvents 1.0, or an unusable payload is skipped (WARN)
+      and its offset committed. A transient failure is retried up to 5 attempts, then the
+      message is published to `warehouse.facility.events.dlq` (raw bytes plus `x-dlq-*` headers).
+    publish:
+      operationId: consumeLocationSlotEvents
+      summary: Consume facility-layout's location slot events.
+      description: |
+        Consumed by this service: storage positions (per zone + locationType) and
+        work-center stations (per zone + activity) are tallied. The consumer only
+        maintains that tally -- it registers no ProcessCapacity constraint.
+        Station counts are composed with labor and the operator-declared station
+        standard at read time, and positions are a read model
+        (`GET /storage-capacity`); see docs/adr/0002-station-capacity-composition.md.
+      tags:
+        - name: consumed
+      message:
+        oneOf:
+          - $ref: "#/components/messages/LocationSlotRegistered"
+          - $ref: "#/components/messages/LocationSlotDecommissioned"
+
+  warehouse.order-management.events:
+    description: |
+      order-management's integration topic (`OrderTopic`). This service consumes
+      it with a STABLE consumer group read from env `DEMAND_CONSUMER_GROUP` (REQUIRED,
+      no default; ADR 0016). Only
+      `OrderAllocated` and `OrderPartiallyAllocated` are acted on; every other
+      CloudEvents `type` -- `OrderRepromised` included -- is ignored, and a
+      message that is not a valid CloudEvent is skipped (WARN), never blocking
+      the partition.
+    publish:
+      operationId: consumeOrderAllocationEvents
+      summary: Consume order-management's order allocation events.
+      description: |
+        Consumed by this service into a LOCAL expected-demand read model
+        (`order_demand`, one row per order id; `GET /demand`,
+        `get_expected_demand`, and the default of `POST /capacity-plans`
+        `assigned_demand`). An order is demand in a window [start, end) when its
+        `promise_date` (the promise cutoff) is at or after start and strictly
+        before end. Last writer wins per order id on the CloudEvents `time`
+        (a later or equal time replaces, an older one is a no-op). The
+        idempotency claim on the CloudEvents `id` and the upsert commit in ONE
+        database transaction; the offset is committed only afterwards. order-
+        management's events carry no site, no quantities and no cancellations
+        (OrderCancelled is analytics-topic only), so demand is counted in
+        ORDERS, attributed to the one configured site, and not netted; see
+        docs/adr/0004-demand-ingestion-from-order-management.md.
+      tags:
+        - name: consumed
+      message:
+        oneOf:
+          - $ref: "#/components/messages/OrderAllocated"
+          - $ref: "#/components/messages/OrderPartiallyAllocated"
+
+  warehouse.dock-scheduling.events:
+    description: |
+      dock-scheduling's integration topic (`DockSchedulingTopic`, key = appointment id for
+      appointment events). This service consumes it with a STABLE consumer group read from
+      env `DOCK_APPOINTMENT_CONSUMER_GROUP` (REQUIRED, no default; ADR 0016/0020). Only
+      `DockAppointmentBooked`, `DockAppointmentRescheduled`, `DockAppointmentCancelled` and
+      `DockAppointmentNoShow` are acted on, dispatched on the FULL `type` string; every other
+      `type` on the topic (door calendar events, and the retired
+      `com.warehouse.wms.inbound-receiving.dockappointment.*` types) is ignored. The
+      analytics-only appointment events (checked-in, door reassigned, completed, at risk) are
+      published to the producer's analytics topic and never reach this one. A message that is
+      not CloudEvents 1.0, or a known type with an unusable payload, is published to
+      `warehouse.dock-scheduling.events.dlq` (raw bytes plus `x-dlq-*` headers).
+
+      The previous source, inbound-receiving's `warehouse.inbound-receiving.events` and the
+      env `INBOUND_DEMAND_CONSUMER_GROUP`, is retired by ADR 0020: setting that variable is a
+      boot error naming `DOCK_APPOINTMENT_CONSUMER_GROUP`.
+    publish:
+      operationId: consumeDockAppointmentEvents
+      summary: Consume dock-scheduling's dock appointment events.
+      description: |
+        Consumed by this service into a LOCAL inbound-demand read model
+        (`inbound_appointments`, one row per appointment id; `GET /inbound-demand`,
+        `get_inbound_demand`, the inbound figures on a capacity plan). Only INBOUND
+        appointments (`data.direction`) are demand; OUTBOUND ones are stored and never
+        counted. An appointment is demand in a window [start, end) when it is BOOKED and its
+        door window STARTS at or after start and strictly before end. A Rescheduled moves the
+        window; a Cancelled and a NoShow remove the demand (both are terminal on the
+        producer). Each appointment is attributed to the `data.site_id` of its events (a
+        facility-layout siteCode): there is no configured site on this path.
+
+        Ordering: every event carries the aggregate `data.version` (starts at 1, +1 per
+        accepted change). The state (status, window, version) changes only when the event's
+        version is GREATER than the stored one, so a redelivery, a duplicate or an older event
+        changes nothing. The booking facts only a Booked carries (direction, ASN count) are
+        filled in whenever they arrive, so a Cancelled or Rescheduled that arrives before its
+        Booked is stored as a partial row (a tombstone) that the Booked then completes
+        without resurrecting it or moving the window back. Rows written by the retired
+        inbound-receiving source are INBOUND at version 0, so any dock-scheduling event for
+        the same appointment id supersedes them.
+
+        The idempotency claim on the CloudEvents `id` and the upsert commit in ONE database
+        transaction; the offset is committed only afterwards. This consumer raises no event
+        of its own. The labour minutes are NOT in the event: they come from the
+        operator-declared inbound labour standard. See
+        docs/adr/0017-inbound-labour-demand-and-observed-capacity-feedback.md and
+        docs/adr/0020-inbound-demand-from-dock-scheduling.md.
+      tags:
+        - name: consumed
+      message:
+        oneOf:
+          - $ref: "#/components/messages/DockAppointmentBooked"
+          - $ref: "#/components/messages/DockAppointmentRescheduled"
+          - $ref: "#/components/messages/DockAppointmentCancelled"
+          - $ref: "#/components/messages/DockAppointmentNoShow"
+
+  warehouse.fulfillment.events:
+    description: |
+      fulfillment-execution's integration topic (`FulfillmentTopic`, key = task id). This
+      service consumes it with a STABLE consumer group read from env
+      `OBSERVED_CAPACITY_CONSUMER_GROUP` (REQUIRED, no default; ADR 0016/0017). Only
+      `TaskCompleted` is acted on; every other `type` is ignored. A message that is not
+      CloudEvents 1.0, or a TaskCompleted without `task_id`/`task_type`, is published to
+      `warehouse.fulfillment.events.dlq` (raw bytes plus `x-dlq-*` headers).
+    publish:
+      operationId: consumeTaskCompletedEvents
+      summary: Consume fulfillment-execution's TaskCompleted.
+      description: |
+        Consumed by this service into a LOCAL observed-capacity read model
+        (`observed_capacity`, one row per location + process type + minute; additive).
+        It feeds the ADVISORY planned-versus-observed variance
+        (`GET /capacity-plans/{id}/variance`, `get_capacity_plan_variance`); it never
+        changes a planned capacity and never republishes a plan. The idempotency claim on
+        the CloudEvents `id` and the upsert commit in ONE transaction, so a redelivered
+        event adds nothing. See
+        docs/adr/0017-inbound-labour-demand-and-observed-capacity-feedback.md.
+      tags:
+        - name: consumed
+      message:
+        $ref: "#/components/messages/TaskCompleted"
+
+components:
+  messages:
+    CapacityPlanCreated:
+      name: CapacityPlanCreated
+      title: Capacity plan created
+      summary: A DRAFT CapacityPlan was created with its computed shortage.
+      description: |
+        Raised by the `CapacityPlan` aggregate on `POST /capacity-plans` and queued
+        in the transactional outbox in the same transaction as the plan. `type` =
+        `com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanCreated`, `subject` and Kafka key = the plan id.
+      contentType: application/cloudevents+json
+      tags:
+        - name: capacity-plan
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/CapacityPlanCreatedEvent"
+      examples:
+        - name: draftPlanWithShortage
+          summary: "A plan for 12000 orders over 8h on Pick -> Rebin -> Pack (1000 ORDER/h): short by 4000."
+          payload:
+            specversion: "1.0"
+            id: "6f1c2b7e-4c3a-4a1d-9f0b-6c2b8a7d1e33"
+            source: "/warehouse/warehouse-planning"
+            type: "com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanCreated"
+            subject: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+            time: "2026-10-04T21:15:30Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:warehouse-planning:events:CapacityPlanCreated:v1"
+            data:
+              plan_id: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+              warehouse_id: "WH-1"
+              location: "PATH-ZONE-A"
+              path_id: "pick-rebin-pack"
+              window_start: "2026-10-05T08:00:00Z"
+              window_end: "2026-10-05T16:00:00Z"
+              assigned_demand: 12000
+              path_capacity: 1000
+              capacity_over_window: 8000
+              shortage: 4000
+              bottleneck_step: "REBIN"
+              status: "DRAFT"
+
+    CapacityPlanPublished:
+      name: CapacityPlanPublished
+      title: Capacity plan published
+      summary: A DRAFT CapacityPlan was published.
+      description: |
+        Raised by `CapacityPlan.Publish` on `POST /capacity-plans/{id}/publications`.
+        Always accompanied by `CapacityShortageDetected` and `BottleneckDetected`
+        when the plan has a shortage. A plan is published at most once. `type` =
+        `com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanPublished`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: capacity-plan
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/CapacityPlanPublishedEvent"
+      examples:
+        - name: publishedPlan
+          summary: The section-43 plan, published.
+          payload:
+            specversion: "1.0"
+            id: "9a8d7c6b-5e4f-4a3b-8c2d-1e0f9a8b7c6d"
+            source: "/warehouse/warehouse-planning"
+            type: "com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanPublished"
+            subject: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+            time: "2026-10-04T21:45:10Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:warehouse-planning:events:CapacityPlanPublished:v1"
+            data:
+              plan_id: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+              warehouse_id: "WH-1"
+              site_id: "SIM1"
+              location: "PATH-ZONE-A"
+              path_id: "pick-rebin-pack"
+              window_start: "2026-10-05T08:00:00Z"
+              window_end: "2026-10-05T16:00:00Z"
+              assigned_demand: 12000
+              path_capacity: 1000
+              capacity_over_window: 8000
+              shortage: 4000
+              bottleneck_step: "REBIN"
+              published_at: "2026-10-04T21:45:10Z"
+
+    CapacityShortageDetected:
+      name: CapacityShortageDetected
+      title: Capacity shortage detected
+      summary: Published demand exceeds the path capacity over the window.
+      description: |
+        Raised at publish time, ONLY when `shortage > 0` (demand exactly equal to
+        the capacity over the window is not a shortage). `type` =
+        `com.warehouse.wes.warehouse-planning.capacityplan.CapacityShortageDetected`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: capacity-plan
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/CapacityShortageDetectedEvent"
+      examples:
+        - name: shortageOf4000
+          summary: "12000 orders assigned, 8000 orders of capacity: short by 4000, bound by REBIN."
+          payload:
+            specversion: "1.0"
+            id: "3b2a1c0d-9e8f-4d7c-b6a5-4f3e2d1c0b9a"
+            source: "/warehouse/warehouse-planning"
+            type: "com.warehouse.wes.warehouse-planning.capacityplan.CapacityShortageDetected"
+            subject: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+            time: "2026-10-04T21:45:10Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:warehouse-planning:events:CapacityShortageDetected:v1"
+            data:
+              plan_id: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+              warehouse_id: "WH-1"
+              location: "PATH-ZONE-A"
+              path_id: "pick-rebin-pack"
+              window_start: "2026-10-05T08:00:00Z"
+              window_end: "2026-10-05T16:00:00Z"
+              assigned_demand: 12000
+              capacity_over_window: 8000
+              shortage: 4000
+              bottleneck_step: "REBIN"
+
+    BottleneckDetected:
+      name: BottleneckDetected
+      title: Bottleneck detected
+      summary: Names the path step limiting end-to-end flow of a plan with a shortage.
+      description: |
+        Raised at publish time together with `CapacityShortageDetected`, ONLY when
+        the plan has a shortage. `type` = `com.warehouse.wes.warehouse-planning.capacityplan.BottleneckDetected`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: capacity-plan
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/BottleneckDetectedEvent"
+      examples:
+        - name: rebinBottleneck
+          summary: REBIN limits the Pick -> Rebin -> Pack path to 1000 ORDER/h.
+          payload:
+            specversion: "1.0"
+            id: "7e6d5c4b-3a29-4180-9f7e-6d5c4b3a2918"
+            source: "/warehouse/warehouse-planning"
+            type: "com.warehouse.wes.warehouse-planning.capacityplan.BottleneckDetected"
+            subject: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+            time: "2026-10-04T21:45:10Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:warehouse-planning:events:BottleneckDetected:v1"
+            data:
+              plan_id: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+              warehouse_id: "WH-1"
+              location: "PATH-ZONE-A"
+              path_id: "pick-rebin-pack"
+              window_start: "2026-10-05T08:00:00Z"
+              window_end: "2026-10-05T16:00:00Z"
+              bottleneck_step: "REBIN"
+              path_capacity: 1000
+
+    ProcessCapacityRegistered:
+      x-no-consumer-reason: "pending: new capacity fact (WPL #70); consumer not built yet"
+      name: ProcessCapacityRegistered
+      title: Process capacity registered
+      summary: The first constraint brought a ProcessCapacity into being.
+      description: |
+        Raised by `ProcessCapacity.AddConstraint` when the FIRST constraint of
+        (processType, location, window) is registered -- the one that
+        establishes the native unit; its rate is the effective rate at that
+        moment. Raised on `POST /process-capacities` and by the labor-capacity
+        consumer, queued in the transactional outbox in the same transaction
+        as the aggregate. `type` =
+        `com.warehouse.wes.warehouse-planning.processcapacity.ProcessCapacityRegistered`;
+        `subject` and Kafka key =
+        `<processType>/<location>/<windowStart>/<windowEnd>`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: process-capacity
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/ProcessCapacityRegisteredEvent"
+      examples:
+        - name: pickLabor
+          summary: "PICK at PATH-ZONE-A for one hour, native LABOR constraint 4000 UNIT/h."
+          payload:
+            specversion: "1.0"
+            id: "5d4c3b2a-1f2e-4a3b-9c8d-7e6f5a4b3c2d"
+            source: "/warehouse/warehouse-planning"
+            type: "com.warehouse.wes.warehouse-planning.processcapacity.ProcessCapacityRegistered"
+            subject: "PICK/PATH-ZONE-A/2026-10-05T08:00:00Z/2026-10-05T09:00:00Z"
+            time: "2026-10-04T21:45:10Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:warehouse-planning:events:ProcessCapacityRegistered:v1"
+            data:
+              process_type: "PICK"
+              location: "PATH-ZONE-A"
+              window_start: "2026-10-05T08:00:00Z"
+              window_end: "2026-10-05T09:00:00Z"
+              constraint_type: "LABOR"
+              quantity: 4000
+              unit: "UNIT"
+              period_seconds: 3600
+
+    ProcessCapacityChanged:
+      x-no-consumer-reason: "pending: new capacity fact (WPL #70); consumer not built yet"
+      name: ProcessCapacityChanged
+      title: Process capacity changed
+      summary: A registration moved a ProcessCapacity's effective rate.
+      description: |
+        Raised by `ProcessCapacity.AddConstraint` when a registration (new or
+        re-registered) changes the effective rate: the minimum rate value,
+        the binding constraint, or both. A registration that leaves the
+        effective rate untouched raises nothing. `type` =
+        `com.warehouse.wes.warehouse-planning.processcapacity.ProcessCapacityChanged`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: process-capacity
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/ProcessCapacityChangedEvent"
+      examples:
+        - name: locationTakesOver
+          summary: "LOCATION 3500 UNIT/h drops below LABOR 4000 UNIT/h and binds."
+          payload:
+            specversion: "1.0"
+            id: "4c3b2a19-0e1d-4f2a-8b7c-6d5e4f3a2b1c"
+            source: "/warehouse/warehouse-planning"
+            type: "com.warehouse.wes.warehouse-planning.processcapacity.ProcessCapacityChanged"
+            subject: "PICK/PATH-ZONE-A/2026-10-05T08:00:00Z/2026-10-05T09:00:00Z"
+            time: "2026-10-04T21:46:10Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:warehouse-planning:events:ProcessCapacityChanged:v1"
+            data:
+              process_type: "PICK"
+              location: "PATH-ZONE-A"
+              window_start: "2026-10-05T08:00:00Z"
+              window_end: "2026-10-05T09:00:00Z"
+              constraint_type: "LOCATION"
+              previous_quantity: 4000
+              previous_unit: "UNIT"
+              previous_period_seconds: 3600
+              previous_binding_constraint: "LABOR"
+              effective_quantity: 3500
+              effective_unit: "UNIT"
+              effective_period_seconds: 3600
+              effective_binding_constraint: "LOCATION"
+
+    CapacityPlanCreatedAnalytics:
+      name: CapacityPlanCreatedAnalytics
+      title: Capacity plan created (analytics stream)
+      summary: The analytics copy of CapacityPlanCreated.
+      description: |
+        Same `type`, same `id`, same payload as the integration CapacityPlanCreated;
+        only `dataschema` differs (`urn:warehouse:warehouse-planning:analytics:CapacityPlanCreated:v1`).
+        The projector uses the CloudEvents `time` as the plan's creation instant.
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/CapacityPlanCreatedAnalyticsEvent"
+      examples:
+        - name: draftPlanWithShortage
+          summary: Same example as the integration message, analytics dataschema.
+          payload:
+            specversion: "1.0"
+            id: "6f1c2b7e-4c3a-4a1d-9f0b-6c2b8a7d1e33"
+            source: "/warehouse/warehouse-planning"
+            type: "com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanCreated"
+            subject: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+            time: "2026-10-04T21:15:30Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:warehouse-planning:analytics:CapacityPlanCreated:v1"
+            data:
+              plan_id: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+              warehouse_id: "WH-1"
+              location: "PATH-ZONE-A"
+              path_id: "pick-rebin-pack"
+              window_start: "2026-10-05T08:00:00Z"
+              window_end: "2026-10-05T16:00:00Z"
+              assigned_demand: 12000
+              path_capacity: 1000
+              capacity_over_window: 8000
+              shortage: 4000
+              bottleneck_step: "REBIN"
+              status: "DRAFT"
+
+    CapacityPlanPublishedAnalytics:
+      name: CapacityPlanPublishedAnalytics
+      title: Capacity plan published (analytics stream)
+      summary: The analytics copy of CapacityPlanPublished, plus binding_constraint.
+      description: |
+        Same `type` and `id` as the integration CapacityPlanPublished; the payload adds
+        `binding_constraint` (additive, analytics-only): the constraint type binding the
+        bottleneck step, which the bottleneck-frequency report groups by. The projector
+        uses the CloudEvents `time` as the plan's publication instant.
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/CapacityPlanPublishedAnalyticsEvent"
+      examples:
+        - name: publishedPlan
+          summary: The published plan, bound by STATION at REBIN.
+          payload:
+            specversion: "1.0"
+            id: "9a8d7c6b-5e4f-4a3b-8c2d-1e0f9a8b7c6d"
+            source: "/warehouse/warehouse-planning"
+            type: "com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanPublished"
+            subject: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+            time: "2026-10-04T21:45:10Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:warehouse-planning:analytics:CapacityPlanPublished:v1"
+            data:
+              plan_id: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+              warehouse_id: "WH-1"
+              site_id: "SIM1"
+              location: "PATH-ZONE-A"
+              path_id: "pick-rebin-pack"
+              window_start: "2026-10-05T08:00:00Z"
+              window_end: "2026-10-05T16:00:00Z"
+              assigned_demand: 12000
+              path_capacity: 1000
+              capacity_over_window: 8000
+              shortage: 4000
+              bottleneck_step: "REBIN"
+              published_at: "2026-10-04T21:45:10Z"
+              binding_constraint: "STATION"
+
+    CapacityShortageDetectedAnalytics:
+      name: CapacityShortageDetectedAnalytics
+      title: Capacity shortage detected (analytics stream)
+      summary: The analytics copy of CapacityShortageDetected.
+      description: |
+        Same `type`, `id` and payload as the integration CapacityShortageDetected; only
+        `dataschema` differs.
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/CapacityShortageDetectedAnalyticsEvent"
+      examples:
+        - name: shortageOf4000
+          summary: Short by 4000, bound by REBIN.
+          payload:
+            specversion: "1.0"
+            id: "3b2a1c0d-9e8f-4d7c-b6a5-4f3e2d1c0b9a"
+            source: "/warehouse/warehouse-planning"
+            type: "com.warehouse.wes.warehouse-planning.capacityplan.CapacityShortageDetected"
+            subject: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+            time: "2026-10-04T21:45:10Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:warehouse-planning:analytics:CapacityShortageDetected:v1"
+            data:
+              plan_id: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+              warehouse_id: "WH-1"
+              location: "PATH-ZONE-A"
+              path_id: "pick-rebin-pack"
+              window_start: "2026-10-05T08:00:00Z"
+              window_end: "2026-10-05T16:00:00Z"
+              assigned_demand: 12000
+              capacity_over_window: 8000
+              shortage: 4000
+              bottleneck_step: "REBIN"
+
+    BottleneckDetectedAnalytics:
+      name: BottleneckDetectedAnalytics
+      title: Bottleneck detected (analytics stream)
+      summary: The analytics copy of BottleneckDetected.
+      description: |
+        Same `type`, `id` and payload as the integration BottleneckDetected; only
+        `dataschema` differs.
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/BottleneckDetectedAnalyticsEvent"
+      examples:
+        - name: rebinBottleneck
+          summary: REBIN limits the path to 1000 ORDER/h.
+          payload:
+            specversion: "1.0"
+            id: "7e6d5c4b-3a29-4180-9f7e-6d5c4b3a2918"
+            source: "/warehouse/warehouse-planning"
+            type: "com.warehouse.wes.warehouse-planning.capacityplan.BottleneckDetected"
+            subject: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+            time: "2026-10-04T21:45:10Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:warehouse-planning:analytics:BottleneckDetected:v1"
+            data:
+              plan_id: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+              warehouse_id: "WH-1"
+              location: "PATH-ZONE-A"
+              path_id: "pick-rebin-pack"
+              window_start: "2026-10-05T08:00:00Z"
+              window_end: "2026-10-05T16:00:00Z"
+              bottleneck_step: "REBIN"
+              path_capacity: 1000
+
+    ShiftPlanCommitted:
+      name: ShiftPlanCommitted
+      title: Shift plan committed (consumed)
+      summary: workforce-management committed a headcount split for a path.
+      description: |
+        CONSUMED from `warehouse.workforce.events` (producer: workforce-management;
+        one message per PathPlan line). Becomes a LABOR `CapacityConstraint` on the
+        ProcessCapacity of ProcessType = upper-case(`path_id`), location =
+        `building_id`: rate = `planned_heads * planned_rate` (UNIT/HOUR), window =
+        `[time, time + planned_hours)`. Deduped on the CloudEvents `id`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/ShiftPlanCommittedEvent"
+      examples:
+        - name: packLine
+          summary: One fanned-out line of a plan committed for building BLD1.
+          payload:
+            specversion: "1.0"
+            id: "9f1c2b7e-4c3a-4a1d-9f0b-6c2b8a7d1e33"
+            source: "/warehouse/workforce-management"
+            type: "com.warehouse.wes.workforce-management.shiftplan.ShiftPlanCommitted"
+            subject: "BLD1/SHIFT1"
+            time: "2026-10-04T22:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:workforce-management:events:ShiftPlanCommitted:v1"
+            data:
+              building_id: "BLD1"
+              shift_id: "SHIFT1"
+              path_id: "pack"
+              planned_heads: 3
+              planned_rate: 50
+              planned_hours: 8
+
+    OrderAllocated:
+      name: OrderAllocated
+      title: Order allocated (consumed)
+      summary: order-management allocated every line of an order and released the eligible ones.
+      description: |
+        CONSUMED from `warehouse.order-management.events` (producer: order-management,
+        its own `apis/asyncapi.yaml`). Upserts the order into the expected-demand read
+        model: promise cutoff = `data.promise_date`, released lines = `len(data.lines)`,
+        site = the configured `DEMAND_SITE_ID` (the event carries none). `subject` must
+        equal `data.order_id`. Deduped on the CloudEvents `id`; last writer wins per
+        order on `time`. `type` =
+        `com.warehouse.wes.order-management.order.OrderAllocated`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/OrderAllocatedEvent"
+      examples:
+        - name: twoLineOrder
+          summary: A two-line order promised for 2026-10-05T10:00Z.
+          payload:
+            specversion: "1.0"
+            id: "4f1c2a7e-9d31-4a6b-8f0e-6b2c1d5e7a90"
+            source: "/warehouse/order-management"
+            type: "com.warehouse.wes.order-management.order.OrderAllocated"
+            subject: "ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2"
+            time: "2026-10-04T09:15:30Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:order-management:events:OrderAllocated:v1"
+            data:
+              order_id: "ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2"
+              promise_date: "2026-10-05T10:00:00Z"
+              lines:
+                - line_no: 1
+                  sku: "SKU-BOOK-0001"
+                  path_id: "pick"
+                  gift_wrap: false
+                  fulfillment_class: "SAME_SKU_MULTI"
+                - line_no: 2
+                  sku: "SKU-BOOK-0002"
+                  path_id: "pick"
+                  gift_wrap: true
+                  fulfillment_class: "SAME_SKU_MULTI"
+
+    OrderPartiallyAllocated:
+      name: OrderPartiallyAllocated
+      title: Order partially allocated (consumed)
+      summary: Some lines of a partial-shipment order were allocated and released, some backordered.
+      description: |
+        CONSUMED from `warehouse.order-management.events`. Same payload shape and the
+        same effect as OrderAllocated (`data.lines` carries exactly the lines released
+        in that pass); a later OrderAllocated for the same order replaces it. `type` =
+        `com.warehouse.wes.order-management.order.OrderPartiallyAllocated`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/OrderPartiallyAllocatedEvent"
+
+    LocationSlotRegistered:
+      name: LocationSlotRegistered
+      title: Location slot registered (consumed)
+      summary: facility-layout registered a storage position or a work center.
+      description: |
+        CONSUMED from `warehouse.facility.events` (producer: facility-layout). Tallied
+        per (zoneId, locationType) as storage positions (role Storage), or per
+        zone + activity as stations (role WorkCenter). A zone belongs to the site
+        (planning location) named by its zone id's first dash-separated segment.
+        Deduped on the CloudEvents `id`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/LocationSlotRegisteredEvent"
+      examples:
+        - name: storageSlot
+          summary: A bulk storage position registered in ZONE-A.
+          payload:
+            specversion: "1.0"
+            id: "5c4b3a29-1807-4f6e-8d5c-4b3a29180716"
+            source: "/warehouse/facility-layout"
+            type: "com.warehouse.wms.facility-layout.locationslot.LocationSlotRegistered"
+            subject: "A-01-01"
+            time: "2026-10-04T20:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:facility-layout:events:LocationSlotRegistered:v1"
+            data:
+              locationCode: "A-01-01"
+              zoneId: "ZONE-A"
+              locationType: "BULK"
+              role: "Storage"
+
+    LocationSlotDecommissioned:
+      name: LocationSlotDecommissioned
+      title: Location slot decommissioned (consumed)
+      summary: facility-layout decommissioned a position.
+      description: |
+        CONSUMED from `warehouse.facility.events` (producer: facility-layout).
+        Decrements the tally the matching LocationSlotRegistered incremented; an
+        untracked `locationCode` is logged and ignored.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/LocationSlotDecommissionedEvent"
+      examples:
+        - name: slotRemoved
+          summary: Position A-01-01 decommissioned.
+          payload:
+            specversion: "1.0"
+            id: "2d1c0b9a-8776-4554-a332-1d0c9b8a7665"
+            source: "/warehouse/facility-layout"
+            type: "com.warehouse.wms.facility-layout.locationslot.LocationSlotDecommissioned"
+            subject: "A-01-01"
+            time: "2026-10-04T23:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:facility-layout:events:LocationSlotDecommissioned:v1"
+            data:
+              locationCode: "A-01-01"
+
+    DockAppointmentBooked:
+      name: DockAppointmentBooked
+      title: Dock appointment booked (consumed)
+      summary: dock-scheduling booked a door window for a carrier.
+      description: |
+        CONSUMED from `warehouse.dock-scheduling.events` (producer: dock-scheduling; the data
+        is the superset contract of the yard-management plan). Stores the appointment in the
+        local inbound-demand read model (`inbound_appointments`, one row per
+        `data.appointment_id`): site = `data.site_id`, direction, door window start/end and ASN
+        count = `len(data.asn_numbers)`. `subject` must equal `data.appointment_id`.
+        Version-guarded: the window and status are written only when `data.version` is greater
+        than the stored version; the direction and ASN count are filled in when the row lacks
+        them. Deduped on the CloudEvents `id`. `type` =
+        `com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentBooked`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/DockAppointmentBookedEvent"
+      examples:
+        - name: booked
+          summary: A two-hour window at an inbound door covering one ASN.
+          payload:
+            specversion: "1.0"
+            id: "4a8c2e91-5b3d-4c7f-a012-9e6d1b8f3c25"
+            source: "/warehouse/dock-scheduling"
+            type: "com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentBooked"
+            subject: "appt-123e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-08T12:05:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:dock-scheduling:events:DockAppointmentBooked:v1"
+            data:
+              appointment_id: "appt-123e4567-e89b-12d3-a456-426614174000"
+              site_id: "WH1"
+              direction: "INBOUND"
+              door_code: "WH1-DOCK-IN-01"
+              carrier: "Example Freight"
+              carrier_scac: "EXFT"
+              window_start: "2026-10-09T08:00:00Z"
+              window_end: "2026-10-09T10:00:00Z"
+              asn_numbers: ["ASN-1001"]
+              cpt_id: null
+              shipment_refs: []
+              expected_seal_number: null
+              provenance: "native"
+              version: 1
+
+    DockAppointmentRescheduled:
+      name: DockAppointmentRescheduled
+      title: Dock appointment rescheduled (consumed)
+      summary: dock-scheduling moved a booked appointment to another door window.
+      description: |
+        CONSUMED from `warehouse.dock-scheduling.events`. Moves the appointment's demand to
+        `data.window_start` / `data.window_end` (the previous window and the door are
+        ignored) when `data.version` is greater than the stored version. Carries no direction
+        and no ASNs: arriving before its Booked it is stored as a partial row that is not
+        demand until the Booked supplies the direction. `type` =
+        `com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentRescheduled`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/DockAppointmentRescheduledEvent"
+      examples:
+        - name: rescheduled
+          summary: Moved to the afternoon window of the same day.
+          payload:
+            specversion: "1.0"
+            id: "c3d5e7f9-2a4b-4c6d-8e0f-1a2b3c4d5e6f"
+            source: "/warehouse/dock-scheduling"
+            type: "com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentRescheduled"
+            subject: "appt-123e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-08T15:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:dock-scheduling:events:DockAppointmentRescheduled:v1"
+            data:
+              appointment_id: "appt-123e4567-e89b-12d3-a456-426614174000"
+              site_id: "WH1"
+              door_code: "WH1-DOCK-IN-02"
+              window_start: "2026-10-09T13:00:00Z"
+              window_end: "2026-10-09T15:00:00Z"
+              previous_window_start: "2026-10-09T08:00:00Z"
+              previous_window_end: "2026-10-09T10:00:00Z"
+              version: 2
+
+    DockAppointmentCancelled:
+      name: DockAppointmentCancelled
+      title: Dock appointment cancelled (consumed)
+      summary: dock-scheduling cancelled a booked appointment.
+      description: |
+        CONSUMED from `warehouse.dock-scheduling.events`. Removes the appointment's demand:
+        the row flips to CANCELLED and stops counting (terminal on the producer). A Cancelled
+        that arrives BEFORE its Booked is stored as a tombstone (no window) that no Booked of
+        an older version can resurrect. Idempotent: a redelivered `id` or a version that is not
+        greater than the stored one is a no-op. `type` =
+        `com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentCancelled`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/DockAppointmentCancelledEvent"
+      examples:
+        - name: cancelled
+          summary: Cancelled at the carrier's request.
+          payload:
+            specversion: "1.0"
+            id: "b2c4d6e8-1f3a-4b5c-9d7e-8f0a1b2c3d4e"
+            source: "/warehouse/dock-scheduling"
+            type: "com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentCancelled"
+            subject: "appt-123e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-08T18:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:dock-scheduling:events:DockAppointmentCancelled:v1"
+            data:
+              appointment_id: "appt-123e4567-e89b-12d3-a456-426614174000"
+              site_id: "WH1"
+              door_code: "WH1-DOCK-IN-01"
+              reason: "CARRIER_REQUEST"
+              version: 2
+
+    DockAppointmentNoShow:
+      name: DockAppointmentNoShow
+      title: Dock appointment no-show (consumed)
+      summary: dock-scheduling marked a booked appointment as not shown.
+      description: |
+        CONSUMED from `warehouse.dock-scheduling.events`. Removes the appointment's demand
+        exactly like a Cancelled (the row flips to NO_SHOW; terminal on the producer: a late
+        carrier needs a new booking). Carries the direction, so even a NoShow that arrives
+        before its Booked is stored with a known direction. `type` =
+        `com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentNoShow`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/DockAppointmentNoShowEvent"
+      examples:
+        - name: no-show
+          summary: The carrier did not arrive within the no-show grace.
+          payload:
+            specversion: "1.0"
+            id: "d4e6f8a0-3b5c-4d7e-9f1a-2b3c4d5e6f70"
+            source: "/warehouse/dock-scheduling"
+            type: "com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentNoShow"
+            subject: "appt-123e4567-e89b-12d3-a456-426614174000"
+            time: "2026-10-09T11:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:dock-scheduling:events:DockAppointmentNoShow:v1"
+            data:
+              appointment_id: "appt-123e4567-e89b-12d3-a456-426614174000"
+              site_id: "WH1"
+              door_code: "WH1-DOCK-IN-01"
+              direction: "INBOUND"
+              carrier_scac: "EXFT"
+              window_end: "2026-10-09T10:00:00Z"
+              version: 2
+
+    TaskCompleted:
+      name: TaskCompleted
+      title: Task completed (consumed)
+      summary: fulfillment-execution reports that a station completed a task.
+      description: |
+        CONSUMED from `warehouse.fulfillment.events` (producer: fulfillment-execution, its own
+        `apis/asyncapi.yaml`). Adds the completion to the local `observed_capacity` read model:
+        one row per (location, process_type = upper-cased `data.task_type`, minute of the
+        CloudEvents `time`) with the task count and the duration total. Site = the configured
+        `DEMAND_SITE_ID`. The idempotency claim on the CloudEvents `id` and the additive upsert
+        commit in ONE transaction, so a redelivered `id` adds nothing. A completion without
+        `task_type` or `task_id` is dead-lettered. Only the fields below are read; the
+        enrichment fields fulfillment-execution adds (`work_unit_id`, `associate_id`,
+        relocation fields) are ignored. `type` =
+        `com.warehouse.wes.fulfillment-execution.task.TaskCompleted`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/TaskCompletedEvent"
+      examples:
+        - name: pickCompleted
+          summary: A PICK task completed after 245 s.
+          payload:
+            specversion: "1.0"
+            id: "a1b2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+            source: "/warehouse/fulfillment-execution"
+            type: "com.warehouse.wes.fulfillment-execution.task.TaskCompleted"
+            subject: "task-7c9e6679"
+            time: "2026-10-05T09:14:30Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:fulfillment-execution:events:TaskCompleted:v1"
+            data:
+              task_id: "task-7c9e6679"
+              task_type: "PICK"
+              duration_seconds: 245
+
+  schemas:
+    CloudEventEnvelope:
+      type: object
+      description: >
+        CloudEvents 1.0 structured-mode envelope. Every attribute below is
+        required; the context's own payload sits under data.
+      required: [specversion, id, source, type, subject, time, datacontenttype, dataschema, data]
+      properties:
+        specversion:
+          type: string
+          const: "1.0"
+        id:
+          type: string
+          description: UUID v4, minted once per domain event and persisted with the outbox row, so a redelivery repeats it. Dedupe on it.
+        source:
+          type: string
+          example: "/warehouse/warehouse-planning"
+        type:
+          type: string
+          description: Full reverse-DNS type; dispatch on the whole string.
+        subject:
+          type: string
+          description: Aggregate instance id (never empty).
+        time:
+          type: string
+          format: date-time
+          description: Domain occurred-at, UTC.
+        datacontenttype:
+          type: string
+          const: "application/json"
+        dataschema:
+          type: string
+          description: urn:warehouse:<repo>:events:<EventName>:v<N>.
+        data:
+          type: object
+    CapacityPlanCreatedData:
+      type: object
+      description: Payload of CapacityPlanCreated.
+      required:
+        - plan_id
+        - warehouse_id
+        - location
+        - path_id
+        - window_start
+        - window_end
+        - assigned_demand
+        - path_capacity
+        - capacity_over_window
+        - shortage
+        - bottleneck_step
+        - status
+      properties:
+        plan_id:
+          type: string
+          description: The CapacityPlan id (UUID); equals the CloudEvents subject.
+          example: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+        warehouse_id:
+          type: string
+          description: Warehouse the plan is for.
+          example: "WH-1"
+        location:
+          type: string
+          description: ProcessCapacity location the plan evaluates.
+          example: "PATH-ZONE-A"
+        path_id:
+          type: string
+          description: ProcessPath evaluated.
+          example: "pick-rebin-pack"
+        window_start:
+          type: string
+          format: date-time
+          description: Planning window start (RFC 3339, UTC).
+          example: "2026-10-05T08:00:00Z"
+        window_end:
+          type: string
+          format: date-time
+          description: Planning window end, exclusive (RFC 3339, UTC).
+          example: "2026-10-05T16:00:00Z"
+        assigned_demand:
+          type: number
+          format: double
+          description: Orders assigned to the window.
+          example: 12000
+        path_capacity:
+          type: number
+          format: double
+          description: Normalized path capacity, ORDER per HOUR.
+          example: 1000
+    ProcessCapacityRegisteredEvent:
+      description: CloudEvents 1.0 envelope of ProcessCapacityRegistered.
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.warehouse-planning.processcapacity.ProcessCapacityRegistered"
+            dataschema:
+              const: "urn:warehouse:warehouse-planning:events:ProcessCapacityRegistered:v1"
+            data:
+              $ref: "#/components/schemas/ProcessCapacityRegisteredData"
+    ProcessCapacityRegisteredData:
+      type: object
+      description: Payload of ProcessCapacityRegistered -- the native constraint that created the aggregate.
+      required:
+        - process_type
+        - location
+        - window_start
+        - window_end
+        - constraint_type
+        - quantity
+        - unit
+        - period_seconds
+      properties:
+        process_type:
+          type: string
+          description: The warehouse process (PICK, PACK, REBIN, ...).
+          example: "PICK"
+        location:
+          type: string
+          description: ProcessCapacity location.
+          example: "PATH-ZONE-A"
+        window_start:
+          type: string
+          format: date-time
+          description: Capacity window start (RFC 3339, UTC).
+          example: "2026-10-05T08:00:00Z"
+        window_end:
+          type: string
+          format: date-time
+          description: Capacity window end, exclusive (RFC 3339, UTC).
+          example: "2026-10-05T09:00:00Z"
+        constraint_type:
+          type: string
+          description: "The native constraint type (LABOR, LOCATION, EQUIPMENT, STATION, CONVEYOR, BUFFER, REPLENISHMENT)."
+          example: "LABOR"
+        quantity:
+          type: number
+          format: double
+          description: The constraint's rate quantity; also the effective rate at registration.
+          example: 4000
+        unit:
+          type: string
+          description: "The aggregate's native unit (UNIT, LINE, ORDER, PACKAGE)."
+          example: "UNIT"
+        period_seconds:
+          type: number
+          format: double
+          description: The rate's time base in seconds.
+          example: 3600
+    ProcessCapacityChangedEvent:
+      description: CloudEvents 1.0 envelope of ProcessCapacityChanged.
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.warehouse-planning.processcapacity.ProcessCapacityChanged"
+            dataschema:
+              const: "urn:warehouse:warehouse-planning:events:ProcessCapacityChanged:v1"
+            data:
+              $ref: "#/components/schemas/ProcessCapacityChangedData"
+    ProcessCapacityChangedData:
+      type: object
+      description: Payload of ProcessCapacityChanged -- the effective rate before and after the causing registration.
+      required:
+        - process_type
+        - location
+        - window_start
+        - window_end
+        - constraint_type
+        - previous_quantity
+        - previous_unit
+        - previous_period_seconds
+        - previous_binding_constraint
+        - effective_quantity
+        - effective_unit
+        - effective_period_seconds
+        - effective_binding_constraint
+      properties:
+        process_type:
+          type: string
+          description: The warehouse process (PICK, PACK, REBIN, ...).
+          example: "PICK"
+        location:
+          type: string
+          description: ProcessCapacity location.
+          example: "PATH-ZONE-A"
+        window_start:
+          type: string
+          format: date-time
+          description: Capacity window start (RFC 3339, UTC).
+          example: "2026-10-05T08:00:00Z"
+        window_end:
+          type: string
+          format: date-time
+          description: Capacity window end, exclusive (RFC 3339, UTC).
+          example: "2026-10-05T09:00:00Z"
+        constraint_type:
+          type: string
+          description: The constraint whose registration caused the change.
+          example: "LOCATION"
+        previous_quantity:
+          type: number
+          format: double
+          description: Effective rate quantity before the registration.
+          example: 4000
+        previous_unit:
+          type: string
+          description: Native unit (identical across constraints of one aggregate).
+          example: "UNIT"
+        previous_period_seconds:
+          type: number
+          format: double
+          description: Effective rate time base before the registration, in seconds.
+          example: 3600
+        previous_binding_constraint:
+          type: string
+          description: The binding constraint before the registration.
+          example: "LABOR"
+        effective_quantity:
+          type: number
+          format: double
+          description: Effective rate quantity after the registration.
+          example: 3500
+        effective_unit:
+          type: string
+          description: Native unit (identical across constraints of one aggregate).
+          example: "UNIT"
+        effective_period_seconds:
+          type: number
+          format: double
+          description: Effective rate time base after the registration, in seconds.
+          example: 3600
+        effective_binding_constraint:
+          type: string
+          description: The binding constraint after the registration.
+          example: "LOCATION"
+        capacity_over_window:
+          type: number
+          format: double
+          description: path_capacity x window hours, in orders.
+          example: 8000
+        shortage:
+          type: number
+          format: double
+          description: max(0, assigned_demand - capacity_over_window), in orders. Never negative.
+          example: 4000
+        bottleneck_step:
+          type: string
+          description: The ProcessPath step limiting end-to-end flow.
+          example: "REBIN"
+        status:
+          type: string
+          enum: [DRAFT]
+          description: Always DRAFT at creation.
+          example: DRAFT
+    CapacityPlanPublishedData:
+      type: object
+      description: >-
+        Payload of CapacityPlanPublished. site_id is ADDITIVE on the v1
+        payload — present for plans created after migration 0008, omitted for
+        older plans — and a consumer must treat its absence as unknown (never
+        derive it from warehouse_id or location).
+      required:
+        - plan_id
+        - warehouse_id
+        - location
+        - path_id
+        - window_start
+        - window_end
+        - assigned_demand
+        - path_capacity
+        - capacity_over_window
+        - shortage
+        - bottleneck_step
+        - published_at
+      properties:
+        plan_id:
+          type: string
+          description: The CapacityPlan id (UUID); equals the CloudEvents subject.
+          example: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+        warehouse_id:
+          type: string
+          description: Warehouse the plan is for.
+          example: "WH-1"
+        site_id:
+          type: string
+          description: >-
+            Additive, optional. Canonical site the plan is scoped to (a
+            facility-layout Site site_code, the same identifier its
+            SiteCapabilityChanged event publishes). Omitted for plans stored
+            before migration 0008.
+          example: "SIM1"
+        location:
+          type: string
+          description: ProcessCapacity location the plan evaluates.
+          example: "PATH-ZONE-A"
+        path_id:
+          type: string
+          description: ProcessPath evaluated.
+          example: "pick-rebin-pack"
+        window_start:
+          type: string
+          format: date-time
+          description: Planning window start (RFC 3339, UTC).
+          example: "2026-10-05T08:00:00Z"
+        window_end:
+          type: string
+          format: date-time
+          description: Planning window end, exclusive (RFC 3339, UTC).
+          example: "2026-10-05T16:00:00Z"
+        assigned_demand:
+          type: number
+          format: double
+          description: Orders assigned to the window.
+          example: 12000
+        path_capacity:
+          type: number
+          format: double
+          description: Normalized path capacity, ORDER per HOUR.
+          example: 1000
+        capacity_over_window:
+          type: number
+          format: double
+          description: path_capacity x window hours, in orders.
+          example: 8000
+        shortage:
+          type: number
+          format: double
+          description: max(0, assigned_demand - capacity_over_window), in orders. Never negative.
+          example: 4000
+        bottleneck_step:
+          type: string
+          description: The ProcessPath step limiting end-to-end flow.
+          example: "REBIN"
+        published_at:
+          type: string
+          format: date-time
+          description: When the plan was published (RFC 3339, UTC).
+          example: "2026-10-04T21:45:10Z"
+    CapacityShortageDetectedData:
+      type: object
+      description: Payload of CapacityShortageDetected. shortage is always > 0 here.
+      required:
+        - plan_id
+        - warehouse_id
+        - location
+        - path_id
+        - window_start
+        - window_end
+        - assigned_demand
+        - capacity_over_window
+        - shortage
+        - bottleneck_step
+      properties:
+        plan_id:
+          type: string
+          description: The CapacityPlan id (UUID); equals the CloudEvents subject.
+          example: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+        warehouse_id:
+          type: string
+          description: Warehouse the plan is for.
+          example: "WH-1"
+        location:
+          type: string
+          description: ProcessCapacity location the plan evaluates.
+          example: "PATH-ZONE-A"
+        path_id:
+          type: string
+          description: ProcessPath evaluated.
+          example: "pick-rebin-pack"
+        window_start:
+          type: string
+          format: date-time
+          description: Planning window start (RFC 3339, UTC).
+          example: "2026-10-05T08:00:00Z"
+        window_end:
+          type: string
+          format: date-time
+          description: Planning window end, exclusive (RFC 3339, UTC).
+          example: "2026-10-05T16:00:00Z"
+        assigned_demand:
+          type: number
+          format: double
+          description: Orders assigned to the window.
+          example: 12000
+        capacity_over_window:
+          type: number
+          format: double
+          description: path_capacity x window hours, in orders.
+          example: 8000
+        shortage:
+          type: number
+          format: double
+          description: max(0, assigned_demand - capacity_over_window), in orders. Never negative.
+          example: 4000
+        bottleneck_step:
+          type: string
+          description: The ProcessPath step limiting end-to-end flow.
+          example: "REBIN"
+    BottleneckDetectedData:
+      type: object
+      description: Payload of BottleneckDetected.
+      required:
+        - plan_id
+        - warehouse_id
+        - location
+        - path_id
+        - window_start
+        - window_end
+        - bottleneck_step
+        - path_capacity
+      properties:
+        plan_id:
+          type: string
+          description: The CapacityPlan id (UUID); equals the CloudEvents subject.
+          example: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+        warehouse_id:
+          type: string
+          description: Warehouse the plan is for.
+          example: "WH-1"
+        location:
+          type: string
+          description: ProcessCapacity location the plan evaluates.
+          example: "PATH-ZONE-A"
+        path_id:
+          type: string
+          description: ProcessPath evaluated.
+          example: "pick-rebin-pack"
+        window_start:
+          type: string
+          format: date-time
+          description: Planning window start (RFC 3339, UTC).
+          example: "2026-10-05T08:00:00Z"
+        window_end:
+          type: string
+          format: date-time
+          description: Planning window end, exclusive (RFC 3339, UTC).
+          example: "2026-10-05T16:00:00Z"
+        bottleneck_step:
+          type: string
+          description: The ProcessPath step limiting end-to-end flow.
+          example: "REBIN"
+        path_capacity:
+          type: number
+          format: double
+          description: Normalized path capacity, ORDER per HOUR.
+          example: 1000
+    CapacityPlanCreatedEvent:
+      description: CloudEvents 1.0 envelope of CapacityPlanCreated.
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanCreated"
+            dataschema:
+              const: "urn:warehouse:warehouse-planning:events:CapacityPlanCreated:v1"
+            data:
+              $ref: "#/components/schemas/CapacityPlanCreatedData"
+    CapacityPlanPublishedEvent:
+      description: CloudEvents 1.0 envelope of CapacityPlanPublished.
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanPublished"
+            dataschema:
+              const: "urn:warehouse:warehouse-planning:events:CapacityPlanPublished:v1"
+            data:
+              $ref: "#/components/schemas/CapacityPlanPublishedData"
+    CapacityPlanCreatedAnalyticsEvent:
+      description: CloudEvents 1.0 envelope of CapacityPlanCreated on the analytics topic.
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanCreated"
+            dataschema:
+              const: "urn:warehouse:warehouse-planning:analytics:CapacityPlanCreated:v1"
+            data:
+              $ref: "#/components/schemas/CapacityPlanCreatedData"
+    CapacityPlanPublishedAnalyticsData:
+      description: Payload of CapacityPlanPublished on the analytics topic -- the integration payload plus binding_constraint.
+      allOf:
+        - $ref: "#/components/schemas/CapacityPlanPublishedData"
+        - type: object
+          required: [binding_constraint]
+          properties:
+            binding_constraint:
+              type: string
+              description: >
+                Additive, analytics-only. The constraint type binding the bottleneck step
+                (LABOR, STATION, ...); empty for a plan created before it was recorded.
+              example: "STATION"
+    CapacityPlanPublishedAnalyticsEvent:
+      description: CloudEvents 1.0 envelope of CapacityPlanPublished on the analytics topic.
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanPublished"
+            dataschema:
+              const: "urn:warehouse:warehouse-planning:analytics:CapacityPlanPublished:v1"
+            data:
+              $ref: "#/components/schemas/CapacityPlanPublishedAnalyticsData"
+    CapacityShortageDetectedAnalyticsEvent:
+      description: CloudEvents 1.0 envelope of CapacityShortageDetected on the analytics topic.
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.warehouse-planning.capacityplan.CapacityShortageDetected"
+            dataschema:
+              const: "urn:warehouse:warehouse-planning:analytics:CapacityShortageDetected:v1"
+            data:
+              $ref: "#/components/schemas/CapacityShortageDetectedData"
+    BottleneckDetectedAnalyticsEvent:
+      description: CloudEvents 1.0 envelope of BottleneckDetected on the analytics topic.
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.warehouse-planning.capacityplan.BottleneckDetected"
+            dataschema:
+              const: "urn:warehouse:warehouse-planning:analytics:BottleneckDetected:v1"
+            data:
+              $ref: "#/components/schemas/BottleneckDetectedData"
+    CapacityShortageDetectedEvent:
+      description: CloudEvents 1.0 envelope of CapacityShortageDetected.
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.warehouse-planning.capacityplan.CapacityShortageDetected"
+            dataschema:
+              const: "urn:warehouse:warehouse-planning:events:CapacityShortageDetected:v1"
+            data:
+              $ref: "#/components/schemas/CapacityShortageDetectedData"
+    BottleneckDetectedEvent:
+      description: CloudEvents 1.0 envelope of BottleneckDetected.
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.warehouse-planning.capacityplan.BottleneckDetected"
+            dataschema:
+              const: "urn:warehouse:warehouse-planning:events:BottleneckDetected:v1"
+            data:
+              $ref: "#/components/schemas/BottleneckDetectedData"
+    ShiftPlanCommittedData:
+      type: object
+      description: >-
+        Fields this service reads from one fanned-out ShiftPlanCommitted message (one per PathPlan line).
+        A message with a blank building_id or path_id is skipped (WARN). The LABOR constraint is
+        planned_heads x planned_rate UNIT per HOUR at location building_id for the window
+        [CloudEvents time, time + planned_hours); heads, rate and hours are not range-checked here (a
+        value the domain rejects is skipped). shift_id is not read.
+      required: [building_id, path_id]
+      properties:
+        building_id:
+          type: string
+          example: "BLD1"
+        shift_id:
+          type: string
+          example: "SHIFT1"
+        path_id:
+          type: string
+          description: Becomes the ProcessType (upper-cased) of the LABOR constraint.
+          example: "pack"
+        planned_heads:
+          type: integer
+          example: 3
+        planned_rate:
+          type: number
+          format: double
+          example: 50
+        planned_hours:
+          type: number
+          format: double
+          example: 8
+    LocationSlotRegisteredData:
+      type: object
+      description: >-
+        Fields this service reads from LocationSlotRegistered. A message with a blank locationCode or
+        zoneId, an unrecognized role, a Storage slot with a blank locationType or a WorkCenter slot with no
+        activities is skipped (WARN); an already-tallied locationCode is a no-op.
+      required: [locationCode, zoneId]
+      properties:
+        locationCode:
+          type: string
+          example: "A-01-01"
+        zoneId:
+          type: string
+          example: "ZONE-A"
+        locationType:
+          type: string
+          description: Required (non-blank) when role is Storage or absent; not read for WorkCenter.
+          example: "BULK"
+        role:
+          type: string
+          enum: [Storage, WorkCenter]
+          description: Storage (default when absent or empty) tallies storage positions per locationType; WorkCenter tallies stations per activity. Any other value is skipped.
+          example: "Storage"
+        activities:
+          type: array
+          description: Required (at least one) when role is WorkCenter; each is upper-cased to form the station tally key.
+          items:
+            type: string
+    LocationSlotDecommissionedData:
+      type: object
+      description: Fields this service reads from LocationSlotDecommissioned.
+      required: [locationCode]
+      properties:
+        locationCode:
+          type: string
+          example: "A-01-01"
+    ShiftPlanCommittedEvent:
+      description: CloudEvents 1.0 envelope of workforce-management's ShiftPlanCommitted (consumed).
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.workforce-management.shiftplan.ShiftPlanCommitted"
+            dataschema:
+              const: "urn:warehouse:workforce-management:events:ShiftPlanCommitted:v1"
+            data:
+              $ref: "#/components/schemas/ShiftPlanCommittedData"
+    LocationSlotRegisteredEvent:
+      description: CloudEvents 1.0 envelope of facility-layout's LocationSlotRegistered (consumed).
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wms.facility-layout.locationslot.LocationSlotRegistered"
+            dataschema:
+              const: "urn:warehouse:facility-layout:events:LocationSlotRegistered:v1"
+            data:
+              $ref: "#/components/schemas/LocationSlotRegisteredData"
+    LocationSlotDecommissionedEvent:
+      description: CloudEvents 1.0 envelope of facility-layout's LocationSlotDecommissioned (consumed).
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wms.facility-layout.locationslot.LocationSlotDecommissioned"
+            dataschema:
+              const: "urn:warehouse:facility-layout:events:LocationSlotDecommissioned:v1"
+            data:
+              $ref: "#/components/schemas/LocationSlotDecommissionedData"
+    OrderAllocationData:
+      type: object
+      description: >-
+        Fields this service reads from order-management's OrderAllocated /
+        OrderPartiallyAllocated `data` (its own AllocationData; hand-mirrored,
+        never imported). Everything else in the payload is ignored.
+      required: [order_id, promise_date]
+      properties:
+        order_id:
+          type: string
+          description: Must equal the CloudEvents `subject`.
+          example: "ord-7c9e6679-7d5a-4b37-b2f1-93b0c4a1d8f2"
+        promise_date:
+          type: string
+          format: date-time
+          description: The order's promise cutoff instant. The window predicate is applied to it.
+          example: "2026-10-05T10:00:00Z"
+        lines:
+          type: array
+          description: Exactly the lines released in this allocation pass (may be empty); only its length is read.
+          items:
+            type: object
+            properties:
+              line_no:
+                type: integer
+    OrderAllocatedEvent:
+      description: CloudEvents 1.0 envelope of order-management's OrderAllocated (consumed).
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.order-management.order.OrderAllocated"
+            dataschema:
+              const: "urn:warehouse:order-management:events:OrderAllocated:v1"
+            data:
+              $ref: "#/components/schemas/OrderAllocationData"
+    OrderPartiallyAllocatedEvent:
+      description: CloudEvents 1.0 envelope of order-management's OrderPartiallyAllocated (consumed).
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.order-management.order.OrderPartiallyAllocated"
+            dataschema:
+              const: "urn:warehouse:order-management:events:OrderPartiallyAllocated:v1"
+            data:
+              $ref: "#/components/schemas/OrderAllocationData"
+    DockAppointmentBookedData:
+      type: object
+      description: >-
+        Fields this service reads from dock-scheduling's DockAppointmentBooked `data`
+        (hand-mirrored, never imported). door_code, carrier, carrier_scac, cpt_id,
+        shipment_refs, expected_seal_number and provenance are ignored.
+      required: [appointment_id, site_id, direction, window_start, window_end, asn_numbers, version]
+      properties:
+        appointment_id:
+          type: string
+          description: Must equal the CloudEvents `subject`.
+        site_id:
+          type: string
+          description: The facility-layout siteCode the demand is attributed to.
+        direction:
+          type: string
+          enum: [INBOUND, OUTBOUND]
+          description: Only INBOUND appointments are demand.
+        window_start:
+          type: string
+          format: date-time
+          description: Door window start; the window predicate (ADR 0003) is applied to it.
+        window_end:
+          type: string
+          format: date-time
+          description: Must be after window_start.
+        asn_numbers:
+          type: array
+          description: >-
+            Only its length is read (the ASN count that `minutes_per_asn` multiplies); at least
+            one for an INBOUND booking, empty for an OUTBOUND one.
+          items:
+            type: string
+        version:
+          type: integer
+          minimum: 1
+          description: The aggregate version; the ordering key.
+    DockAppointmentBookedEvent:
+      description: CloudEvents 1.0 envelope of dock-scheduling's DockAppointmentBooked (consumed).
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentBooked"
+            dataschema:
+              const: "urn:warehouse:dock-scheduling:events:DockAppointmentBooked:v1"
+            data:
+              $ref: "#/components/schemas/DockAppointmentBookedData"
+    DockAppointmentRescheduledData:
+      type: object
+      description: >-
+        Fields this service reads from dock-scheduling's DockAppointmentRescheduled `data`.
+        door_code, previous_window_start and previous_window_end are ignored.
+      required: [appointment_id, site_id, window_start, window_end, version]
+      properties:
+        appointment_id:
+          type: string
+          description: Must equal the CloudEvents `subject`.
+        site_id:
+          type: string
+        window_start:
+          type: string
+          format: date-time
+          description: The new door window start.
+        window_end:
+          type: string
+          format: date-time
+          description: Must be after window_start.
+        version:
+          type: integer
+          minimum: 1
+    DockAppointmentRescheduledEvent:
+      description: CloudEvents 1.0 envelope of dock-scheduling's DockAppointmentRescheduled (consumed).
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentRescheduled"
+            dataschema:
+              const: "urn:warehouse:dock-scheduling:events:DockAppointmentRescheduled:v1"
+            data:
+              $ref: "#/components/schemas/DockAppointmentRescheduledData"
+    DockAppointmentCancelledData:
+      type: object
+      description: Fields this service reads from dock-scheduling's DockAppointmentCancelled `data`. door_code and reason are ignored.
+      required: [appointment_id, site_id, version]
+      properties:
+        appointment_id:
+          type: string
+          description: Must equal the CloudEvents `subject`.
+        site_id:
+          type: string
+        version:
+          type: integer
+          minimum: 1
+    DockAppointmentCancelledEvent:
+      description: CloudEvents 1.0 envelope of dock-scheduling's DockAppointmentCancelled (consumed).
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentCancelled"
+            dataschema:
+              const: "urn:warehouse:dock-scheduling:events:DockAppointmentCancelled:v1"
+            data:
+              $ref: "#/components/schemas/DockAppointmentCancelledData"
+    DockAppointmentNoShowData:
+      type: object
+      description: >-
+        Fields this service reads from dock-scheduling's DockAppointmentNoShow `data`.
+        door_code, carrier_scac and window_end are ignored.
+      required: [appointment_id, site_id, direction, version]
+      properties:
+        appointment_id:
+          type: string
+          description: Must equal the CloudEvents `subject`.
+        site_id:
+          type: string
+        direction:
+          type: string
+          enum: [INBOUND, OUTBOUND]
+        version:
+          type: integer
+          minimum: 1
+    DockAppointmentNoShowEvent:
+      description: CloudEvents 1.0 envelope of dock-scheduling's DockAppointmentNoShow (consumed).
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wms.dock-scheduling.dockappointment.DockAppointmentNoShow"
+            dataschema:
+              const: "urn:warehouse:dock-scheduling:events:DockAppointmentNoShow:v1"
+            data:
+              $ref: "#/components/schemas/DockAppointmentNoShowData"
+    TaskCompletedData:
+      type: object
+      description: >-
+        Fields this service reads from fulfillment-execution's TaskCompleted `data`
+        (hand-mirrored, never imported). Everything else is ignored.
+      required: [task_id, task_type]
+      properties:
+        task_id:
+          type: string
+          description: Must equal the CloudEvents `subject`; a mismatch or a blank value is dead-lettered.
+        task_type:
+          type: string
+          description: The process step (PICK, PACK, ...); upper-cased to form the read model's process_type.
+          example: "PICK"
+        duration_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Optional; completions without it count as tasks but do not contribute to the mean duration.
+    TaskCompletedEvent:
+      description: CloudEvents 1.0 envelope of fulfillment-execution's TaskCompleted (consumed).
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.fulfillment-execution.task.TaskCompleted"
+            dataschema:
+              const: "urn:warehouse:fulfillment-execution:events:TaskCompleted:v1"
+            data:
+              $ref: "#/components/schemas/TaskCompletedData"

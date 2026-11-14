@@ -1,0 +1,53 @@
+{
+  "_doc": "Every contract copy this repo pins from a producer, and the producer branch it must equal. scripts/harness/pinned_contract_gate.py fails when a copy differs from the producer's develop. Refresh = copy the file, never edit it.",
+  "pins": [
+    {
+      "local": "internal/adapters/outbound/inventorystorage/testdata/inventory-storage.openapi.yaml",
+      "repo": "IQVO/inventory-storage",
+      "path": "apis/openapi.yaml",
+      "ref": "develop"
+    },
+    {
+      "local": "internal/adapters/inbound/kafka/testdata/fulfillment-execution.asyncapi.yaml",
+      "repo": "IQVO/fulfillment-execution",
+      "path": "apis/asyncapi.yaml",
+      "ref": "develop"
+    },
+    {
+      "local": "internal/adapters/inbound/kafka/testdata/outbound-shipping.asyncapi.yaml",
+      "repo": "IQVO/outbound-shipping",
+      "path": "apis/asyncapi.yaml",
+      "ref": "develop"
+    },
+    {
+      "local": "internal/adapters/inbound/kafka/testdata/process-path-management.asyncapi.yaml",
+      "repo": "IQVO/process-path-management",
+      "path": "apis/asyncapi.yaml",
+      "ref": "develop"
+    },
+    {
+      "local": "internal/adapters/inbound/kafka/testdata/product-master.asyncapi.yaml",
+      "repo": "IQVO/product-master",
+      "path": "apis/asyncapi.yaml",
+      "ref": "develop"
+    },
+    {
+      "local": "internal/adapters/inbound/kafka/testdata/warehouse-planning.asyncapi.yaml",
+      "repo": "IQVO/warehouse-planning",
+      "path": "apis/asyncapi.yaml",
+      "ref": "develop"
+    },
+    {
+      "local": "internal/adapters/inbound/kafka/testdata/wes-work-planning.asyncapi.yaml",
+      "repo": "IQVO/wes-work-planning",
+      "path": "apis/asyncapi.yaml",
+      "ref": "develop"
+    },
+    {
+      "local": "internal/adapters/inbound/kafka/testdata/order-management.asyncapi.yaml",
+      "repo": "IQVO/order-management",
+      "path": "apis/asyncapi.yaml",
+      "ref": "develop"
+    }
+  ]
+}
