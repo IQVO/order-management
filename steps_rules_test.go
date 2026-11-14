@@ -421,8 +421,11 @@ func (w *world) planRefused(eventID, planID string, table *godog.Table) error {
 		return err
 	}
 	err = w.plannedApply.Execute(context.Background(), usecases.ApplyPlannedCapacityRequest{EventID: eventID, Window: win})
+	if err == nil {
+		return fmt.Errorf("event %s was accepted, want it refused as invalid", eventID)
+	}
 	if !errors.Is(err, order.ErrInvalidPlannedCapacity) {
-		return fmt.Errorf("event %s was not refused as invalid: %v", eventID, err)
+		return fmt.Errorf("event %s was refused for another reason: %w", eventID, err)
 	}
 	return nil
 }
@@ -569,8 +572,12 @@ func (w *world) classificationAccepted() error {
 }
 
 func (w *world) classificationRejected() error {
-	if !errors.Is(w.rules.lastClassErr, usecases.ErrInvalidProductClassification) {
-		return fmt.Errorf("classification error = %v, want ErrInvalidProductClassification", w.rules.lastClassErr)
+	err := w.rules.lastClassErr
+	if err == nil {
+		return fmt.Errorf("classification was accepted, want it rejected as invalid")
+	}
+	if !errors.Is(err, usecases.ErrInvalidProductClassification) {
+		return fmt.Errorf("classification was refused for another reason: %w", err)
 	}
 	return nil
 }
