@@ -9,14 +9,15 @@ description: The order-management test pyramid as it exists in the repo — unit
 
 Every layer below exists in the repository today. Counts were taken from
 the `develop` tree on 2026-10-12 (`func Test…` declarations, Gherkin
-`Scenario:` headings); they drift as tests are added.
+`Scenario:` headings); they drift as tests are added. The BDD counts were
+re-measured on 2026-11-15, after the documentation-derived scenarios.
 
 ```mermaid
 flowchart TB
   M["Mutation (gremlins)<br/>internal/domain/order on every push<br/>internal/domain weekly"]
   C["Contract (Schemathesis)<br/>apis/openapi.yaml vs a live in-memory cmd/order"]
   E["MCP evals E1-E3<br/>13 Gherkin scenarios + conformance + governance"]
-  B["BDD (godog)<br/>16 feature files, 60 scenarios"]
+  B["BDD (godog)<br/>20 feature files, 164 scenario definitions, 194 executed"]
   I["Integration (Testcontainers)<br/>28 files, 63 tests, 12 packages"]
   A["Architecture fitness<br/>internal/architecture"]
   U["Unit + httptest<br/>99 files, 502 tests"]
@@ -121,9 +122,18 @@ parallel test processes contend for the reaper.
 `TestFeatures` (`features_test.go` at the repo root) runs every file in
 `features/` with `Strict: true`, so an undefined or pending step fails
 the suite. Step definitions live in `features_test.go`,
-`features_planned_capacity_test.go` and `features_wave2_test.go`. The
+`features_planned_capacity_test.go`, `features_fulfillment_site_test.go`,
+`features_wave2_test.go`, `steps_rules_test.go` and `steps_closeout_test.go`. The
 scenarios drive the use cases, and for the REST contract scenarios the
 router through `httptest`, all on in-memory adapters.
+
+The default tag filter is `~@known-bug`; `BDD_TAGS` overrides it
+(`BDD_TAGS=@known-bug go test . -run TestFeatures` runs only the tagged
+scenarios). One scenario carries `@known-bug`: "A shipped order can no longer
+be cancelled" (`event_driven_rules.feature`). It states the specified 409
+`order-already-released`, but `Order.EnsureCancellable` only rejects a
+`Released` line (`internal/domain/order/order.go:427-433`), so the code answers
+204; it fails when run on purpose.
 
 | Feature file | Scenarios |
 | --- | --- |
@@ -134,16 +144,25 @@ router through `httptest`, all on in-memory adapters.
 | `cancellation_extended.feature` | 2 |
 | `domain_events.feature` | 2 |
 | `error_paths.feature` | 4 |
+| `event_driven_rules.feature` | 32 (consumer rules driven through the use cases: repromise ADR 0018, release confirmation ADR 0043, shipment ADR 0051, missed load; 1 is `@known-bug`) |
+| `fulfillment_site.feature` | 7 |
 | `held_orders.feature` | 5 |
 | `held_orders_extended.feature` | 3 |
 | `intake_validation.feature` | 4 |
+| `mutation_closeout.feature` | 10 (rules the first rule files left unpinned: found by mutation) |
 | `order_lifecycle.feature` | 2 |
+| `order_rules.feature` | 55 (REST-reachable documented rules: intake, path selection, allocation and retry, held orders, cancellation, promise policy, demand projection, readiness) |
 | `partial_shipment.feature` | 2 |
 | `planned_capacity.feature` | 10 |
 | `planned_capacity_extended.feature` | 5 |
 | `required_ship_by.feature` | 2 |
 | `ship_complete.feature` | 2 |
-| **16 files** | **60** |
+| **20 files** | **164** |
+
+The counts are `Scenario` and `Scenario Outline` definitions
+(`git grep -c -E "^[[:space:]]*Scenario" -- features`). With outline rows
+expanded the runner executes **194 scenarios** (1566 steps), plus the one
+`@known-bug` scenario that the default filter skips.
 
 ## Contract tests (Schemathesis)
 
