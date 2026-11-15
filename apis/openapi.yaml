@@ -1010,8 +1010,11 @@ components:
         The order-level status, ALWAYS derived from the line statuses and
         never stored, so it cannot drift out of sync with the lines it
         summarises. `Received` -> `Allocated` | `PartiallyAllocated` |
-        `Backordered` -> `Released` | `PartiallyReleased`, with `Cancelled`
-        reachable only from a pre-release state (BR6).
+        `Backordered` -> `Released` | `PartiallyReleased` -> `PartiallyShipped`
+        | `Shipped`, with `Cancelled` reachable only from a pre-release state
+        (BR6). `Shipped` means every line has shipped and `PartiallyShipped`
+        that some have: both are reached when outbound-shipping's
+        `ShipmentConfirmed` is consumed (ADR 0051).
       enum:
         - Received
         - Allocated
@@ -1019,6 +1022,8 @@ components:
         - Backordered
         - Released
         - PartiallyReleased
+        - PartiallyShipped
+        - Shipped
         - Cancelled
       example: Allocated
 
@@ -1032,8 +1037,9 @@ components:
         same call once ship-complete rule BR3 allows it, ADR 0005 — the
         released lines are then announced on Kafka for wes-work-planning to
         react to independently; nothing waits for it to accept the work);
-        any pre-release state -> `Cancelled`.
-      enum: [Pending, Allocated, Backordered, Released, Cancelled]
+        `Released` -> `Shipped` when outbound-shipping confirms the shipment
+        that carries the line (ADR 0051); any pre-release state -> `Cancelled`.
+      enum: [Pending, Allocated, Backordered, Released, Shipped, Cancelled]
       example: Allocated
 
     OrderLine:
