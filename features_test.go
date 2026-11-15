@@ -690,6 +690,7 @@ func InitializeScenario(sc *godog.ScenarioContext) {
 	registerWave2Steps(sc, w)
 	registerFulfillmentSiteSteps(sc, w)
 	registerRulesSteps(sc, w)
+	registerCloseoutSteps(sc, w)
 }
 
 // TestFeatures runs the Gherkin acceptance suite under features/.
