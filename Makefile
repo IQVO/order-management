@@ -22,10 +22,11 @@ GREMLINS_VERSION   := v0.6.0
 COVERAGE_OUT       := coverage.out
 COVERAGE_PKGS      := ./internal/domain/...,./internal/application/...
 COVERAGE_THRESHOLD := 90
+BASE_REF           ?= origin/develop
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build vet fmt fmt-check lint test integration coverage bdd arch-test mutation-fast mutation vuln contract chart-test check check-all
+.PHONY: help build vet fmt fmt-check lint test integration coverage bdd arch-test mutation-fast mutation vuln contract contract-breaking chart-test check check-all
 
 help:
 	@echo "order-management — local quality gate (targets mirror .github/workflows/ci.yml)"
@@ -45,6 +46,7 @@ help:
 	@echo "  mutation      Exhaustive mutation run over the whole domain layer (slow)"
 	@echo "  vuln          Known CVEs in the dependency graph and the Go stdlib"
 	@echo "  contract      scripts/contract-test.sh — Schemathesis vs apis/openapi.yaml"
+	@echo "  contract-breaking  Spec breaking gates vs BASE_REF (oasdiff + asyncapi_breaking.py)"
 	@echo "  chart-test    Helm chart render/selector/probe tests (helm + PyYAML)"
 	@echo ""
 	@echo "  check       FAST bundle: fmt-check vet build lint test"
@@ -141,6 +143,26 @@ vuln:
 # on PATH, and a free loopback port).
 contract:
 	./scripts/contract-test.sh
+
+# Spec breaking-change gates — mirrors the `spec-breaking` CI job: oasdiff
+# over the REST specs and scripts/harness/asyncapi_breaking.py over the
+# AsyncAPI events catalog, both against BASE_REF (default origin/develop).
+# oasdiff runs when installed
+# (go install github.com/oasdiff/oasdiff@v1.38.0); the catalog gate always runs.
+contract-breaking:
+	python3 scripts/harness/test_asyncapi_breaking.py
+	@tmp="$$(mktemp -d)"; rc=0; \
+	git show "$(BASE_REF):apis/asyncapi.yaml" > "$$tmp/asyncapi.yaml"; \
+	python3 scripts/harness/asyncapi_breaking.py "$$tmp/asyncapi.yaml" apis/asyncapi.yaml || rc=1; \
+	if command -v oasdiff >/dev/null 2>&1; then \
+		for spec in apis/openapi.yaml apis/openapi-reports.yaml; do \
+			git show "$(BASE_REF):$$spec" > "$$tmp/$$(basename $$spec)"; \
+			oasdiff breaking --fail-on ERR "$$tmp/$$(basename $$spec)" "$$spec" || rc=1; \
+		done; \
+	else \
+		echo "oasdiff not installed — REST breaking gate skipped locally (go install github.com/oasdiff/oasdiff@v1.38.0)"; \
+	fi; \
+	rm -rf "$$tmp"; exit $$rc
 
 # Helm chart render, selector and probe tests — mirrors the `chart-tests` CI
 # job. Needs helm and Python 3 with PyYAML on PATH.
