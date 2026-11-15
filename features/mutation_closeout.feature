@@ -63,6 +63,59 @@ Feature: Rules the documentation-derived scenarios left unpinned
     When fulfillment-execution reports TaskCPTMissed event "evt-two" for line 1 of the order
     Then no "OrderRepromised" event was published
 
+  Scenario: A signal for a line backordered after its promise was set is ignored
+    Given inventory-storage has usable stock for SKU "SKU-BOOK-0001"
+    And inventory-storage has usable stock for SKU "SKU-TOY-0042"
+    And the site has CPT windows on path "pick" with a cycle time of 60 minutes:
+      | cptId    | cutoffAt             |
+      | sp1-1200 | 2026-09-07T12:00:00Z |
+      | sp1-1500 | 2026-09-07T15:00:00Z |
+    And an order is placed on hold for SKUs "SKU-BOOK-0001,SKU-TOY-0042"
+    And inventory-storage reports insufficient usable stock for SKU "SKU-BOOK-0001"
+    And the order is released
+    And the clock advances 210 minutes
+    When fulfillment-execution reports TaskCPTMissed event "evt-m1" for line 1 of the order
+    Then no "OrderRepromised" event was published
+    When the order is fetched
+    Then line 1 status is "Backordered"
+    And line 2 status is "Allocated"
+
+  Scenario: A held deadline order, whose lines are still Allocated, is re-promised within its deadline
+    Given inventory-storage has usable stock for SKU "SKU-BOOK-0001"
+    And the site has CPT windows on path "pick" with a cycle time of 60 minutes:
+      | cptId    | cutoffAt             |
+      | sp1-1200 | 2026-09-07T12:00:00Z |
+      | sp1-1500 | 2026-09-07T15:00:00Z |
+    And an order is placed on hold for SKUs "SKU-BOOK-0001" with required ship-by "2026-09-07T15:00:00Z"
+    And the site has CPT windows on path "pick" with a cycle time of 60 minutes:
+      | cptId    | cutoffAt             |
+      | sp1-1200 | 2026-09-07T12:00:00Z |
+      | sp1-1430 | 2026-09-07T14:30:00Z |
+      | sp1-1800 | 2026-09-07T18:00:00Z |
+    When fulfillment-execution reports TaskCPTMissed event "evt-m1" for line 1 of the order
+    Then the last "OrderRepromised" event moved the promise from CPT "sp1-1500" to "sp1-1430" because of "TaskCPTMissed"
+
+  Scenario: When one promise group moves only the demand of that group is re-emitted
+    Given inventory-storage has usable stock for SKU "SKU-BOOK-0001"
+    And inventory-storage has usable stock for SKU "SKU-TOY-0042"
+    And the site has CPT windows on path "pick" with a cycle time of 60 minutes:
+      | cptId    | cutoffAt             |
+      | sp1-1200 | 2026-09-07T12:00:00Z |
+      | sp1-1500 | 2026-09-07T15:00:00Z |
+      | sp1-1800 | 2026-09-07T18:00:00Z |
+    And path "pick" has capacity for 5 units before CPT "sp1-1200"
+    And path "pick" has capacity for 5 units before CPT "sp1-1500"
+    And an order allowing partial shipment at fulfillment site "WH2" is placed with lines:
+      | sku           | quantity | giftWrap |
+      | SKU-BOOK-0001 | 2        | false    |
+      | SKU-TOY-0042  | 8        | false    |
+    Then the ACTIVE SiteSkuDemandChanged event for line 1 is due at "2026-09-07T12:00:00Z"
+    And the ACTIVE SiteSkuDemandChanged event for line 2 is due at "2026-09-07T18:00:00Z"
+    When the clock advances 210 minutes
+    And fulfillment-execution reports TaskCPTMissed event "evt-m1" for line 1 of the order
+    Then exactly 3 "SiteSkuDemandChanged" events were published
+    And the last "SiteSkuDemandChanged" event is for line 1 due at "2026-09-07T15:00:00Z"
+
   # --- ConfirmRelease: the CloudEvents id is the idempotency key (use case 11, ADR 0043) ---
 
   Scenario: One CloudEvents id confirms one line and is a duplicate for any other

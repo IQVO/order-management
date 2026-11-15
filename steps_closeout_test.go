@@ -34,9 +34,14 @@ func (w *world) sweepRunsInBatches(minutes, batch int) error {
 	return w.sweepRuns(minutes)
 }
 
+func (w *world) heldOrderWithShipBy(skus, shipBy string) error {
+	return w.postAndCapture(map[string]any{"lines": simpleLines(skus), "requiredShipBy": shipBy, "releaseOnAllocation": false})
+}
+
 // registerCloseoutSteps registers the closeout vocabulary on sc.
 func registerCloseoutSteps(sc *godog.ScenarioContext, w *world) {
 	sc.Step(`^wes-work-planning publishes a WorkUnitCreated without a CloudEvents id for line (\d+) of the order$`, w.workUnitCreatedWithoutID)
+	sc.Step(`^an order is placed on hold for SKUs "([^"]*)" with required ship-by "([^"]*)"$`, w.heldOrderWithShipBy)
 	sc.Step(`^the confirmation is refused as invalid$`, w.confirmationIsRefusedAsInvalid)
 	sc.Step(`^the housekeeping sweep runs with a confirmation timeout of (\d+) minutes in batches of (\d+) lines$`, w.sweepRunsInBatches)
 }
