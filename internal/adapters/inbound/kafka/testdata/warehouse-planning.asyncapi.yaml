@@ -40,8 +40,9 @@ info:
     `warehouse.order-management.events`) keep a local expected-demand read
     model current under the REQUIRED consumer group `DEMAND_CONSUMER_GROUP`.
     Each order is counted once, at its latest promise cutoff, and attributed to
-    the ONE configured site (`DEMAND_SITE_ID`): order-management's events carry
-    no fulfillment site. `OrderRepromised` and every other type are ignored.
+    the event's own optional `site_id` (order-management ADR 0050), or to the
+    configured fallback site (`DEMAND_SITE_ID`) when the event carries none
+    (ADR 0021). `OrderRepromised` and every other type are ignored.
 
     **Consumed (ADR 0017, source switched by ADR 0020).** dock-scheduling's
     `DockAppointmentBooked`, `DockAppointmentRescheduled`,
@@ -250,10 +251,13 @@ channels:
         (a later or equal time replaces, an older one is a no-op). The
         idempotency claim on the CloudEvents `id` and the upsert commit in ONE
         database transaction; the offset is committed only afterwards. order-
-        management's events carry no site, no quantities and no cancellations
+        management's events carry no quantities and no cancellations
         (OrderCancelled is analytics-topic only), so demand is counted in
-        ORDERS, attributed to the one configured site, and not netted; see
-        docs/adr/0004-demand-ingestion-from-order-management.md.
+        ORDERS and not netted; see
+        docs/adr/0004-demand-ingestion-from-order-management.md. An order is
+        attributed to the event's optional `site_id`, or to the configured
+        fallback site `DEMAND_SITE_ID` when it carries none
+        (docs/adr/0021-order-demand-and-labour-read-the-events-own-site.md).
       tags:
         - name: consumed
       message:
@@ -745,7 +749,8 @@ components:
         CONSUMED from `warehouse.workforce.events` (producer: workforce-management;
         one message per PathPlan line). Becomes a LABOR `CapacityConstraint` on the
         ProcessCapacity of ProcessType = upper-case(`path_id`), location =
-        `building_id`: rate = `planned_heads * planned_rate` (UNIT/HOUR), window =
+        `site_code`, or the deprecated `building_id` when `site_code` is absent
+        (ADR 0021): rate = `planned_heads * planned_rate` (UNIT/HOUR), window =
         `[time, time + planned_hours)`. Deduped on the CloudEvents `id`.
       contentType: application/cloudevents+json
       tags:
@@ -755,7 +760,7 @@ components:
         $ref: "#/components/schemas/ShiftPlanCommittedEvent"
       examples:
         - name: packLine
-          summary: One fanned-out line of a plan committed for building BLD1.
+          summary: One fanned-out line of a plan committed for site BLD1.
           payload:
             specversion: "1.0"
             id: "9f1c2b7e-4c3a-4a1d-9f0b-6c2b8a7d1e33"
@@ -766,6 +771,7 @@ components:
             datacontenttype: "application/json"
             dataschema: "urn:warehouse:workforce-management:events:ShiftPlanCommitted:v1"
             data:
+              site_code: "BLD1"
               building_id: "BLD1"
               shift_id: "SHIFT1"
               path_id: "pack"
@@ -781,7 +787,8 @@ components:
         CONSUMED from `warehouse.order-management.events` (producer: order-management,
         its own `apis/asyncapi.yaml`). Upserts the order into the expected-demand read
         model: promise cutoff = `data.promise_date`, released lines = `len(data.lines)`,
-        site = the configured `DEMAND_SITE_ID` (the event carries none). `subject` must
+        site = `data.site_id`, or the configured `DEMAND_SITE_ID` when it is absent or
+        blank (ADR 0021). `subject` must
         equal `data.order_id`. Deduped on the CloudEvents `id`; last writer wins per
         order on `time`. `type` =
         `com.warehouse.wes.order-management.order.OrderAllocated`.
@@ -1656,14 +1663,20 @@ components:
       type: object
       description: >-
         Fields this service reads from one fanned-out ShiftPlanCommitted message (one per PathPlan line).
-        A message with a blank building_id or path_id is skipped (WARN). The LABOR constraint is
-        planned_heads x planned_rate UNIT per HOUR at location building_id for the window
-        [CloudEvents time, time + planned_hours); heads, rate and hours are not range-checked here (a
-        value the domain rejects is skipped). shift_id is not read.
-      required: [building_id, path_id]
+        A message with no site (blank site_code and building_id) or a blank path_id is skipped (WARN).
+        The LABOR constraint is planned_heads x planned_rate UNIT per HOUR at location site_code (or
+        building_id when site_code is absent, ADR 0021) for the window [CloudEvents time, time +
+        planned_hours); heads, rate and hours are not range-checked here (a value the domain rejects is
+        skipped). shift_id is not read.
+      required: [path_id]
       properties:
+        site_code:
+          type: string
+          description: The canonical site (workforce-management's site_code); the constraint's location.
+          example: "BLD1"
         building_id:
           type: string
+          description: DEPRECATED twin of site_code (same value); read only when site_code is absent.
           example: "BLD1"
         shift_id:
           type: string
@@ -1763,6 +1776,13 @@ components:
         never imported). Everything else in the payload is ignored.
       required: [order_id, promise_date]
       properties:
+        site_id:
+          type: string
+          description: >-
+            Optional (order-management ADR 0050). The order's caller-assigned fulfillment site; the
+            order's demand is attributed to it (surrounding space trimmed). Absent or blank means the
+            configured fallback site DEMAND_SITE_ID (ADR 0021).
+          example: "WH2"
         order_id:
           type: string
           description: Must equal the CloudEvents `subject`.
