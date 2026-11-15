@@ -24,7 +24,7 @@ func (w *world) workUnitCreatedWithoutID(lineNo int) error {
 
 func (w *world) confirmationIsRefusedAsInvalid() error {
 	if !errors.Is(w.rules.lastClassErr, usecases.ErrInvalidReleaseConfirmation) {
-		return fmt.Errorf("expected ErrInvalidReleaseConfirmation, got %v", w.rules.lastClassErr)
+		return fmt.Errorf("expected ErrInvalidReleaseConfirmation, got %w", w.rules.lastClassErr)
 	}
 	return nil
 }
