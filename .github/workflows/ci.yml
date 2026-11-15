@@ -221,6 +221,73 @@ jobs:
       - name: The gate's own tests
         run: python3 scripts/harness/test_pinned_contract_gate.py
 
+  # Producer-parity breaking gates (consumer-contract wave, 2026-11): the
+  # REST specs and the AsyncAPI events catalog are PINNED by consumer CI
+  # (byte-copies under contracts/pinned.json on their side; the pinning
+  # edges live in warehouse-docs network/model/contract-edges.json), so an
+  # incompatible change here breaks their builds one merge later. On a
+  # pull_request touching apis/** this job checks the PR base out (git show
+  # of the base sha) and fails on BREAKING change only; additive evolution
+  # (new operation/message, new optional field, widened type) passes.
+  spec-breaking:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0        # the PR base sha must be present for git show / git diff
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.13"
+      - name: Does this PR touch the specs?
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          if git diff --name-only "$base" HEAD -- apis/ | grep -q .; then
+            echo "apis/ changes present — running the breaking gates"
+            echo "SPECS_TOUCHED=1" >> "$GITHUB_ENV"
+          else
+            echo "apis/ untouched by this PR — breaking gates skipped"
+          fi
+      - name: Install oasdiff (pinned)
+        if: env.SPECS_TOUCHED == '1'
+        run: go install github.com/oasdiff/oasdiff@v1.38.0
+      - name: Install PyYAML (pinned)
+        if: env.SPECS_TOUCHED == '1'
+        run: python3 -m pip install --require-hashes -r .github/requirements/asyncapi-gates.txt
+      - name: REST breaking gate (oasdiff breaking, PR base vs head)
+        if: env.SPECS_TOUCHED == '1'
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          rc=0
+          for spec in apis/openapi.yaml apis/openapi-reports.yaml; do
+            basecopy="/tmp/$(basename "$spec").base"
+            git show "$base:$spec" > "$basecopy"
+            echo "::group::oasdiff breaking $spec (base -> head)"
+            # --fail-on ERR: without it oasdiff prints breaking changes but exits 0
+            oasdiff breaking --fail-on ERR "$basecopy" "$spec" || rc=1
+            echo "::endgroup::"
+          done
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::BREAKING REST spec change vs the PR base. apis/openapi.yaml is pinned by consumer CI: network-fulfillment (REST, ORDER_MANAGEMENT_URL). Pinning consumers overall (warehouse-docs network/model/contract-edges.json + consumer PRs exception-management#54, returns-processing#52): network-fulfillment, fulfillment-execution, inventory-storage, network-inventory-planning, returns-processing, slotting-optimization, warehouse-planning, wes-work-planning, exception-management, order-management self-pin. Make the change additive (or version a new path/operation) and coordinate the pin refresh on the consumer side."
+            exit 1
+          fi
+      - name: AsyncAPI breaking gate (events catalog, PR base vs head)
+        if: env.SPECS_TOUCHED == '1'
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          git show "$base:apis/asyncapi.yaml" > /tmp/asyncapi.yaml.base
+          python3 scripts/harness/asyncapi_breaking.py /tmp/asyncapi.yaml.base apis/asyncapi.yaml
+      - name: The AsyncAPI gate's own tests
+        if: env.SPECS_TOUCHED == '1'
+        run: python3 scripts/harness/test_asyncapi_breaking.py
+
   # The MCP eval gate as its own named check: the eval suites from
   # internal/adapters/inbound/mcp run inside the `test` job too; this job makes the gate
   # visible — and individually gating — on every push and PR.
