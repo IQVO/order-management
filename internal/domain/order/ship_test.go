@@ -297,3 +297,43 @@ func TestReleasedLineCannotBeReallocatedAfterShipping(t *testing.T) {
 		t.Fatalf("MarkBackordered on shipped err = %v, want ErrLineNotPending", err)
 	}
 }
+
+// INVARIANT (BR6, ADR 0004 + ADR 0051): Shipped is past Released and
+// terminal, so an order with any Shipped line can no longer be cancelled.
+// A Shipped line is not Released any more, so the boundary has to name it
+// explicitly; before the fix only a Released line was rejected and a
+// fully shipped order was rewritten to Cancelled.
+func TestCancelIsRejectedOnceAnyLineIsShipped(t *testing.T) {
+	cases := []struct {
+		name     string
+		statuses []order.LineStatus
+		want     order.Status
+	}{
+		{"every line shipped", []order.LineStatus{order.LineShipped, order.LineShipped}, order.StatusShipped},
+		{"one shipped one allocated", []order.LineStatus{order.LineShipped, order.LineAllocated}, order.StatusPartiallyShipped},
+		{"one shipped one backordered", []order.LineStatus{order.LineShipped, order.LineBackordered}, order.StatusPartiallyShipped},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			o := shipTestOrder(t, tc.statuses...)
+			before := make([]order.LineStatus, len(tc.statuses))
+			for i, l := range o.Lines() {
+				before[i] = l.Status()
+			}
+			if err := o.EnsureCancellable(); !errors.Is(err, order.ErrOrderAlreadyReleased) {
+				t.Fatalf("EnsureCancellable err = %v, want %v", err, order.ErrOrderAlreadyReleased)
+			}
+			if err := o.Cancel(); !errors.Is(err, order.ErrOrderAlreadyReleased) {
+				t.Fatalf("Cancel err = %v, want %v", err, order.ErrOrderAlreadyReleased)
+			}
+			for i, l := range o.Lines() {
+				if l.Status() != before[i] {
+					t.Fatalf("a rejected cancellation must not touch any line, line %d = %q, was %q", i+1, l.Status(), before[i])
+				}
+			}
+			if o.Status() != tc.want {
+				t.Fatalf("Status() = %q, want %q", o.Status(), tc.want)
+			}
+		})
+	}
+}

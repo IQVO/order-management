@@ -129,11 +129,12 @@ router through `httptest`, all on in-memory adapters.
 
 The default tag filter is `~@known-bug`; `BDD_TAGS` overrides it
 (`BDD_TAGS=@known-bug go test . -run TestFeatures` runs only the tagged
-scenarios). One scenario carries `@known-bug`: "A shipped order can no longer
-be cancelled" (`event_driven_rules.feature`). It states the specified 409
-`order-already-released`, but `Order.EnsureCancellable` only rejects a
-`Released` line (`internal/domain/order/order.go:427-433`), so the code answers
-204; it fails when run on purpose.
+scenarios). No scenario carries `@known-bug` today; the tag and the filter
+stay for the next documented-but-unimplemented rule. The former occupant,
+"A shipped order can no longer be cancelled" (`event_driven_rules.feature`),
+passes by default since `Order.EnsureCancellable` rejects a `Shipped` line as
+well as a `Released` one (`internal/domain/order/order.go`, ADR 0004 addendum
+2026-11-15).
 
 | Feature file | Scenarios |
 | --- | --- |
@@ -144,7 +145,7 @@ be cancelled" (`event_driven_rules.feature`). It states the specified 409
 | `cancellation_extended.feature` | 2 |
 | `domain_events.feature` | 2 |
 | `error_paths.feature` | 4 |
-| `event_driven_rules.feature` | 32 (consumer rules driven through the use cases: repromise ADR 0018, release confirmation ADR 0043, shipment ADR 0051, missed load; 1 is `@known-bug`) |
+| `event_driven_rules.feature` | 32 (consumer rules driven through the use cases: repromise ADR 0018, release confirmation ADR 0043, shipment ADR 0051, missed load, shipped order not cancellable) |
 | `fulfillment_site.feature` | 7 |
 | `held_orders.feature` | 5 |
 | `held_orders_extended.feature` | 3 |
@@ -161,8 +162,8 @@ be cancelled" (`event_driven_rules.feature`). It states the specified 409
 
 The counts are `Scenario` and `Scenario Outline` definitions
 (`git grep -c -E "^[[:space:]]*Scenario" -- features`). With outline rows
-expanded the runner executes **194 scenarios** (1566 steps), plus the one
-`@known-bug` scenario that the default filter skips.
+expanded the runner executes **195 scenarios**, none skipped by the default
+filter.
 
 ## Contract tests (Schemathesis)
 
