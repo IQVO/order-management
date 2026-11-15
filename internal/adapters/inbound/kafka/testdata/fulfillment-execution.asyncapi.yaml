@@ -732,7 +732,8 @@ components:
       summary: A package passed its SLAM weigh-check (the "SLAM pass").
       description: Raised alongside `LabelApplied` when the SLAM weigh-check passes (ADR-0025); a diverted
         package does not raise it. Published on `warehouse.fulfillment.events`, keyed by package id. Consumed
-        by order-management.
+        by order-management and outbound-shipping (which needs `site_id` and `cpt` to place the package
+        on a load, ADR-0065).
       contentType: application/cloudevents+json
       tags:
       - name: package
@@ -772,10 +773,14 @@ components:
                   description: The package's order reference.
                 site_id:
                   type: string
+                  pattern: '^[A-Z0-9]+$'
                   description: >-
-                    Optional facility-layout siteCode the package ships from (ADR-0061).
-                    No source exists in the order-work chain yet, so this is omitted until
-                    a later wave lands one; never an empty string.
+                    Optional facility-layout siteCode of the fulfillment site the order
+                    named (ADR-0061, sourced by ADR-0065): WorkReleased.site_id on the
+                    order's work, kept on the PICK tasks, inherited by the rebin PACK task,
+                    and read from the manifest's SLAM task, else its PACK task. Omitted —
+                    never an empty string — when the order named none (or the value was
+                    not a valid site code); consumers must treat absent as "site unknown".
                 source_order_id:
                   type: string
                   description: >-
@@ -789,9 +794,12 @@ components:
                   type: string
                   format: date-time
                   description: >-
-                    Optional RFC3339 Critical Pull Time of the manifest's SLAM task
-                    (ADR-0061) — the same SLAM-leg correlation as the on-time-to-CPT
-                    KPI. Omitted when no SLAM task correlates.
+                    Optional RFC3339 Critical Pull Time (UTC) of the manifest (ADR-0061):
+                    the CPT of its SLAM task — the same SLAM-leg correlation as the
+                    on-time-to-CPT KPI — and, when the order has no SLAM task (every
+                    customer order: its package is sealed from the rebin PACK task), the
+                    CPT of its PACK task, the order's promise date (ADR-0065). Omitted
+                    when neither task correlates.
                 weight_g:
                   type: number
                   format: double
@@ -835,6 +843,27 @@ components:
             source_order_id: order-88421
             cpt: '2026-09-30T15:30:00Z'
             weight_g: 1240.5
+      - name: packageManifestedRebinWithSite
+        summary: A rebin package of an order that named a fulfillment site; no SLAM task exists, so cpt is the PACK task's.
+        headers:
+          content-type: application/cloudevents+json; charset=UTF-8
+          traceparent: 00-8812c36621d214139a08949823716b93-14ddf02dbd8913ba-01
+        payload:
+          specversion: "1.0"
+          id: 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b
+          source: /warehouse/fulfillment-execution
+          type: com.warehouse.wes.fulfillment-execution.package.PackageManifested
+          subject: pkg-1031
+          time: '2026-09-30T15:00:00Z'
+          datacontenttype: application/json
+          dataschema: urn:warehouse:fulfillment-execution:events:PackageManifested:v1
+          data:
+            package_id: pkg-1031
+            order_ref: order-88422
+            site_id: WH1
+            source_order_id: order-88422
+            cpt: '2026-09-30T18:00:00Z'
+            weight_g: 980
     PackageDiverted:
       name: PackageDiverted
       title: PackageDiverted
