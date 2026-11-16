@@ -383,7 +383,7 @@ channels:
 
 components:
   messages:
-    OrderAllocatedIntegration:
+    OrderAllocatedIntegrationCanary:
       name: OrderAllocated
       title: Order Allocated (integration)
       summary: Every line allocated — and eligible lines released in the same pass.
