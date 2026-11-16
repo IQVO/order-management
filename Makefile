@@ -46,7 +46,7 @@ help:
 	@echo "  mutation      Exhaustive mutation run over the whole domain layer (slow)"
 	@echo "  vuln          Known CVEs in the dependency graph and the Go stdlib"
 	@echo "  contract      scripts/contract-test.sh — Schemathesis vs apis/openapi.yaml"
-	@echo "  contract-breaking  Spec breaking gates vs BASE_REF (oasdiff + asyncapi_breaking.py)"
+	@echo "  contract-breaking  Canonical spec breaking gate vs BASE_REF (oasdiff --fail-on ERR + asyncapi_breaking.py)"
 	@echo "  chart-test    Helm chart render/selector/probe tests (helm + PyYAML)"
 	@echo ""
 	@echo "  check       FAST bundle: fmt-check vet build lint test"
@@ -144,18 +144,24 @@ vuln:
 contract:
 	./scripts/contract-test.sh
 
-# Spec breaking-change gates — mirrors the `spec-breaking` CI job: oasdiff
-# over the REST specs and scripts/harness/asyncapi_breaking.py over the
-# AsyncAPI events catalog, both against BASE_REF (default origin/develop).
-# oasdiff runs when installed
-# (go install github.com/oasdiff/oasdiff@v1.38.0); the catalog gate always runs.
+# Spec breaking-change gate — local mirror of the `spec-breaking` CI job (the
+# canonical producer kit, docs/spec-breaking-kit.md in warehouse-harness-template):
+# `oasdiff breaking --fail-on ERR` over every changed apis/openapi*.yaml and
+# scripts/harness/asyncapi_breaking.py over apis/asyncapi.yaml, both against
+# BASE_REF (default origin/develop). --fail-on ERR is load-bearing: without it
+# oasdiff prints breaking changes and still exits 0. oasdiff runs when installed
+# (go install github.com/oasdiff/oasdiff@v1.38.0); the AsyncAPI gate always runs.
 contract-breaking:
+	python3 scripts/harness/asyncapi_breaking.py --self-check
 	python3 scripts/harness/test_asyncapi_breaking.py
 	@tmp="$$(mktemp -d)"; rc=0; \
-	git show "$(BASE_REF):apis/asyncapi.yaml" > "$$tmp/asyncapi.yaml"; \
-	python3 scripts/harness/asyncapi_breaking.py "$$tmp/asyncapi.yaml" apis/asyncapi.yaml || rc=1; \
+	if git cat-file -e "$(BASE_REF):apis/asyncapi.yaml" 2>/dev/null; then \
+		git show "$(BASE_REF):apis/asyncapi.yaml" > "$$tmp/asyncapi.yaml"; \
+		python3 scripts/harness/asyncapi_breaking.py "$$tmp/asyncapi.yaml" apis/asyncapi.yaml || rc=1; \
+	fi; \
 	if command -v oasdiff >/dev/null 2>&1; then \
-		for spec in apis/openapi.yaml apis/openapi-reports.yaml; do \
+		for spec in apis/openapi*.yaml; do \
+			git cat-file -e "$(BASE_REF):$$spec" 2>/dev/null || continue; \
 			git show "$(BASE_REF):$$spec" > "$$tmp/$$(basename $$spec)"; \
 			oasdiff breaking --fail-on ERR "$$tmp/$$(basename $$spec)" "$$spec" || rc=1; \
 		done; \
