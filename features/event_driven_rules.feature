@@ -412,12 +412,10 @@ Feature: Facts consumed from fulfillment-execution, wes-work-planning and outbou
     Then the shipment outcome for "no orders" is "ignored_no_orders"
     And no "OrderLineShipped" event was published
 
-  # Known divergence: BR6 / the line state diagram make Shipped terminal (a
-  # shipped line is past Released, and only Pending, Backordered and Allocated
-  # lines can be Cancelled) but EnsureCancellable only looks for a Released
-  # line, so DELETE /orders/{id} on a shipped order answers 204 and rewrites
-  # its lines to Cancelled. Written as the specified behaviour.
-  @known-bug
+  # BR6 / the line state diagram make Shipped terminal (a shipped line is past
+  # Released, and only Pending, Backordered and Allocated lines can be
+  # Cancelled), so DELETE /orders/{id} on a shipped order is refused with the
+  # same 409 as a released one and the lines stay Shipped.
   Scenario: A shipped order can no longer be cancelled
     Given inventory-storage has usable stock for SKU "SKU-BOOK-0001"
     And an order is placed for SKUs "SKU-BOOK-0001"

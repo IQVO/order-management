@@ -129,3 +129,15 @@ keep its promise.
   warehouse can be soon after allocation.
 - **The gap needs an operational answer, not just a documented one.** Until
   work recall exists, "stop that order" is a phone call to the floor.
+
+## Addendum 2026-11-15: a Shipped line closes the boundary too
+
+ADR 0051 added `Shipped` after this ADR was accepted. It is past `Released`
+and terminal, like `Cancelled`, so the rule above reads: `CancelOrder` is
+legal only while every line is `Pending`, `Backordered` or `Allocated`.
+`Order.EnsureCancellable` (and therefore `Order.Cancel`) now rejects a
+`Released` **or** `Shipped` line with `ErrOrderAlreadyReleased`, and
+`DELETE /orders/{id}` answers the same `409 order-already-released`. Before
+this fix the check named only `Released`, so a fully shipped order answered
+`204` and its lines were rewritten to `Cancelled`. The decision, the problem
+slug and the "no claw-back" gap above are unchanged.
