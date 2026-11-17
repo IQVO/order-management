@@ -80,8 +80,8 @@ paths:
 ## Aggregates & invariants (enforce in domain, unit-tested — each needs a failing-path test)
 
 - **Order**: cannot allocate the same line twice; cannot release a line
-  that isn't `Allocated`; cannot cancel once ANY line is `Released`
-  (`ErrOrderAlreadyReleased`); order-level `Status` is always computed from
+  that isn't `Allocated`; cannot cancel once ANY line is `Released` or
+  `Shipped` (`ErrOrderAlreadyReleased`); order-level `Status` is always computed from
   line statuses, never stored redundantly.
 - **OrderLine**: `Quantity` must be > 0; `SKU` must be non-empty; a
   `Backordered` line may transition back to `Allocated` ONLY via
@@ -101,7 +101,7 @@ paths:
   allocated lines are independently eligible for release; order status
   becomes `PartiallyAllocated`.
 - **BR6 (cancellation boundary)**: `CancelOrder` is legal ONLY while no
-  line has reached `Released`. The boundary is checked BEFORE any
+  line has reached `Released` or `Shipped` (ADR-0004 addendum 2026-11-15). The boundary is checked BEFORE any
   reservation is revoked, so a rejected cancellation leaves
   inventory-storage untouched. Legal cancellation revokes every allocated
   line's reservation via `DELETE /reservations/{id}`. Once ANY line is
@@ -162,7 +162,7 @@ integration-only by design (ADR-0035).
    implicit attempt, a hard failure here DOES propagate to the caller.
 3. **`CancelOrder(orderId)`** → revokes every allocated line's reservation
    via `DELETE /reservations/{id}`; rejects with `ErrOrderAlreadyReleased`
-   if any line is already `Released` (BR6, checked before any revoke call).
+   if any line is already `Released` or `Shipped` (BR6, checked before any revoke call).
 4. **`GetOrder(orderId)`** → current Order state (read).
 5. **`ReleaseHeldOrder(orderId)`** (ADR-0020) → releases a HELD order's
    allocated lines via `allocateAndRelease`'s release leg (same BR3 gate,

@@ -165,7 +165,7 @@ summarises.
   `RetryAllocation` clears it. `RetryAllocation` is the only route from
   `Backordered` back to `Allocated`.
 - **BR6 — the cancellation boundary is release.** Cancelling is legal only
-  while no line is `Released`; the boundary is checked *before* any
+  while no line is `Released` or `Shipped`; the boundary is checked *before* any
   reservation is revoked. See
   [ADR 0004](docs/docs/adr/0004-cancellation-boundary-at-release.md), including
   its documented known gap.
@@ -571,7 +571,7 @@ curl -s -i -X DELETE localhost:8080/orders/$ORDER_ID
 # 204 No Content
 ```
 
-Rejected by BR6 once any line has been released — which, since a
+Rejected by BR6 once any line has been released or shipped — which, since a
 ship-complete order that allocates cleanly is released automatically
 inside `POST /orders`, can happen right after intake:
 

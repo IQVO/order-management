@@ -424,9 +424,13 @@ func (o *Order) EnsureReleasable() error {
 
 // EnsureCancellable enforces BR6 without mutating anything, so a use case
 // can check the boundary BEFORE revoking reservations upstream.
+//
+// A Shipped line is past Released (ADR 0051: terminal, like Cancelled), so
+// it closes the boundary too; only Pending, Backordered and Allocated
+// lines can be cancelled.
 func (o *Order) EnsureCancellable() error {
 	for _, l := range o.lines {
-		if l.status == LineReleased {
+		if l.status == LineReleased || l.status == LineShipped {
 			return ErrOrderAlreadyReleased
 		}
 	}

@@ -67,7 +67,7 @@ Optimistic concurrency surfaces as `409 concurrent-modification`.
 | 400 | `invalid-query-parameter` | `GET /planned-capacity` without `site`, or with a `from` that is not RFC 3339. | Fix the query. |
 | 404 | `order-not-found` | Unknown id. In-memory mode loses every order on restart. | Check the id and `DATABASE_URL`. |
 | 404 (no problem body) | n/a | `GET /planned-capacity` while `PLANNED_CAPACITY_CONSUMER_GROUP` is unset: the route is not registered. | Set the group. |
-| 409 | `order-already-released` | Cancel after any line was released (BR6). | Expected; v1 has no claw-back (ADR 0004). |
+| 409 | `order-already-released` | Cancel after any line was released or shipped (BR6). | Expected; v1 has no claw-back (ADR 0004). |
 | 409 | `no-backordered-lines`, `no-allocated-lines`, `promise-date-not-set`, `order-not-held`, `order-line-already-allocated`, `order-line-not-pending`, `order-line-not-backordered`, `order-line-not-allocated` | The order is not in the state the command needs: for example `retry-allocation` on an order with nothing backordered, or `release` on an order that was not held. | Read the order first (`GET /orders/{id}`). |
 | 409 | `idempotency-key-reused` | Same `Idempotency-Key` with a different method, path or body (was 422 before ADR 0048). | Use a new key for a different request. |
 | 409 | `concurrent-modification` | Another writer (an HTTP call or the re-promise consumer) saved the order first; the `version` column check failed (ADR 0024). | Re-read and retry. |

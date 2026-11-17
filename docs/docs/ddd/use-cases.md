@@ -179,7 +179,7 @@ order `Backordered` — BR3 is a hold, not a problem type, so there is no
 ## 5. CancelOrder(orderId)
 
 Checks `EnsureCancellable` first (**BR6**: `409` `order-already-released`
-if any line is `Released`, before anything is revoked), then revokes every
+if any line is `Released` or `Shipped`, before anything is revoked), then revokes every
 allocated line's reservation via `DELETE /reservations/{id}`, cancels every
 line and saves.
 
