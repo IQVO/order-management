@@ -133,7 +133,7 @@ other services in this platform emit:
 | `non-positive-quantity` | 422 | a line's quantity is not greater than zero |
 | `line-ineligible-for-resolved-path` | 422 | a line's product attributes are not eligible for any active path (ADR 0016/0021) |
 | `held-order-must-be-ship-complete` | 422 | `releaseOnAllocation: false` combined with `allowPartialShipment: true` (ADR 0020) |
-| `order-already-released` | 409 | `CancelOrder` when any line is `Released` (BR6) |
+| `order-already-released` | 409 | `CancelOrder` when any line is `Released` or `Shipped` (BR6) |
 | `no-backordered-lines` | 409 | `RetryAllocation` on an order with nothing backordered |
 | `order-not-held` | 409 | `ReleaseHeldOrder` on an order that was not held at intake (ADR 0020) |
 | `concurrent-modification` | 409 | the order's `version` changed between read and save (ADR 0024) |
