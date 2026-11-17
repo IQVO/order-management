@@ -125,7 +125,7 @@ status — it reads `Allocated` until `ReleaseHeldOrder` runs (ADR 0020).
 | Only an `Allocated` line can be released, reconfirmed or lose its reservation | `Order.Release`, `Order.ReconfirmReservation`, `Order.LoseReservation` | `order.ErrLineNotAllocated` |
 | Only a `Released` line can ship; a `Shipped` line is terminal, and an order with no `Released` or `Shipped` line is not shippable (ADR 0051) | `Order.Ship`, `Order.ShipAll` | `order.ErrLineNotReleased`, `order.ErrOrderNotShippable` |
 | **BR3** — a ship-complete order releases nothing while any line is unallocated | `Order.EnsureReleasable` | `order.ErrShipCompleteBlocked` |
-| **BR6** — no cancellation once any line is `Released` | `Order.EnsureCancellable`, `Order.Cancel` | `order.ErrOrderAlreadyReleased` |
+| **BR6** — no cancellation once any line is `Released` or `Shipped` | `Order.EnsureCancellable`, `Order.Cancel` | `order.ErrOrderAlreadyReleased` |
 | A held order must be ship-complete (ADR 0020) | `order.ValidateIntakeIntent` | `order.ErrHeldOrderMustBeShipComplete` |
 | Order `Status` is derived from lines, never stored | `Order.Status()` (no backing field) | — |
 | The promise summary always describes the group with the latest cutoff | `Order.SetPromiseGroups` | — |
