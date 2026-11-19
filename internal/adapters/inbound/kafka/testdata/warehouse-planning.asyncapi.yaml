@@ -2,7 +2,7 @@ asyncapi: 2.6.0
 
 info:
   title: warehouse-planning Domain Events
-  version: "0.7.0"
+  version: "0.8.0"
   contact:
     name: warehouse-planning maintainers
     url: https://github.com/IQVO/warehouse-planning
@@ -29,6 +29,18 @@ info:
     constraint, or both); a registration the effective rate does not notice
     raises nothing. ProcessCapacity events are integration-stream only: the
     analytics fanout carries plan facts only (ADR 0005).
+
+    **Published (ADR 0023).** The workload forecast and the shift labour plan
+    moved here from wes-work-planning. `WorkloadForecastReceived` (entity
+    `workloadforecast`, key `site_id/path_id`) is raised by every receipt that
+    changed a forecast; `LabourPlanCommitted` (entity `labourplan`, key
+    `site_id/shift_id/path_id`) by every commit that changed a labour plan,
+    carrying every field of the plan (workforce-management keeps a copy and
+    applies a message only when its `version` is greater than the stored
+    one); `LabourPlanDriftDetected` (same entity and key) when the heads
+    workforce-management committed differ from the plan's and the drift is
+    new. A PUT that changes nothing raises nothing. All three are written to
+    BOTH topics through the same outbox, with the same payload on each.
 
     **Consumed (Phase 3).** `ShiftPlanCommitted` (workforce-management) and
     `LocationSlotRegistered`/`LocationSlotDecommissioned` (facility-layout) keep
@@ -78,6 +90,9 @@ info:
     (two outbox rows per event, one per topic), as CloudEvents 1.0 with the
     SAME `type` and the SAME `id` per occurrence but
     `dataschema=urn:warehouse:warehouse-planning:analytics:<EventName>:v1`.
+    The three ADR 0023 events get the same analytics copy, with the
+    integration payload unchanged; the projector does not project them yet
+    (it acknowledges and ignores them).
     The integration messages are byte-identical to what they were before the
     stream existed. The analytics payloads are the integration payloads plus
     additive, analytics-only fields: today `binding_constraint` on
@@ -103,11 +118,14 @@ info:
 
     **Type naming.** `com.warehouse.wes.warehouse-planning.<entity>.<EventName>`
     where `<entity>` is the aggregate that raised the event, lowercase, no
-    separators -- `capacityplan` or `processcapacity`. **dataschema** =
+    separators -- `capacityplan`, `processcapacity`, `workloadforecast` or
+    `labourplan`. **dataschema** =
     `urn:warehouse:warehouse-planning:events:<EventName>:v1`. **subject** and
-    the Kafka message key = the aggregate's id: the capacity plan id, or
+    the Kafka message key = the aggregate's id: the capacity plan id,
     `<processType>/<location>/<windowStart>/<windowEnd>` for a
-    ProcessCapacity (one aggregate's events stay ordered on one partition).
+    ProcessCapacity, `<site_id>/<path_id>` for a WorkloadForecast, or
+    `<site_id>/<shift_id>/<path_id>` for a LabourPlan (one aggregate's events
+    stay ordered on one partition).
     A breaking payload change gets a new `.v2` type and dataschema, never a
     mutation.
 
@@ -129,6 +147,10 @@ tags:
     description: Events raised by the CapacityPlan aggregate (published, Phase 4).
   - name: process-capacity
     description: Events raised by the ProcessCapacity aggregate on constraint registration (published).
+  - name: workload-forecast
+    description: Events raised by the WorkloadForecast aggregate (published, ADR 0023).
+  - name: labour-plan
+    description: Events raised by the LabourPlan aggregate and its drift check (published, ADR 0023).
   - name: consumed
     description: Events produced by sibling contexts that this service consumes (Phase 3).
   - name: analytics
@@ -139,24 +161,31 @@ channels:
     description: |
       This service's integration topic (`Topic` in
       `internal/adapters/outbound/kafka/encoder.go`). Written by the outbox
-      relay; key = the raising aggregate's id (plan id, or
-      processType/location/window for a ProcessCapacity); every message
+      relay; key = the raising aggregate's id (plan id,
+      processType/location/window for a ProcessCapacity, site_id/path_id for a
+      WorkloadForecast, site_id/shift_id/path_id for a LabourPlan); every message
       carries the `content-type: application/cloudevents+json; charset=UTF-8`
       header (plus the optional W3C `traceparent` of the writing request,
       ADR 0014). Dispatch on the full `type`, ignore unknown types, dedupe
       on `id`.
     subscribe:
       operationId: receiveWarehousePlanningEvents
-      summary: Receive CapacityPlan and ProcessCapacity events.
+      summary: Receive CapacityPlan, ProcessCapacity, WorkloadForecast and LabourPlan events.
       description: |
         Subscribe to this service's event stream. Route on the full `type`:
         `com.warehouse.wes.warehouse-planning.capacityplan.<EventName>` for
         CapacityPlan events,
         `com.warehouse.wes.warehouse-planning.processcapacity.<EventName>`
-        for ProcessCapacity events.
+        for ProcessCapacity events,
+        `com.warehouse.wes.warehouse-planning.workloadforecast.<EventName>`
+        for WorkloadForecast events and
+        `com.warehouse.wes.warehouse-planning.labourplan.<EventName>` for
+        LabourPlan events.
       tags:
         - name: capacity-plan
         - name: process-capacity
+        - name: workload-forecast
+        - name: labour-plan
       message:
         oneOf:
           - $ref: "#/components/messages/CapacityPlanCreated"
@@ -165,13 +194,17 @@ channels:
           - $ref: "#/components/messages/BottleneckDetected"
           - $ref: "#/components/messages/ProcessCapacityRegistered"
           - $ref: "#/components/messages/ProcessCapacityChanged"
+          - $ref: "#/components/messages/WorkloadForecastReceived"
+          - $ref: "#/components/messages/LabourPlanCommitted"
+          - $ref: "#/components/messages/LabourPlanDriftDetected"
 
   warehouse.warehouse-planning.analytics:
     description: |
       This service's analytics topic (`AnalyticsTopic` in
       `internal/adapters/outbound/kafka/analytics_encoder.go`; ADR 0005). Written by
       the SAME outbox relay, from rows inserted in the same transaction as the
-      integration rows; key = capacity plan id. Consumed ONLY by this service's
+      integration rows; key = the raising aggregate's id, as on the integration
+      topic. Consumed ONLY by this service's
       `planning-projector` under a fixed consumer group read from env
       `ANALYTICS_CONSUMER_GROUP` (at-least-once; the offset is committed after the
       projection and the dedupe mark committed together in the analytical database).
@@ -182,10 +215,12 @@ channels:
       integration topic.
     subscribe:
       operationId: receiveCapacityPlanAnalyticsEvents
-      summary: Receive the CapacityPlan analytics events.
+      summary: Receive the CapacityPlan, WorkloadForecast and LabourPlan analytics events.
       description: |
         Route on the full `type`; the payloads are the integration payloads plus
-        the additive analytics-only fields documented per message.
+        the additive analytics-only fields documented per message (none on the
+        WorkloadForecast and LabourPlan copies). The projector folds the four
+        CapacityPlan types and acknowledges every other type unprojected.
       tags:
         - name: analytics
       message:
@@ -194,6 +229,9 @@ channels:
           - $ref: "#/components/messages/CapacityPlanPublishedAnalytics"
           - $ref: "#/components/messages/CapacityShortageDetectedAnalytics"
           - $ref: "#/components/messages/BottleneckDetectedAnalytics"
+          - $ref: "#/components/messages/WorkloadForecastReceivedAnalytics"
+          - $ref: "#/components/messages/LabourPlanCommittedAnalytics"
+          - $ref: "#/components/messages/LabourPlanDriftDetectedAnalytics"
 
   warehouse.workforce.events:
     description: |
@@ -783,6 +821,258 @@ components:
               window_end: "2026-10-05T16:00:00Z"
               bottleneck_step: "REBIN"
               path_capacity: 1000
+
+    WorkloadForecastReceived:
+      x-no-consumer-reason: "pending: new requirement fact (ADR 0023); no context consumes the forecast yet"
+      name: WorkloadForecastReceived
+      title: Workload forecast received
+      summary: A receipt replaced the CPT buckets of a (site, path) workload forecast.
+      description: |
+        Raised by the `WorkloadForecast` aggregate on `PUT /workload-forecasts/{site_id}/{path_id}`
+        when the receipt changed the buckets (a receipt equal to the stored one raises nothing),
+        and queued in the transactional outbox in the same transaction as the forecast. It
+        carries the totals, not the buckets. `type` =
+        `com.warehouse.wes.warehouse-planning.workloadforecast.WorkloadForecastReceived`;
+        `subject` and Kafka key = `<site_id>/<path_id>`. A superset of wes-work-planning's
+        retired `ChargeForecastReceived` (ADR 0023 decision 1).
+      contentType: application/cloudevents+json
+      tags:
+        - name: workload-forecast
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/WorkloadForecastReceivedEvent"
+      examples:
+        - name: threeBuckets
+          summary: The second receipt for SIM1's pick path, 12000 units over three CPT buckets.
+          payload:
+            specversion: "1.0"
+            id: "1c9d8e7f-6a5b-4c3d-9e2f-1a0b9c8d7e6f"
+            source: "/warehouse/warehouse-planning"
+            type: "com.warehouse.wes.warehouse-planning.workloadforecast.WorkloadForecastReceived"
+            subject: "SIM1/pick"
+            time: "2026-10-04T21:45:10Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:warehouse-planning:events:WorkloadForecastReceived:v1"
+            data:
+              site_id: "SIM1"
+              path_id: "pick"
+              total_quantity: 12000
+              bucket_count: 3
+              received_at: "2026-10-04T21:45:10Z"
+              version: 2
+
+    LabourPlanCommitted:
+      name: LabourPlanCommitted
+      title: Labour plan committed
+      summary: The heads a process path needs for one shift at one site were committed or revised.
+      description: |
+        Raised by the `LabourPlan` aggregate on `PUT /labour-plans/{site_id}/{shift_id}/{path_id}`
+        when the commit created or changed the plan (a PUT that changes nothing raises nothing
+        and keeps the version), queued in the transactional outbox in the same transaction as
+        the plan. Carries every field of the plan. `planned_heads` is the caller's
+        (`heads_source` `request`) or derived from the stored workload forecast as
+        `ceil(units due in [shift_start, shift_start + hours) / (rate_units_per_hour x hours))`
+        (`heads_source` `forecast`). `shift_start` is OMITTED (not null) when the plan has none.
+        workforce-management keeps a copy (its ADR 0043) and applies a message only when its
+        `version` is greater than the stored one. `type` =
+        `com.warehouse.wes.warehouse-planning.labourplan.LabourPlanCommitted`; `subject` and
+        Kafka key = `<site_id>/<shift_id>/<path_id>` (ADR 0023 decision 2).
+      contentType: application/cloudevents+json
+      tags:
+        - name: labour-plan
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/LabourPlanCommittedEvent"
+      examples:
+        - name: derivedFromTheForecast
+          summary: "15 heads derived from the forecast: ceil(12000 / (112.5 x 7.5)), shift starting 08:00Z."
+          payload:
+            specversion: "1.0"
+            id: "2b3c4d5e-6f70-4a81-9b2c-3d4e5f607182"
+            source: "/warehouse/warehouse-planning"
+            type: "com.warehouse.wes.warehouse-planning.labourplan.LabourPlanCommitted"
+            subject: "SIM1/SHIFT-AM/pick"
+            time: "2026-10-04T21:45:10Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:warehouse-planning:events:LabourPlanCommitted:v1"
+            data:
+              site_id: "SIM1"
+              shift_id: "SHIFT-AM"
+              path_id: "pick"
+              planned_heads: 15
+              rate_units_per_hour: 112.5
+              hours: 7.5
+              installed_stations: 16
+              shift_start: "2026-10-05T08:00:00Z"
+              heads_source: "forecast"
+              version: 3
+        - name: requestedWithoutShiftStart
+          summary: 12 heads sent by the caller, no shift start (shift_start absent).
+          payload:
+            specversion: "1.0"
+            id: "8e7d6c5b-4a39-4281-a7f6-e5d4c3b2a190"
+            source: "/warehouse/warehouse-planning"
+            type: "com.warehouse.wes.warehouse-planning.labourplan.LabourPlanCommitted"
+            subject: "SIM1/SHIFT-AM/pick"
+            time: "2026-10-04T21:45:10Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:warehouse-planning:events:LabourPlanCommitted:v1"
+            data:
+              site_id: "SIM1"
+              shift_id: "SHIFT-AM"
+              path_id: "pick"
+              planned_heads: 12
+              rate_units_per_hour: 112.5
+              hours: 7.5
+              installed_stations: 16
+              heads_source: "request"
+              version: 1
+
+    LabourPlanDriftDetected:
+      x-no-consumer-reason: "pending: new requirement fact (ADR 0023 decision 3); surfaced to planners, no consumer yet"
+      name: LabourPlanDriftDetected
+      title: Labour plan drift detected
+      summary: The heads workforce-management committed for a (site, shift, path) differ from the labour plan.
+      description: |
+        Raised when the committed heads (workforce-management's `ShiftPlanCommitted`) differ
+        from the labour plan's `planned_heads` for the same `(site_id, shift_id, path_id)` and
+        the drift is new: non-zero and different from the last drift recorded for that key. It
+        never corrects either side. `drift_heads` = `committed_heads - planned_heads` (positive
+        when workforce committed more heads than the plan requires). `type` =
+        `com.warehouse.wes.warehouse-planning.labourplan.LabourPlanDriftDetected`; `subject` and
+        Kafka key = `<site_id>/<shift_id>/<path_id>` (ADR 0023 decision 3).
+      contentType: application/cloudevents+json
+      tags:
+        - name: labour-plan
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/LabourPlanDriftDetectedEvent"
+      examples:
+        - name: threeHeadsShort
+          summary: Workforce committed 12 heads against a plan of 15.
+          payload:
+            specversion: "1.0"
+            id: "5f4e3d2c-1b0a-4987-8a6b-5c4d3e2f1a09"
+            source: "/warehouse/warehouse-planning"
+            type: "com.warehouse.wes.warehouse-planning.labourplan.LabourPlanDriftDetected"
+            subject: "SIM1/SHIFT-AM/pick"
+            time: "2026-10-04T21:45:10Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:warehouse-planning:events:LabourPlanDriftDetected:v1"
+            data:
+              site_id: "SIM1"
+              shift_id: "SHIFT-AM"
+              path_id: "pick"
+              planned_heads: 15
+              committed_heads: 12
+              drift_heads: -3
+
+    WorkloadForecastReceivedAnalytics:
+      x-no-consumer-reason: "analytics twin: this service's own projector acknowledges it unprojected (ADR 0023)"
+      name: WorkloadForecastReceivedAnalytics
+      title: Workload forecast received (analytics stream)
+      summary: The analytics copy of WorkloadForecastReceived.
+      description: |
+        Same `type`, same `id`, same payload as the integration WorkloadForecastReceived; only
+        `dataschema` differs (`urn:warehouse:warehouse-planning:analytics:WorkloadForecastReceived:v1`).
+        The projector acknowledges it without projecting it.
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/WorkloadForecastReceivedAnalyticsEvent"
+      examples:
+        - name: threeBuckets
+          summary: Same example as the integration message, analytics dataschema.
+          payload:
+            specversion: "1.0"
+            id: "1c9d8e7f-6a5b-4c3d-9e2f-1a0b9c8d7e6f"
+            source: "/warehouse/warehouse-planning"
+            type: "com.warehouse.wes.warehouse-planning.workloadforecast.WorkloadForecastReceived"
+            subject: "SIM1/pick"
+            time: "2026-10-04T21:45:10Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:warehouse-planning:analytics:WorkloadForecastReceived:v1"
+            data:
+              site_id: "SIM1"
+              path_id: "pick"
+              total_quantity: 12000
+              bucket_count: 3
+              received_at: "2026-10-04T21:45:10Z"
+              version: 2
+
+    LabourPlanCommittedAnalytics:
+      x-no-consumer-reason: "analytics twin: this service's own projector acknowledges it unprojected (ADR 0023)"
+      name: LabourPlanCommittedAnalytics
+      title: Labour plan committed (analytics stream)
+      summary: The analytics copy of LabourPlanCommitted.
+      description: |
+        Same `type`, same `id`, same payload as the integration LabourPlanCommitted (with
+        `shift_start` omitted when the plan has none); only `dataschema` differs
+        (`urn:warehouse:warehouse-planning:analytics:LabourPlanCommitted:v1`). The projector
+        acknowledges it without projecting it.
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/LabourPlanCommittedAnalyticsEvent"
+      examples:
+        - name: derivedFromTheForecast
+          summary: Same example as the integration message, analytics dataschema.
+          payload:
+            specversion: "1.0"
+            id: "2b3c4d5e-6f70-4a81-9b2c-3d4e5f607182"
+            source: "/warehouse/warehouse-planning"
+            type: "com.warehouse.wes.warehouse-planning.labourplan.LabourPlanCommitted"
+            subject: "SIM1/SHIFT-AM/pick"
+            time: "2026-10-04T21:45:10Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:warehouse-planning:analytics:LabourPlanCommitted:v1"
+            data:
+              site_id: "SIM1"
+              shift_id: "SHIFT-AM"
+              path_id: "pick"
+              planned_heads: 15
+              rate_units_per_hour: 112.5
+              hours: 7.5
+              installed_stations: 16
+              shift_start: "2026-10-05T08:00:00Z"
+              heads_source: "forecast"
+              version: 3
+
+    LabourPlanDriftDetectedAnalytics:
+      x-no-consumer-reason: "analytics twin: this service's own projector acknowledges it unprojected (ADR 0023)"
+      name: LabourPlanDriftDetectedAnalytics
+      title: Labour plan drift detected (analytics stream)
+      summary: The analytics copy of LabourPlanDriftDetected.
+      description: |
+        Same `type`, same `id`, same payload as the integration LabourPlanDriftDetected; only
+        `dataschema` differs (`urn:warehouse:warehouse-planning:analytics:LabourPlanDriftDetected:v1`).
+        The projector acknowledges it without projecting it.
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/LabourPlanDriftDetectedAnalyticsEvent"
+      examples:
+        - name: threeHeadsShort
+          summary: Same example as the integration message, analytics dataschema.
+          payload:
+            specversion: "1.0"
+            id: "5f4e3d2c-1b0a-4987-8a6b-5c4d3e2f1a09"
+            source: "/warehouse/warehouse-planning"
+            type: "com.warehouse.wes.warehouse-planning.labourplan.LabourPlanDriftDetected"
+            subject: "SIM1/SHIFT-AM/pick"
+            time: "2026-10-04T21:45:10Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:warehouse-planning:analytics:LabourPlanDriftDetected:v1"
+            data:
+              site_id: "SIM1"
+              shift_id: "SHIFT-AM"
+              path_id: "pick"
+              planned_heads: 15
+              committed_heads: 12
+              drift_heads: -3
 
     ShiftPlanCommitted:
       name: ShiftPlanCommitted
@@ -1774,6 +2064,206 @@ components:
               const: "urn:warehouse:warehouse-planning:events:BottleneckDetected:v1"
             data:
               $ref: "#/components/schemas/BottleneckDetectedData"
+    WorkloadForecastReceivedData:
+      type: object
+      description: Payload of WorkloadForecastReceived (the same on the integration and the analytics topic).
+      required: [site_id, path_id, total_quantity, bucket_count, received_at, version]
+      properties:
+        site_id:
+          type: string
+          description: Canonical facility-layout site code the forecast is for (ADR 0012).
+          example: "SIM1"
+        path_id:
+          type: string
+          description: The process path the volume is due on.
+          example: "pick"
+        total_quantity:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Sum of every CPT bucket's quantity, in units.
+          example: 12000
+        bucket_count:
+          type: integer
+          minimum: 1
+          description: Number of CPT buckets in the receipt (at least one).
+          example: 3
+        received_at:
+          type: string
+          format: date-time
+          description: When the current buckets were received (RFC 3339, UTC); also the CloudEvents time.
+          example: "2026-10-04T21:45:10Z"
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+          description: The forecast version; starts at 1, +1 per receipt that changed the buckets.
+          example: 2
+    LabourPlanCommittedData:
+      type: object
+      description: >-
+        Payload of LabourPlanCommitted (the same on the integration and the analytics topic):
+        every field of the labour plan. shift_start is optional and OMITTED (never null) when
+        the plan has none.
+      required:
+        - site_id
+        - shift_id
+        - path_id
+        - planned_heads
+        - rate_units_per_hour
+        - hours
+        - installed_stations
+        - heads_source
+        - version
+      properties:
+        site_id:
+          type: string
+          description: Canonical facility-layout site code.
+          example: "SIM1"
+        shift_id:
+          type: string
+          description: The shift the plan is for.
+          example: "SHIFT-AM"
+        path_id:
+          type: string
+          description: The process path the heads are planned on.
+          example: "pick"
+        planned_heads:
+          type: integer
+          minimum: 0
+          description: Heads the path needs for the shift; never above installed_stations.
+          example: 15
+        rate_units_per_hour:
+          type: number
+          format: double
+          exclusiveMinimum: 0
+          description: Planned rate per head, units per hour.
+          example: 112.5
+        hours:
+          type: number
+          format: double
+          exclusiveMinimum: 0
+          description: Planned hours of the shift.
+          example: 7.5
+        installed_stations:
+          type: integer
+          minimum: 0
+          description: Caller-supplied station count of the path.
+          example: 16
+        shift_start:
+          type: string
+          format: date-time
+          description: Optional shift start (RFC 3339, UTC); absent when the plan has none.
+          example: "2026-10-05T08:00:00Z"
+        heads_source:
+          type: string
+          enum: [request, forecast]
+          description: request = the caller sent planned_heads; forecast = derived from the stored workload forecast.
+          example: "forecast"
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+          description: The plan version; starts at 1, +1 per commit that changed the plan. Apply only a greater one.
+          example: 3
+    LabourPlanDriftDetectedData:
+      type: object
+      description: Payload of LabourPlanDriftDetected (the same on the integration and the analytics topic).
+      required: [site_id, shift_id, path_id, planned_heads, committed_heads, drift_heads]
+      properties:
+        site_id:
+          type: string
+          example: "SIM1"
+        shift_id:
+          type: string
+          example: "SHIFT-AM"
+        path_id:
+          type: string
+          example: "pick"
+        planned_heads:
+          type: integer
+          description: The labour plan's planned heads.
+          example: 15
+        committed_heads:
+          type: integer
+          description: The heads workforce-management committed for the same (site, shift, path).
+          example: 12
+        drift_heads:
+          type: integer
+          description: committed_heads - planned_heads; never 0 (a zero drift raises nothing).
+          example: -3
+    WorkloadForecastReceivedEvent:
+      description: CloudEvents 1.0 envelope of WorkloadForecastReceived.
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.warehouse-planning.workloadforecast.WorkloadForecastReceived"
+            dataschema:
+              const: "urn:warehouse:warehouse-planning:events:WorkloadForecastReceived:v1"
+            data:
+              $ref: "#/components/schemas/WorkloadForecastReceivedData"
+    LabourPlanCommittedEvent:
+      description: CloudEvents 1.0 envelope of LabourPlanCommitted.
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.warehouse-planning.labourplan.LabourPlanCommitted"
+            dataschema:
+              const: "urn:warehouse:warehouse-planning:events:LabourPlanCommitted:v1"
+            data:
+              $ref: "#/components/schemas/LabourPlanCommittedData"
+    LabourPlanDriftDetectedEvent:
+      description: CloudEvents 1.0 envelope of LabourPlanDriftDetected.
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.warehouse-planning.labourplan.LabourPlanDriftDetected"
+            dataschema:
+              const: "urn:warehouse:warehouse-planning:events:LabourPlanDriftDetected:v1"
+            data:
+              $ref: "#/components/schemas/LabourPlanDriftDetectedData"
+    WorkloadForecastReceivedAnalyticsEvent:
+      description: CloudEvents 1.0 envelope of WorkloadForecastReceived on the analytics topic.
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.warehouse-planning.workloadforecast.WorkloadForecastReceived"
+            dataschema:
+              const: "urn:warehouse:warehouse-planning:analytics:WorkloadForecastReceived:v1"
+            data:
+              $ref: "#/components/schemas/WorkloadForecastReceivedData"
+    LabourPlanCommittedAnalyticsEvent:
+      description: CloudEvents 1.0 envelope of LabourPlanCommitted on the analytics topic.
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.warehouse-planning.labourplan.LabourPlanCommitted"
+            dataschema:
+              const: "urn:warehouse:warehouse-planning:analytics:LabourPlanCommitted:v1"
+            data:
+              $ref: "#/components/schemas/LabourPlanCommittedData"
+    LabourPlanDriftDetectedAnalyticsEvent:
+      description: CloudEvents 1.0 envelope of LabourPlanDriftDetected on the analytics topic.
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.warehouse-planning.labourplan.LabourPlanDriftDetected"
+            dataschema:
+              const: "urn:warehouse:warehouse-planning:analytics:LabourPlanDriftDetected:v1"
+            data:
+              $ref: "#/components/schemas/LabourPlanDriftDetectedData"
     ShiftPlanCommittedData:
       type: object
       description: >-
