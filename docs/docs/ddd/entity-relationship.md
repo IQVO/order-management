@@ -69,7 +69,8 @@ erDiagram
     DOUBLE_PRECISION capacity_over_window
     DOUBLE_PRECISION shortage "check gte 0"
     TEXT bottleneck_step
-    TEXT status "DRAFT or PUBLISHED"
+    TEXT status "DRAFT, PUBLISHED or SUPERSEDED"
+    TEXT superseded_by "nullable, set when SUPERSEDED"
     TIMESTAMPTZ event_time
     TIMESTAMPTZ updated_at
   }

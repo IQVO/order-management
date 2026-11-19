@@ -217,9 +217,11 @@ dead-lettered to `warehouse.fulfillment.events.dlq`.
 
 Runs only when `PLANNED_CAPACITY_CONSUMER_GROUP` is set
 ([ADR 0031](/docs/adr/0031-consume-warehouse-planning-capacity-plans)).
-`PlannedCapacityConsumer` maps `CapacityPlanCreated` to a `DRAFT` window
-and `CapacityPlanPublished`/`CapacityShortageDetected` to a `PUBLISHED`
-one; the use case validates the window, claims the event id
+`PlannedCapacityConsumer` maps `CapacityPlanCreated` to a `DRAFT` window,
+`CapacityPlanPublished`/`CapacityShortageDetected` to a `PUBLISHED`
+one and `CapacityPlanSuperseded` to a terminal `SUPERSEDED` one that never
+constrains an order ([ADR 0052](/docs/adr/0052-consume-capacity-plan-superseded));
+the use case validates the window, claims the event id
 (`ports.PlannedCapacityProcessedEvents`) and upserts it into
 `planned_capacity_windows` (last writer wins, a DRAFT never overwrites a
 PUBLISHED plan). No order changes and no event is raised.

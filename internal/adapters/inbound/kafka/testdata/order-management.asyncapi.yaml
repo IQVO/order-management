@@ -275,11 +275,16 @@ channels:
       description: >-
         Dispatch is on the FULL CloudEvents type. CapacityPlanCreated
         stores a DRAFT row; CapacityPlanPublished and
-        CapacityShortageDetected store a PUBLISHED row; BottleneckDetected
+        CapacityShortageDetected store a PUBLISHED row;
+        CapacityPlanSuperseded moves the older plan's row to a terminal
+        SUPERSEDED status that never influences an order, or inserts a
+        SUPERSEDED tombstone for a plan never seen (ADR 0052);
+        BottleneckDetected
         is recognised and ignored (its bottleneck_step is already carried by
         CapacityShortageDetected). The row is keyed by plan id with
         last-writer-wins on the CloudEvents `time` (a DRAFT never replaces a
-        PUBLISHED row). The idempotency claim on the CloudEvents `id` and
+        PUBLISHED row; nothing replaces a SUPERSEDED row, and SUPERSEDED
+        replaces any other status regardless of time). The idempotency claim on the CloudEvents `id` and
         the upsert commit in ONE database transaction; the Kafka offset is
         committed only afterwards. Only a PUBLISHED plan with `shortage > 0`
         ever influences an order (ADR 0031). These contracts are
@@ -293,6 +298,7 @@ channels:
           - $ref: "#/components/messages/CapacityPlanPublishedInbound"
           - $ref: "#/components/messages/CapacityShortageDetectedInbound"
           - $ref: "#/components/messages/BottleneckDetectedInbound"
+          - $ref: "#/components/messages/CapacityPlanSupersededInbound"
 
   warehouse.product-master.events:
     description: >-
@@ -1537,6 +1543,25 @@ components:
               data:
                 $ref: "#/components/schemas/BottleneckData"
 
+    CapacityPlanSupersededInbound:
+      name: CapacityPlanSuperseded
+      title: CapacityPlanSuperseded (inbound, warehouse-planning)
+      summary: "A newer plan of the same window replaced this one (stored as a terminal SUPERSEDED row that never influences an order; ADR 0052)."
+      tags:
+        - name: order-management
+      traits:
+        - $ref: "#/components/messageTraits/CloudEventsStructured"
+      payload:
+        allOf:
+          - $ref: "#/components/schemas/CloudEvent"
+          - type: object
+            properties:
+              source: { const: /warehouse/warehouse-planning }
+              type: { const: com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanSuperseded }
+              dataschema: { const: "urn:warehouse:warehouse-planning:events:CapacityPlanSuperseded:v1" }
+              data:
+                $ref: "#/components/schemas/CapacityPlanSupersededData"
+
     ProductClassifiedInbound:
       name: ProductClassified
       title: ProductClassified (inbound, product-master)
@@ -2146,6 +2171,25 @@ components:
         plan_id: { type: string }
         bottleneck_step: { type: string }
         path_capacity: { type: number, format: double }
+    CapacityPlanSupersededData:
+      type: object
+      description: >-
+        warehouse-planning's CapacityPlanSuperseded payload (its ADR 0024
+        decision 3; order-management ADR 0052). plan_id is the OLDER plan
+        and equals the CloudEvents subject; superseded_by is the newer
+        plan. It carries no warehouse or quantities. The optional location
+        (the same field the plan's other events carry) becomes a tombstone
+        row's location, else site_id does; on a known row every stored fact
+        is kept. window_end is exclusive.
+      required: [plan_id, superseded_by, site_id, window_start, window_end]
+      properties:
+        plan_id: { type: string, description: "The superseded (older) CapacityPlan id; equals the CloudEvents subject." }
+        superseded_by: { type: string, description: "The newer CapacityPlan id; never equal to plan_id." }
+        site_id: { type: string, description: "Site/building code, e.g. SIM1." }
+        location: { type: string, description: "Optional. The plan's location, as on CapacityPlanCreated/Published; preferred over site_id for the row." }
+        path_id: { type: string }
+        window_start: { type: string, format: date-time }
+        window_end: { type: string, format: date-time }
     ProductClassifiedData:
       type: object
       description: >-

@@ -111,6 +111,7 @@ Typos, broken links and formatting are of course fair game.
 | [0049](./0049-agent-authority-levels-and-complete-mcp-surface.md) | Agent authority levels and the complete MCP surface | Accepted; extends 0010 and 0046 |
 | [0050](./0050-allocation-events-carry-the-orders-fulfillment-site.md) | OrderAllocated/OrderPartiallyAllocated carry the order's fulfillment site | Accepted; additively supersedes 0044 §7's freeze |
 | [0051](./0051-consume-shipment-confirmed-and-package-missedload.md) | Consume ShipmentConfirmed/PackageMissedLoad: the Order ships | Accepted |
+| [0052](./0052-consume-capacity-plan-superseded.md) | Consume CapacityPlanSuperseded: a superseded plan stops constraining orders | Accepted; extends 0031 §1 and §2 |
 
 Each of these reconstructs a decision that is actually visible in this
 repository's `CLAUDE.md` and code — none is a generic placeholder.

@@ -163,6 +163,7 @@ type plannedCapacityWindowResponse struct {
 	Shortage           float64 `json:"shortage"`
 	BottleneckStep     string  `json:"bottleneckStep,omitempty"`
 	Status             string  `json:"status"`
+	SupersededBy       string  `json:"supersededBy,omitempty"`
 	AsOf               string  `json:"asOf"`
 }
 

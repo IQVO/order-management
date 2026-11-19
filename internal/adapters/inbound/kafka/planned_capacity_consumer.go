@@ -54,6 +54,9 @@ const (
 	ceTypeCapacityPlanPublished    = "com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanPublished"
 	ceTypeCapacityShortageDetected = "com.warehouse.wes.warehouse-planning.capacityplan.CapacityShortageDetected"
 	ceTypeBottleneckDetected       = "com.warehouse.wes.warehouse-planning.capacityplan.BottleneckDetected"
+	// ceTypeCapacityPlanSuperseded: a newer plan of the same window replaced
+	// plan_id (warehouse-planning ADR 0024 decision 3; order-management ADR 0052).
+	ceTypeCapacityPlanSuperseded = "com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanSuperseded"
 )
 
 const plannedCapacityConsumeSpanNameFmt = "kafka.consume %s"
@@ -72,6 +75,20 @@ type capacityPlanData struct {
 	CapacityOverWindow float64   `json:"capacity_over_window"`
 	Shortage           float64   `json:"shortage"`
 	BottleneckStep     string    `json:"bottleneck_step"`
+}
+
+// capacityPlanSupersededData is the CapacityPlanSuperseded payload (ADR
+// 0052): plan_id is the OLDER plan, superseded_by the newer one. It
+// carries no quantities; site_id is the site, and the optional location
+// is the same location the plan's other events carry.
+type capacityPlanSupersededData struct {
+	PlanID       string    `json:"plan_id"`
+	SupersededBy string    `json:"superseded_by"`
+	SiteID       string    `json:"site_id"`
+	Location     string    `json:"location"`
+	PathID       string    `json:"path_id"`
+	WindowStart  time.Time `json:"window_start"`
+	WindowEnd    time.Time `json:"window_end"`
 }
 
 // PlannedCapacityConsumer consumes PlanningEventsTopic and drives
@@ -198,6 +215,8 @@ func planningRequestFrom(e ce.Event) (usecases.ApplyPlannedCapacityRequest, bool
 		status = order.PlannedCapacityDraft
 	case ceTypeCapacityPlanPublished, ceTypeCapacityShortageDetected:
 		status = order.PlannedCapacityPublished
+	case ceTypeCapacityPlanSuperseded:
+		return supersededRequestFrom(e)
 	default:
 		// Includes ceTypeBottleneckDetected: its payload (bottleneck_step,
 		// path_capacity) is already carried by CapacityShortageDetected.
@@ -208,9 +227,8 @@ func planningRequestFrom(e ce.Event) (usecases.ApplyPlannedCapacityRequest, bool
 	if err := e.DataAs(&data); err != nil {
 		return usecases.ApplyPlannedCapacityRequest{}, false, fmt.Errorf("decode %s data: %w", e.Type(), err)
 	}
-	if e.Subject() != "" && data.PlanID != "" && e.Subject() != data.PlanID {
-		return usecases.ApplyPlannedCapacityRequest{}, false,
-			fmt.Errorf("%s: subject %q does not match data.plan_id %q", e.Type(), e.Subject(), data.PlanID)
+	if err := subjectMatchesPlan(e, data.PlanID); err != nil {
+		return usecases.ApplyPlannedCapacityRequest{}, false, err
 	}
 	w := order.PlannedCapacityWindow{
 		PlanID: data.PlanID, WarehouseID: data.WarehouseID, Location: data.Location, PathID: data.PathID,
@@ -219,6 +237,48 @@ func planningRequestFrom(e ce.Event) (usecases.ApplyPlannedCapacityRequest, bool
 		Shortage: data.Shortage, BottleneckStep: data.BottleneckStep,
 		Status: status, AsOf: e.Time().UTC(),
 	}
+	return validRequest(e, w)
+}
+
+// supersededRequestFrom maps a CapacityPlanSuperseded to a SUPERSEDED
+// write (ADR 0052). The row's location is the event's location when it
+// carries one (the same field CapacityPlanCreated/Published carry, so a
+// tombstone is listed where the plan's own rows would be), else its
+// site_id. On a known row the domain keeps the stored facts
+// (order.PlannedCapacityWindow.ReplacementOf).
+func supersededRequestFrom(e ce.Event) (usecases.ApplyPlannedCapacityRequest, bool, error) {
+	var data capacityPlanSupersededData
+	if err := e.DataAs(&data); err != nil {
+		return usecases.ApplyPlannedCapacityRequest{}, false, fmt.Errorf("decode %s data: %w", e.Type(), err)
+	}
+	if err := subjectMatchesPlan(e, data.PlanID); err != nil {
+		return usecases.ApplyPlannedCapacityRequest{}, false, err
+	}
+	location := data.Location
+	if location == "" {
+		location = data.SiteID
+	}
+	w := order.PlannedCapacityWindow{
+		PlanID: data.PlanID, Location: location, PathID: data.PathID,
+		Start: data.WindowStart.UTC(), End: data.WindowEnd.UTC(),
+		Status: order.PlannedCapacitySuperseded, SupersededBy: data.SupersededBy,
+		AsOf: e.Time().UTC(),
+	}
+	return validRequest(e, w)
+}
+
+// subjectMatchesPlan rejects an event whose CloudEvents subject names a
+// different plan than its data (key and subject = the plan id).
+func subjectMatchesPlan(e ce.Event, planID string) error {
+	if e.Subject() != "" && planID != "" && e.Subject() != planID {
+		return fmt.Errorf("%s: subject %q does not match data.plan_id %q", e.Type(), e.Subject(), planID)
+	}
+	return nil
+}
+
+// validRequest validates w (deterministic: an invalid window is
+// dead-lettered) and wraps it with the CloudEvents id.
+func validRequest(e ce.Event, w order.PlannedCapacityWindow) (usecases.ApplyPlannedCapacityRequest, bool, error) {
 	if err := w.Validate(); err != nil {
 		return usecases.ApplyPlannedCapacityRequest{}, false, err
 	}

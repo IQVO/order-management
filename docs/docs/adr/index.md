@@ -68,3 +68,4 @@ new record.
 | [0049](./0049-agent-authority-levels-and-complete-mcp-surface.md) | Agent authority levels and complete MCP surface | Accepted |
 | [0050](./0050-allocation-events-carry-the-orders-fulfillment-site.md) | OrderAllocated/OrderPartiallyAllocated carry the order's fulfillment site | Accepted |
 | [0051](./0051-consume-shipment-confirmed-and-package-missedload.md) | Consume ShipmentConfirmed/PackageMissedLoad: the Order ships | Accepted |
+| [0052](./0052-consume-capacity-plan-superseded.md) | Consume CapacityPlanSuperseded: a superseded plan stops constraining orders | Accepted |

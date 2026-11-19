@@ -195,6 +195,7 @@ from the first offset), which de-duplicates on the CloudEvents `id`; see
 | warehouse-planning | `com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanCreated` | `warehouse.warehouse-planning.events` | `plan_id`, `warehouse_id`, `location`, `path_id`, `window_start`, `window_end`, `assigned_demand`, `capacity_over_window`, `shortage`, `bottleneck_step` | `inbound/kafka.PlannedCapacityConsumer`, group from `PLANNED_CAPACITY_CONSUMER_GROUP` | upsert window as `DRAFT` |
 | warehouse-planning | `com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanPublished` | same | same | same | upsert window as `PUBLISHED` |
 | warehouse-planning | `com.warehouse.wes.warehouse-planning.capacityplan.CapacityShortageDetected` | same | same | same | upsert window as `PUBLISHED` |
+| warehouse-planning | `com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanSuperseded` | same | same | same | move the plan's row to terminal `SUPERSEDED` (tombstone if unseen; ADR 0052) |
 | product-master | `com.warehouse.wms.product-master.product.ProductClassified` | `warehouse.product-master.events` | `sku`, `handling_tags`, `temperature_class`, `dot_hazard_class`, `version` (`classification_source` decoded, not stored) | `inbound/kafka.ProductClassificationConsumer`, group from `PRODUCT_CLASSIFICATION_CONSUMER_GROUP` (only with `PRODUCT_CLASSIFICATION_MODE=kafka`) | ApplyProductClassification: version-guarded upsert into `product_classification_copy` (ADR 0036) |
 
 `com.warehouse.wes.warehouse-planning.capacityplan.BottleneckDetected` is

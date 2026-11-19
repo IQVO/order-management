@@ -131,7 +131,9 @@ to the adapter.
 
 `inbound/kafka.PlannedCapacityConsumer` reads
 `CapacityPlanCreated` (stored as `DRAFT`), `CapacityPlanPublished` and
-`CapacityShortageDetected` (stored as `PUBLISHED`) into
+`CapacityShortageDetected` (stored as `PUBLISHED`) and
+`CapacityPlanSuperseded` (stored as a terminal `SUPERSEDED` row that never
+annotates an order, ADR 0052) into
 `planned_capacity_windows`. The read model only annotates order responses
 with a `capacityConstraint` and backs `GET /planned-capacity`; no promise
 moves and nothing is published back. Enabled only when
