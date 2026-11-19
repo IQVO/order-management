@@ -155,6 +155,7 @@ type plannedCapacityWindowResponse struct {
 	PlanID             string  `json:"planId"`
 	WarehouseID        string  `json:"warehouseId"`
 	Location           string  `json:"location"`
+	SiteID             string  `json:"siteId,omitempty"`
 	PathID             string  `json:"pathId,omitempty"`
 	WindowStart        string  `json:"windowStart"`
 	WindowEnd          string  `json:"windowEnd"`

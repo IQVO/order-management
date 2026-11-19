@@ -76,11 +76,10 @@ func TestGoldenEventDecodes_CapacityPlanSuperseded(t *testing.T) {
 		w.Status != order.PlannedCapacitySuperseded || w.Constraining() {
 		t.Fatalf("request = %+v; want a non-constraining SUPERSEDED row from the example", req)
 	}
-	if w.Location != data["location"] {
-		t.Errorf("window location = %q, want the plan's location %q", w.Location, data["location"])
-	}
-	if w.PathID != data["path_id"] {
-		t.Errorf("window path = %q, want %q", w.PathID, data["path_id"])
+	for field, got := range map[string]string{"location": w.Location, "site_id": w.SiteID, "path_id": w.PathID} {
+		if got != data[field] {
+			t.Errorf("window %s = %q, want the example's %q", field, got, data[field])
+		}
 	}
 }
 
@@ -101,7 +100,7 @@ func TestGoldenEventHandled_CapacityPlanSuperseded(t *testing.T) {
 	if !ok {
 		t.Fatal("the example's plan must be in the read model")
 	}
-	if w.Status != order.PlannedCapacitySuperseded || w.Location != data["location"] || w.Constraining() {
+	if w.Status != order.PlannedCapacitySuperseded || w.Location != data["location"] || w.SiteID != data["site_id"] || w.Constraining() {
 		t.Fatalf("window = %+v; want a non-constraining SUPERSEDED row under the plan's location", w)
 	}
 

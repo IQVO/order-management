@@ -63,11 +63,16 @@ const plannedCapacityConsumeSpanNameFmt = "kafka.consume %s"
 
 // capacityPlanData is the superset of the CapacityPlanCreated /
 // CapacityPlanPublished / CapacityShortageDetected payloads that this
-// consumer reads. Fields a given type does not carry stay zero.
+// consumer reads. Fields a given type does not carry stay zero: only
+// CapacityPlanPublished carries site_id (additive, and absent for a plan
+// stored before warehouse-planning's migration 0008), so the merge that
+// keeps it on a later event without one lives in the domain
+// (PlannedCapacityWindow.ReplacementOf).
 type capacityPlanData struct {
 	PlanID             string    `json:"plan_id"`
 	WarehouseID        string    `json:"warehouse_id"`
 	Location           string    `json:"location"`
+	SiteID             string    `json:"site_id"`
 	PathID             string    `json:"path_id"`
 	WindowStart        time.Time `json:"window_start"`
 	WindowEnd          time.Time `json:"window_end"`
@@ -231,7 +236,7 @@ func planningRequestFrom(e ce.Event) (usecases.ApplyPlannedCapacityRequest, bool
 		return usecases.ApplyPlannedCapacityRequest{}, false, err
 	}
 	w := order.PlannedCapacityWindow{
-		PlanID: data.PlanID, WarehouseID: data.WarehouseID, Location: data.Location, PathID: data.PathID,
+		PlanID: data.PlanID, WarehouseID: data.WarehouseID, Location: data.Location, SiteID: data.SiteID, PathID: data.PathID,
 		Start: data.WindowStart.UTC(), End: data.WindowEnd.UTC(),
 		AssignedDemand: data.AssignedDemand, CapacityOverWindow: data.CapacityOverWindow,
 		Shortage: data.Shortage, BottleneckStep: data.BottleneckStep,
@@ -259,7 +264,7 @@ func supersededRequestFrom(e ce.Event) (usecases.ApplyPlannedCapacityRequest, bo
 		location = data.SiteID
 	}
 	w := order.PlannedCapacityWindow{
-		PlanID: data.PlanID, Location: location, PathID: data.PathID,
+		PlanID: data.PlanID, Location: location, SiteID: data.SiteID, PathID: data.PathID,
 		Start: data.WindowStart.UTC(), End: data.WindowEnd.UTC(),
 		Status: order.PlannedCapacitySuperseded, SupersededBy: data.SupersededBy,
 		AsOf: e.Time().UTC(),

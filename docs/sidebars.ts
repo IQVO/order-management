@@ -159,6 +159,7 @@ const sidebars: SidebarsConfig = {
         'adr/0050-allocation-events-carry-the-orders-fulfillment-site',
         'adr/0051-consume-shipment-confirmed-and-package-missedload',
         'adr/0052-consume-capacity-plan-superseded',
+        'adr/0053-match-planned-capacity-by-plan-site-id',
       ],
     },
   ],

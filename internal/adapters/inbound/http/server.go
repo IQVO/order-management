@@ -269,7 +269,7 @@ func (s *Server) handleGetPlannedCapacity(w http.ResponseWriter, r *http.Request
 	out := make([]plannedCapacityWindowResponse, len(windows))
 	for i, c := range windows {
 		out[i] = plannedCapacityWindowResponse{
-			PlanID: c.PlanID, WarehouseID: c.WarehouseID, Location: c.Location, PathID: c.PathID,
+			PlanID: c.PlanID, WarehouseID: c.WarehouseID, Location: c.Location, SiteID: c.SiteID, PathID: c.PathID,
 			WindowStart: c.Start.UTC().Format(timeFormat), WindowEnd: c.End.UTC().Format(timeFormat),
 			AssignedDemand: c.AssignedDemand, CapacityOverWindow: c.CapacityOverWindow, Shortage: c.Shortage,
 			BottleneckStep: c.BottleneckStep, Status: string(c.Status), SupersededBy: c.SupersededBy,

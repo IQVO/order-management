@@ -90,14 +90,22 @@ func (s *pcTxStore) Upsert(_ context.Context, w order.PlannedCapacityWindow) (bo
 }
 
 func (s *pcTxStore) ListByLocation(_ context.Context, location string, endingAfter time.Time) ([]order.PlannedCapacityWindow, error) {
+	return s.list(location, endingAfter, func(w order.PlannedCapacityWindow) bool { return w.Location == location })
+}
+
+func (s *pcTxStore) ListForSite(_ context.Context, site string, endingAfter time.Time) ([]order.PlannedCapacityWindow, error) {
+	return s.list(site, endingAfter, func(w order.PlannedCapacityWindow) bool { return w.MatchesSite(site) })
+}
+
+func (s *pcTxStore) list(key string, endingAfter time.Time, keep func(order.PlannedCapacityWindow) bool) ([]order.PlannedCapacityWindow, error) {
 	s.listCalls++
-	s.listed.location, s.listed.endingAfter = location, endingAfter
+	s.listed.location, s.listed.endingAfter = key, endingAfter
 	if s.listErr != nil {
 		return nil, s.listErr
 	}
 	var out []order.PlannedCapacityWindow
 	for _, w := range s.windows {
-		if w.Location == location && w.End.After(endingAfter) {
+		if keep(w) && w.End.After(endingAfter) {
 			out = append(out, w)
 		}
 	}

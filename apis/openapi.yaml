@@ -1166,7 +1166,19 @@ components:
           example: WH-1
         location:
           type: string
-          description: Site/building code.
+          description: >-
+            The ProcessCapacity location the plan evaluates; a site code for
+            a plan that never carried a `siteId`. `GET /planned-capacity`
+            lists by this field.
+          example: SIM1
+        siteId:
+          type: string
+          description: >-
+            The plan's canonical site (warehouse-planning's `site_id`), when
+            it carries one; omitted otherwise. An order is annotated by a
+            plan whose `siteId` equals the order's site, else, for a plan
+            without one, whose `location` does (ADR 0031 amendment). A write
+            without a site id never erases a stored one.
           example: SIM1
         pathId:
           type: string
