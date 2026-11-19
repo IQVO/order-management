@@ -331,9 +331,11 @@ subscriber) consumes independently:
   (`TaskCPTMissed`, `PackageManifested`) drives the re-promise consumer
   (group `order-management-repromise`) whenever `KAFKA_BROKERS` is set;
   `warehouse.warehouse-planning.events` (`CapacityPlanCreated`,
-  `CapacityPlanPublished`, `CapacityShortageDetected`) feeds the
+  `CapacityPlanPublished`, `CapacityShortageDetected`,
+  `CapacityPlanSuperseded`) feeds the
   planned-capacity read model when `PLANNED_CAPACITY_CONSUMER_GROUP` is set
-  (ADR 0031). Poison messages on the stable-group consumers that dead-letter
+  (ADR 0031; a superseded plan becomes a terminal `SUPERSEDED` row that
+  never annotates an order, ADR 0052). Poison messages on the stable-group consumers that dead-letter
   (re-promise, planned-capacity, release-confirmation) go to `<topic>.dlq`
   (ADR 0025, ADR 0043).
 - **Transactional outbox.** With `DATABASE_URL` set, every Kafka-bound

@@ -68,7 +68,7 @@ flowchart LR
     in3 ==>|"evt - Kafka<br/>warehouse.fulfillment.events<br/>TaskCPTMissed,<br/>PackageManifested"| BC
     in4 ==>|"evt - Kafka<br/>warehouse.process-path-management.events<br/>ProcessPathCreated,<br/>ProcessPathUpdated,<br/>ProcessPathDeactivated,<br/>CPTScheduleChanged"| BC
     in5 ==>|"evt - Kafka<br/>warehouse.work-planning.events<br/>PathCapacityChanged"| BC
-    in6 ==>|"evt - Kafka<br/>warehouse.warehouse-planning.events<br/>CapacityPlanCreated,<br/>CapacityPlanPublished,<br/>CapacityShortageDetected"| BC
+    in6 ==>|"evt - Kafka<br/>warehouse.warehouse-planning.events<br/>CapacityPlanCreated,<br/>CapacityPlanPublished,<br/>CapacityShortageDetected,<br/>CapacityPlanSuperseded"| BC
     in7 ==>|"evt - Kafka<br/>warehouse.product-master.events<br/>ProductClassified into a local<br/>copy"| BC
     linkStyle 0 stroke:#1971c2,stroke-width:1.5px
     linkStyle 1 stroke:#2f9e44,stroke-width:1.5px
@@ -177,7 +177,7 @@ holding network-originated orders until their caller commits.
 | process-path-management | CPTScheduleChanged | Event | Kafka `warehouse.process-path-management.events`, `com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged` | Published Language, ACL |
 | wes-work-planning | PathCapacityChanged | Event | Kafka `warehouse.work-planning.events`, `com.warehouse.wes.work-planning.workpool.PathCapacityChanged` | Published Language, ACL |
 | wes-work-planning | WorkUnitCreated | Event | Kafka `warehouse.work-planning.events`, `com.warehouse.wes.work-planning.workunit.WorkUnitCreated`; only the optional `reference` and `line_no` are read, to confirm a released order line (opt-in `RELEASE_CONFIRMATION_MODE=kafka`, ADR 0043; available, off by default) | Published Language, ACL |
-| warehouse-planning | CapacityPlanCreated, CapacityPlanPublished, CapacityShortageDetected | Event | Kafka `warehouse.warehouse-planning.events`, `com.warehouse.wes.warehouse-planning.capacityplan.*` (opt-in) | Published Language, ACL |
+| warehouse-planning | CapacityPlanCreated, CapacityPlanPublished, CapacityShortageDetected, CapacityPlanSuperseded | Event | Kafka `warehouse.warehouse-planning.events`, `com.warehouse.wes.warehouse-planning.capacityplan.*` (opt-in) | Published Language, ACL |
 | product-master | ProductClassified | Event | Kafka `warehouse.product-master.events`, `com.warehouse.wms.product-master.product.ProductClassified` → local copy read at intake (opt-in `PRODUCT_CLASSIFICATION_MODE=kafka`, ADR 0036, fail-open for unknown SKUs) | Published Language, ACL (local copy) |
 
 ## Outbound Communication

@@ -407,7 +407,7 @@ sequenceDiagram
   alt not a CloudEvent
     K->>K: dead-letter to warehouse.warehouse-planning.events.dlq
   end
-  K->>K: planningRequestFrom, DRAFT for Created, PUBLISHED otherwise
+  K->>K: planningRequestFrom, DRAFT for Created, SUPERSEDED for Superseded (ADR 0052), PUBLISHED otherwise
   alt other type, e.g. BottleneckDetected
     K->>K: commit and ignore
   else invalid payload or subject differs from plan_id

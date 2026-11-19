@@ -623,9 +623,12 @@ paths:
         warehouse-planning publishes on `warehouse.warehouse-planning.events`.
         It is not live execution state and is never refreshed by calling
         warehouse-planning. Windows of every `status` are listed (a `DRAFT`
-        is visible here but never influences an order; only a `PUBLISHED`
-        plan with `shortage > 0` annotates orders — see `capacityConstraint`
-        on the Order schema). Windows that ended before `from` are omitted.
+        is visible here but never influences an order; a `SUPERSEDED` plan
+        was replaced by a newer one of the same window, names it in
+        `supersededBy` and never influences an order again, ADR 0052; only a
+        `PUBLISHED` plan with `shortage > 0` annotates orders — see
+        `capacityConstraint` on the Order schema). Windows that ended before
+        `from` are omitted.
         This route exists only when the integration is enabled; otherwise it
         is a 404.
 
@@ -1195,9 +1198,18 @@ components:
           example: REBIN
         status:
           type: string
-          enum: [DRAFT, PUBLISHED]
-          description: Only PUBLISHED plans with a shortage annotate orders.
+          enum: [DRAFT, PUBLISHED, SUPERSEDED]
+          description: >-
+            Only PUBLISHED plans with a shortage annotate orders. SUPERSEDED
+            (ADR 0052) is terminal: a newer plan of the same window replaced
+            this one, and it never annotates an order again.
           example: PUBLISHED
+        supersededBy:
+          type: string
+          description: >-
+            The id of the newer plan that replaced this one. Present only
+            when `status` is SUPERSEDED (ADR 0052).
+          example: 7e2f9a1c-3b4d-4e5f-8a6b-9c0d1e2f3a4b
         asOf:
           type: string
           format: date-time

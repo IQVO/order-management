@@ -138,6 +138,7 @@ sequenceDiagram
   WPL-)OM: evt: CapacityPlanCreated
   WPL-)OM: evt: CapacityPlanPublished
   WPL-)OM: evt: CapacityShortageDetected
+  WPL-)OM: evt: CapacityPlanSuperseded
   Note over OM: planned_capacity_windows read model, opt-in
   Console->>OM: qry: GET /orders/id
   OM-->>Console: order with capacityConstraint when the promise overlaps a published shortage
