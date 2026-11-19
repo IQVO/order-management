@@ -62,6 +62,17 @@ info:
     (`DEMAND_SITE_ID`). Both consumers dead-letter unusable payloads to
     `<topic>.dlq`.
 
+    **Consumed (ADR 0022).** labor-performance's `LaborStandardDefined` and
+    `LaborStandardRevised` (topic `warehouse.labor-performance.events`, its
+    INTEGRATION topic per its ADR 0038; group `LABOR_STANDARD_CONSUMER_GROUP`)
+    keep a local copy of the engineered labour standards, one record per
+    `standard_id`. A capacity plan prices each step of its path with the
+    standard of its task type in force for the plan's site at the window start
+    (`labour_requirement`, REST and MCP only: no event this service publishes
+    carries it). Every other type on that topic is ignored, the producer's
+    analytics topic is never read, and an unusable payload is dead-lettered to
+    `warehouse.labor-performance.events.dlq`.
+
     **Analytics stream (ADR 0005).** The same four events are ALSO written to
     `warehouse.warehouse-planning.analytics` in the SAME outbox transaction
     (two outbox rows per event, one per topic), as CloudEvents 1.0 with the
@@ -345,6 +356,38 @@ channels:
         - name: consumed
       message:
         $ref: "#/components/messages/TaskCompleted"
+
+  warehouse.labor-performance.events:
+    description: |
+      labor-performance's integration topic (`LaborPerformanceTopic`; the standard events are
+      keyed by task type, labor-performance ADR 0038). This service consumes it with a STABLE consumer group read from
+      env `LABOR_STANDARD_CONSUMER_GROUP` (REQUIRED, no default; ADR 0016/0022). Only the
+      full types `com.warehouse.wes.labor-performance.standard.LaborStandardDefined` and
+      `...standard.LaborStandardRevised` are acted on; every other `type`
+      (`TaskPerformanceRecorded`, ...) is ignored. A message that is not CloudEvents 1.0, or
+      a standard without `standard_id`/`task_type`/`effective_from`/event `time`, with
+      `expected_seconds <= 0`, a negative `travel_component_seconds` or an unknown
+      `handling_unit`, is published to `warehouse.labor-performance.events.dlq` (raw bytes
+      plus `x-dlq-*` headers).
+    publish:
+      operationId: consumeLaborStandardEvents
+      summary: Consume labor-performance's LaborStandardDefined / LaborStandardRevised.
+      description: |
+        Consumed by this service into a LOCAL copy of the engineered labour standards
+        (`labor_standards`, one row per `standard_id`; additive). The copy stores facts, not
+        a current value: a redelivered or replayed `standard_id` changes nothing, and the
+        standard that applies to a plan of site S, task type T and window W is resolved at
+        READ time among task-type-only rows (`handling_unit` absent) with
+        `effective_from <= W.start`: S's own `site_code` over a site-less row, then the latest
+        `effective_from`, then the latest event `time`. The idempotency claim on the
+        CloudEvents `id` and the write commit in ONE transaction. See
+        docs/adr/0022-labour-standards-from-labor-performance.md.
+      tags:
+        - name: consumed
+      message:
+        oneOf:
+          - $ref: "#/components/messages/LaborStandardDefined"
+          - $ref: "#/components/messages/LaborStandardRevised"
 
 components:
   messages:
@@ -1101,6 +1144,78 @@ components:
               task_id: "task-7c9e6679"
               task_type: "PICK"
               duration_seconds: 245
+
+    LaborStandardDefined:
+      name: LaborStandardDefined
+      title: Labour standard defined (consumed)
+      summary: labor-performance defined an engineered labour standard for a task type.
+      description: |
+        CONSUMED from `warehouse.labor-performance.events` (producer: labor-performance, its own
+        `apis/asyncapi.yaml`, ADR 0038: the same payload as its analytics copy). Recorded in the
+        local `labor_standards` copy under `standard_id`; `as_of` = the CloudEvents `time`.
+        `site_code` absent = every site. A standard with a `handling_unit` is stored but not
+        used to price a plan (plan demand has no handling-unit split). `type` =
+        `com.warehouse.wes.labor-performance.standard.LaborStandardDefined`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/LaborStandardDefinedEvent"
+      examples:
+        - name: packStandardDefined
+          summary: A fleet-wide PACK standard of 90 s per task.
+          payload:
+            specversion: "1.0"
+            id: "4d1f6a3e-2b7c-4c5d-9e8f-1a2b3c4d5e6f"
+            source: "/warehouse/labor-performance"
+            type: "com.warehouse.wes.labor-performance.standard.LaborStandardDefined"
+            subject: "std-pack-1"
+            time: "2026-10-01T00:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:labor-performance:events:LaborStandardDefined:v1"
+            data:
+              standard_id: "std-pack-1"
+              task_type: "PACK"
+              expected_seconds: 90
+              travel_component_seconds: 15
+              effective_from: "2026-10-01T00:00:00Z"
+
+    LaborStandardRevised:
+      name: LaborStandardRevised
+      title: Labour standard revised (consumed)
+      summary: labor-performance revised a labour standard (a new record under a new standard_id).
+      description: |
+        CONSUMED from `warehouse.labor-performance.events`. A revision closes the prior record in
+        labor-performance and opens a new one, so it is recorded like a definition: a new row,
+        and the latest `effective_from` before a plan's window start is the standard in force.
+        `previous_expected_seconds` and the team-lift fields are ignored. `type` =
+        `com.warehouse.wes.labor-performance.standard.LaborStandardRevised`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/LaborStandardRevisedEvent"
+      examples:
+        - name: pickStandardRevisedForASite
+          summary: SIM1's own PICK standard revised to 12 s per task.
+          payload:
+            specversion: "1.0"
+            id: "8a7b6c5d-4e3f-4a2b-9c1d-0e9f8a7b6c5d"
+            source: "/warehouse/labor-performance"
+            type: "com.warehouse.wes.labor-performance.standard.LaborStandardRevised"
+            subject: "std-pick-sim1-2"
+            time: "2026-10-02T06:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:labor-performance:events:LaborStandardRevised:v1"
+            data:
+              standard_id: "std-pick-sim1-2"
+              task_type: "PICK"
+              expected_seconds: 12
+              previous_expected_seconds: 14
+              site_code: "SIM1"
+              effective_from: "2026-10-02T06:00:00Z"
 
   schemas:
     CloudEventEnvelope:
@@ -1994,3 +2109,61 @@ components:
               const: "urn:warehouse:fulfillment-execution:events:TaskCompleted:v1"
             data:
               $ref: "#/components/schemas/TaskCompletedData"
+    LaborStandardData:
+      type: object
+      description: >-
+        Fields this service reads from labor-performance's LaborStandardDefined /
+        LaborStandardRevised `data` (hand-mirrored, never imported; docs/adr/0022 decision 2).
+        Everything else (previous_expected_seconds, team_lift_threshold_g,
+        team_lift_expected_seconds) is ignored.
+      required: [standard_id, task_type, expected_seconds, effective_from]
+      properties:
+        standard_id:
+          type: string
+          description: labor-performance's standard id; one row per id in the local copy, the same id again changes nothing.
+        task_type:
+          type: string
+          description: The task type the standard measures (PICK, PACK, SLAM on the producer); it names the plan step of the same process type.
+          example: "PACK"
+        expected_seconds:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Engineered seconds per task; 0 or negative is dead-lettered.
+        travel_component_seconds:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Optional part of expected_seconds attributed to travel; stored, not used to price a plan.
+        handling_unit:
+          type: string
+          enum: [EACH, CASE, PALLET]
+          description: Optional; absent = a task-type-only standard, the only kind that prices a plan step.
+        site_code:
+          type: string
+          description: Optional (labor-performance ADR 0038); a facility-layout site code. Absent = every site.
+          example: "SIM1"
+        effective_from:
+          type: string
+          format: date-time
+          description: When the standard came into force (RFC 3339).
+    LaborStandardDefinedEvent:
+      description: CloudEvents 1.0 envelope of labor-performance's LaborStandardDefined (consumed).
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.labor-performance.standard.LaborStandardDefined"
+            data:
+              $ref: "#/components/schemas/LaborStandardData"
+    LaborStandardRevisedEvent:
+      description: CloudEvents 1.0 envelope of labor-performance's LaborStandardRevised (consumed).
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.labor-performance.standard.LaborStandardRevised"
+            data:
+              $ref: "#/components/schemas/LaborStandardData"
