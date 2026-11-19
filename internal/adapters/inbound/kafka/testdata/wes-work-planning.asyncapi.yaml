@@ -46,14 +46,29 @@ info:
 
     ```
     com.warehouse.wes.work-planning.workunit.WorkReleased
-    com.warehouse.wes.work-planning.charge.ChargeForecastReceived
+    com.warehouse.wes.work-planning.workpool.PathCapacityChanged
     ```
 
     The `entity` segment names the aggregate (or aggregate cluster) that
-    raises the event: `charge` for the ChargeForecast aggregate, `plan` for
-    ShiftPlan/PathPlan, `workpool` for the WorkPool aggregate and the flow
+    raises the event: `workpool` for the WorkPool aggregate and the flow
     balancing decisions taken against it, and `workunit` for the WorkUnit
     aggregate.
+
+    ## Retired types
+
+    ADR-0049 handed the charge forecast and the shift plan to
+    warehouse-planning (its ADR 0023), so these three types are no longer
+    published on either channel and leave this contract:
+
+    ```
+    com.warehouse.wes.work-planning.charge.ChargeForecastReceived
+    com.warehouse.wes.work-planning.plan.ShiftPlanCommitted
+    com.warehouse.wes.work-planning.pathplan.PathPlanDriftDetected
+    ```
+
+    Both topics still hold them in their history; a consumer replaying it
+    must ignore them like any unknown `type` (this service's own analytics
+    projector acknowledges them without projecting).
 
     ## Catalog completeness vs. what is actually published
 
@@ -103,9 +118,8 @@ info:
     consumers — never parsed as a legacy shape. This service also consumes
     `ShiftPlanCommitted` from workforce-management on
     `warehouse.workforce.events` (projected into the read-only
-    `LaborPlanObserved` view — deliberately *not* fed into this context's own
-    ShiftPlan aggregate, which is a different model that happens to share the
-    name), `StockReserved` and `ReservationRevoked` from inventory-storage on
+    `LaborPlanObserved` view, a pure projection: since ADR-0049 this context
+    holds no shift plan of its own), `StockReserved` and `ReservationRevoked` from inventory-storage on
     `warehouse.inventory.events` (projected into the SKU-keyed
     `UsableInventoryObserved` view), `TaskCompleted` from
     fulfillment-execution on `warehouse.fulfillment.events` (fed into the
@@ -160,14 +174,6 @@ tags:
     description: >-
       The Work Planning & Release bounded context — the core domain of the WES
       subdomain, responsible for planning the shift and releasing work.
-  - name: charge
-    description: >-
-      Events raised by the ChargeForecast aggregate — the volume that must
-      clear, bucketed by CPT.
-  - name: plan
-    description: >-
-      Events raised by the ShiftPlan / PathPlan aggregates — the committed
-      split of headcount and rate across process paths.
   - name: workpool
     description: >-
       Events raised by the WorkPool aggregate and by flow balancing against
@@ -212,8 +218,6 @@ channels:
         - name: work-planning
       message:
         oneOf:
-          - $ref: "#/components/messages/ChargeForecastReceived"
-          - $ref: "#/components/messages/ShiftPlanCommitted"
           - $ref: "#/components/messages/WorkUnitCreated"
           - $ref: "#/components/messages/WorkReleased"
           - $ref: "#/components/messages/WorkUnitCompleted"
@@ -222,7 +226,6 @@ channels:
           - $ref: "#/components/messages/PathThrottled"
           - $ref: "#/components/messages/LaborReassignmentFlagged"
           - $ref: "#/components/messages/PathCapacityChanged"
-          - $ref: "#/components/messages/PathPlanDriftDetected"
 
   warehouse.wes.analytics:
     description: >-
@@ -245,8 +248,6 @@ channels:
         - name: work-planning
       message:
         oneOf:
-          - $ref: "#/components/messages/ChargeForecastReceivedAnalytics"
-          - $ref: "#/components/messages/ShiftPlanCommittedAnalytics"
           - $ref: "#/components/messages/WorkUnitCreatedAnalytics"
           - $ref: "#/components/messages/WorkReleasedAnalytics"
           - $ref: "#/components/messages/WorkUnitCompletedAnalytics"
@@ -255,7 +256,6 @@ channels:
           - $ref: "#/components/messages/PathThrottledAnalytics"
           - $ref: "#/components/messages/LaborReassignmentFlaggedAnalytics"
           - $ref: "#/components/messages/PathCapacityChangedAnalytics"
-          - $ref: "#/components/messages/PathPlanDriftDetectedAnalytics"
 
   warehouse.workforce.events:
     description: >-
@@ -269,11 +269,10 @@ channels:
       summary: Project workforce-management's ShiftPlanCommitted into the LaborPlanObserved view.
       description: >-
         ObserveLaborPlan upserts the read-only `LaborPlanObserved` view keyed
-        by `path_id` (served by `GET /paths/{pathId}/labor-plan-view`) and
-        reconciles it against this service's own committed PathPlan, raising
-        `PathPlanDriftDetected` on a heads mismatch (ADR-0019). It is
-        deliberately NOT fed into this service's own ShiftPlan aggregate
-        (ADR-0006). The CloudEvents `id` is claimed in the same transaction
+        by `path_id` (served by `GET /paths/{pathId}/labor-plan-view`). It is
+        a pure projection: this service holds no plan of its own to reconcile
+        it with (ADR-0049 moved the ADR-0019 drift check to
+        warehouse-planning). The CloudEvents `id` is claimed in the same transaction
         as the effect. A message that is not a valid CloudEvent is published
         raw to the DLQ without retry.
       message:
@@ -486,72 +485,6 @@ channels:
 
 components:
   messages:
-    ChargeForecastReceived:
-      x-no-consumer-reason: "published for observability; no consumer in the fleet today"
-      name: ChargeForecastReceived
-      title: Charge Forecast Received
-      summary: A shift's charge forecast was recorded for a process path.
-      description: >-
-        Raised by the ChargeForecast aggregate when `ReceiveChargeForecast`
-        records the volume due for a process path, bucketed by CPT. Actively
-        published to `warehouse.work-planning.events` by the outbound Kafka
-        adapter; the published `data` carries only `path_id`, since the CPT
-        buckets themselves are read back over the REST API rather than
-        broadcast.
-      contentType: application/cloudevents+json
-      tags:
-        - name: charge
-      payload:
-        $ref: "#/components/schemas/ChargeForecastReceivedEvent"
-      examples:
-        - name: chargeForecastReceived
-          summary: Charge forecast recorded for the pick-to-tote path.
-          payload:
-            specversion: "1.0"
-            id: 4f1c2a7e-9d31-4a6b-8f0e-6b2c1d5e7a90
-            source: /warehouse/wes-work-planning
-            type: com.warehouse.wes.work-planning.charge.ChargeForecastReceived
-            subject: pick-to-tote
-            time: "2026-08-21T22:00:00Z"
-            datacontenttype: application/json
-            dataschema: urn:warehouse:wes-work-planning:events:ChargeForecastReceived:v1
-            data:
-              path_id: pick-to-tote
-
-    ShiftPlanCommitted:
-      x-no-consumer-reason: "published for observability; no consumer in the fleet today"
-      name: ShiftPlanCommitted
-      title: Shift Plan Committed
-      summary: A path's headcount, rate and hours split was committed.
-      description: >-
-        Raised by the ShiftPlan aggregate when `CommitShiftPlan` commits the
-        rate x heads x hours split for a process path, after validating the
-        invariant `plannedHeads <= installedStations`. Actively published to
-        `warehouse.work-planning.events`; the published `data` carries only
-        `path_id`. Beware the name collision: workforce-management publishes
-        an unrelated `ShiftPlanCommitted` on `warehouse.workforce.events`
-        that this service consumes into a read-only view. They are different
-        models in different bounded contexts and must not be conflated.
-      contentType: application/cloudevents+json
-      tags:
-        - name: plan
-      payload:
-        $ref: "#/components/schemas/ShiftPlanCommittedEvent"
-      examples:
-        - name: shiftPlanCommitted
-          summary: Shift plan committed for the pack-singles path.
-          payload:
-            specversion: "1.0"
-            id: 8a3d6c11-52b7-4f0d-9c14-3e7a5b8d2f46
-            source: /warehouse/wes-work-planning
-            type: com.warehouse.wes.work-planning.plan.ShiftPlanCommitted
-            subject: pack-singles
-            time: "2026-08-21T22:05:00Z"
-            datacontenttype: application/json
-            dataschema: urn:warehouse:wes-work-planning:events:ShiftPlanCommitted:v1
-            data:
-              path_id: pack-singles
-
     WorkUnitCreated:
       name: WorkUnitCreated
       title: Work Unit Created
@@ -854,7 +787,7 @@ components:
       title: Shift Plan Committed (consumed)
       summary: workforce-management committed a shift plan for a path.
       description: >-
-        CONSUMED from `warehouse.workforce.events`, read-only mirror of the producer's contract. NOT this service's own ShiftPlanCommitted (a different model in a different bounded context, ADR-0006).
+        CONSUMED from `warehouse.workforce.events`, read-only mirror of the producer's contract. Not the retired com.warehouse.wes.work-planning.plan.ShiftPlanCommitted this service used to publish (ADR-0049).
       contentType: application/cloudevents+json
       tags:
         - name: work-planning
@@ -1433,97 +1366,6 @@ components:
               remaining_units: 0
               known: false
 
-    PathPlanDriftDetected:
-      x-no-consumer-reason: "published for observability; no consumer in the fleet today"
-      name: PathPlanDriftDetected
-      title: Path Plan Drift Detected
-      summary: >-
-        This service's committed PathPlan and the labor plan Workforce
-        Management committed for the same path disagree on planned heads.
-      description: >-
-        Raised by ADR-0019's reconciliation when the committed `PathPlan`
-        planned heads differ from the heads in the latest
-        `LaborPlanObserved` for the same path. Triggered from BOTH sides'
-        commit (our `CommitShiftPlan` and the observed `ShiftPlanCommitted`
-        projection), over one shared comparison, so whichever side commits
-        second raises it. It states a fact, not a verdict: `drift_heads` is
-        signed (`observed_planned_heads - wes_planned_heads`) and carries no
-        opinion about which plan is right. Agreeing plans raise nothing, and
-        nothing is raised while only one side has committed. Published
-        through the transactional outbox with the state change.
-      contentType: application/cloudevents+json
-      tags:
-        - name: plan
-      payload:
-        $ref: "#/components/schemas/PathPlanDriftDetectedEvent"
-      examples:
-        - name: pathPlanDriftDetected
-          summary: >-
-            Workforce committed 8 heads for pick-to-tote; our PathPlan has 6.
-          payload:
-            specversion: "1.0"
-            id: 7e9f5b14-3d86-4c2a-9a95-4b8c0e3f7d62
-            source: /warehouse/wes-work-planning
-            type: com.warehouse.wes.work-planning.pathplan.PathPlanDriftDetected
-            subject: pick-to-tote
-            time: "2026-08-21T09:05:00Z"
-            datacontenttype: application/json
-            dataschema: urn:warehouse:wes-work-planning:events:PathPlanDriftDetected:v1
-            data:
-              path_id: pick-to-tote
-              wes_planned_heads: 6
-              observed_planned_heads: 8
-              drift_heads: 2
-              observed_at: "2026-08-21T09:00:00Z"
-
-    ChargeForecastReceivedAnalytics:
-      name: ChargeForecastReceivedAnalytics
-      title: ChargeForecastReceived (analytics stream)
-      summary: Analytics-shaped ChargeForecastReceived occurrence on warehouse.wes.analytics.
-      contentType: application/cloudevents+json
-      tags:
-        - name: charge
-      payload:
-        $ref: "#/components/schemas/ChargeForecastReceivedAnalyticsEvent"
-      examples:
-        - name: chargeForecastReceivedAnalytics
-          summary: Charge forecast recorded for the pick-to-tote path (analytics stream).
-          payload:
-            specversion: "1.0"
-            id: b3cd5540-79c7-4e4f-867c-e0444d03ada6
-            source: /warehouse/wes-work-planning
-            type: com.warehouse.wes.work-planning.charge.ChargeForecastReceived
-            subject: pick-to-tote
-            time: "2026-08-21T22:00:00Z"
-            datacontenttype: application/json
-            dataschema: urn:warehouse:wes-work-planning:analytics:ChargeForecastReceived:v1
-            data:
-              path_id: pick-to-tote
-
-    ShiftPlanCommittedAnalytics:
-      name: ShiftPlanCommittedAnalytics
-      title: ShiftPlanCommitted (analytics stream)
-      summary: Analytics-shaped ShiftPlanCommitted occurrence on warehouse.wes.analytics.
-      contentType: application/cloudevents+json
-      tags:
-        - name: plan
-      payload:
-        $ref: "#/components/schemas/ShiftPlanCommittedAnalyticsEvent"
-      examples:
-        - name: shiftPlanCommittedAnalytics
-          summary: Shift plan committed for the pack-singles path (analytics stream).
-          payload:
-            specversion: "1.0"
-            id: d4156625-a93d-4106-b7d9-43f8c4293bf5
-            source: /warehouse/wes-work-planning
-            type: com.warehouse.wes.work-planning.plan.ShiftPlanCommitted
-            subject: pack-singles
-            time: "2026-08-21T22:05:00Z"
-            datacontenttype: application/json
-            dataschema: urn:warehouse:wes-work-planning:analytics:ShiftPlanCommitted:v1
-            data:
-              path_id: pack-singles
-
     WorkUnitCreatedAnalytics:
       name: WorkUnitCreatedAnalytics
       title: WorkUnitCreated (analytics stream)
@@ -1730,34 +1572,6 @@ components:
               remaining_units: 17
               known: true
 
-    PathPlanDriftDetectedAnalytics:
-      name: PathPlanDriftDetectedAnalytics
-      title: PathPlanDriftDetected (analytics stream)
-      summary: Analytics-shaped PathPlanDriftDetected occurrence on warehouse.wes.analytics.
-      contentType: application/cloudevents+json
-      tags:
-        - name: plan
-      payload:
-        $ref: "#/components/schemas/PathPlanDriftDetectedAnalyticsEvent"
-      examples:
-        - name: pathPlanDriftDetectedAnalytics
-          summary: Workforce committed 8 heads for pick-to-tote; our PathPlan has 6 (analytics stream).
-          payload:
-            specversion: "1.0"
-            id: c75df77f-d33c-4d9d-837b-7c77dee8a963
-            source: /warehouse/wes-work-planning
-            type: com.warehouse.wes.work-planning.pathplan.PathPlanDriftDetected
-            subject: pick-to-tote
-            time: "2026-08-21T09:05:00Z"
-            datacontenttype: application/json
-            dataschema: urn:warehouse:wes-work-planning:analytics:PathPlanDriftDetected:v1
-            data:
-              path_id: pick-to-tote
-              wes_planned_heads: 6
-              observed_planned_heads: 8
-              drift_heads: 2
-              observed_at: "2026-08-21T09:00:00Z"
-
     ProductPackLevelDeclared:
       name: ProductPackLevelDeclared
       title: ProductPackLevelDeclared (consumed)
@@ -1878,67 +1692,6 @@ components:
             `dataschema` distinguishes the integration payload from the
             analytics payload.
           pattern: "^urn:warehouse:[a-z0-9-]+:(events|analytics):[A-Za-z]+:v[0-9]+$"
-
-    ChargeForecastReceivedEvent:
-      title: ChargeForecastReceived CloudEvent
-      description: CloudEvent envelope for a recorded charge forecast.
-      allOf:
-        - $ref: "#/components/schemas/CloudEventBase"
-        - type: object
-          required:
-            - type
-            - dataschema
-            - data
-          properties:
-            type:
-              type: string
-              description: Fixed event type for this message.
-              const: "com.warehouse.wes.work-planning.charge.ChargeForecastReceived"
-            dataschema:
-              type: string
-              description: Fixed integration-payload schema id for this message.
-              const: "urn:warehouse:wes-work-planning:events:ChargeForecastReceived:v1"
-            data:
-              type: object
-              description: Payload published by the outbound Kafka adapter.
-              required:
-                - path_id
-              properties:
-                path_id:
-                  type: string
-                  description: >-
-                    Identifier of the process path the charge forecast was
-                    recorded for.
-
-    ShiftPlanCommittedEvent:
-      title: ShiftPlanCommitted CloudEvent
-      description: CloudEvent envelope for a committed shift plan.
-      allOf:
-        - $ref: "#/components/schemas/CloudEventBase"
-        - type: object
-          required:
-            - type
-            - dataschema
-            - data
-          properties:
-            type:
-              type: string
-              description: Fixed event type for this message.
-              const: "com.warehouse.wes.work-planning.plan.ShiftPlanCommitted"
-            dataschema:
-              type: string
-              description: Fixed integration-payload schema id for this message.
-              const: "urn:warehouse:wes-work-planning:events:ShiftPlanCommitted:v1"
-            data:
-              type: object
-              description: Payload published by the outbound Kafka adapter.
-              required:
-                - path_id
-              properties:
-                path_id:
-                  type: string
-                  description: >-
-                    Identifier of the process path whose plan was committed.
 
     WorkUnitCreatedEvent:
       title: WorkUnitCreated CloudEvent
@@ -3209,54 +2962,6 @@ components:
                     capacity figure) or when it is ReleaseFed with no WIP
                     limit provisioned. `true` otherwise.
 
-    ChargeForecastReceivedAnalyticsEvent:
-      title: ChargeForecastReceived analytics CloudEvent
-      allOf:
-        - $ref: "#/components/schemas/CloudEventBase"
-        - type: object
-          required:
-            - type
-            - dataschema
-            - data
-          properties:
-            type:
-              type: string
-              const: "com.warehouse.wes.work-planning.charge.ChargeForecastReceived"
-            dataschema:
-              type: string
-              const: "urn:warehouse:wes-work-planning:analytics:ChargeForecastReceived:v1"
-            data:
-              type: object
-              required:
-                - path_id
-              properties:
-                path_id:
-                  type: string
-
-    ShiftPlanCommittedAnalyticsEvent:
-      title: ShiftPlanCommitted analytics CloudEvent
-      allOf:
-        - $ref: "#/components/schemas/CloudEventBase"
-        - type: object
-          required:
-            - type
-            - dataschema
-            - data
-          properties:
-            type:
-              type: string
-              const: "com.warehouse.wes.work-planning.plan.ShiftPlanCommitted"
-            dataschema:
-              type: string
-              const: "urn:warehouse:wes-work-planning:analytics:ShiftPlanCommitted:v1"
-            data:
-              type: object
-              required:
-                - path_id
-              properties:
-                path_id:
-                  type: string
-
     WorkUnitCreatedAnalyticsEvent:
       title: WorkUnitCreated analytics CloudEvent
       allOf:
@@ -3480,103 +3185,6 @@ components:
                 known:
                   type: boolean
 
-    PathPlanDriftDetectedEvent:
-      title: PathPlanDriftDetected CloudEvent
-      allOf:
-        - $ref: "#/components/schemas/CloudEventBase"
-        - type: object
-          required:
-            - type
-            - dataschema
-            - data
-          properties:
-            type:
-              type: string
-              const: "com.warehouse.wes.work-planning.pathplan.PathPlanDriftDetected"
-            dataschema:
-              type: string
-              const: "urn:warehouse:wes-work-planning:events:PathPlanDriftDetected:v1"
-            data:
-              type: object
-              required:
-                - path_id
-                - wes_planned_heads
-                - observed_planned_heads
-                - drift_heads
-                - observed_at
-              properties:
-                path_id:
-                  type: string
-                wes_planned_heads:
-                  type: integer
-                  format: int32
-                  description: Planned heads on this service's committed PathPlan.
-                observed_planned_heads:
-                  type: integer
-                  format: int32
-                  description: Planned heads in the latest LaborPlanObserved for the path.
-                drift_heads:
-                  type: integer
-                  format: int32
-                  description: >-
-                    Signed `observed_planned_heads - wes_planned_heads`; never
-                    zero on this event (agreeing plans raise nothing).
-                observed_at:
-                  type: string
-                  format: date-time
-                  description: >-
-                    Workforce's own commit timestamp, carried from
-                    LaborPlanObserved (not the detection time — that is the
-                    envelope `time`).
-
-    PathPlanDriftDetectedAnalyticsEvent:
-      title: PathPlanDriftDetected analytics CloudEvent
-      allOf:
-        - $ref: "#/components/schemas/CloudEventBase"
-        - type: object
-          required:
-            - type
-            - dataschema
-            - data
-          properties:
-            type:
-              type: string
-              const: "com.warehouse.wes.work-planning.pathplan.PathPlanDriftDetected"
-            dataschema:
-              type: string
-              const: "urn:warehouse:wes-work-planning:analytics:PathPlanDriftDetected:v1"
-            data:
-              type: object
-              required:
-                - path_id
-                - wes_planned_heads
-                - observed_planned_heads
-                - drift_heads
-                - observed_at
-              properties:
-                path_id:
-                  type: string
-                wes_planned_heads:
-                  type: integer
-                  format: int32
-                  description: Planned heads on this service's committed PathPlan.
-                observed_planned_heads:
-                  type: integer
-                  format: int32
-                  description: Planned heads in the latest LaborPlanObserved for the path.
-                drift_heads:
-                  type: integer
-                  format: int32
-                  description: >-
-                    Signed `observed_planned_heads - wes_planned_heads`; never
-                    zero on this event (agreeing plans raise nothing).
-                observed_at:
-                  type: string
-                  format: date-time
-                  description: >-
-                    Workforce's own commit timestamp, carried from
-                    LaborPlanObserved (not the detection time — that is the
-                    envelope `time`).
     ProductPackLevelDeclaredEvent:
       title: ProductPackLevelDeclared CloudEvent (consumed)
       description: >-
