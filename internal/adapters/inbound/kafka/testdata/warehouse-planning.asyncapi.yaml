@@ -2,7 +2,7 @@ asyncapi: 2.6.0
 
 info:
   title: warehouse-planning Domain Events
-  version: "0.8.0"
+  version: "0.9.0"
   contact:
     name: warehouse-planning maintainers
     url: https://github.com/IQVO/warehouse-planning
@@ -21,7 +21,10 @@ info:
     a retry republishes the same `id` -- consumers dedupe on it). Per plan:
     `CapacityPlanCreated` on creation; on publication
     `CapacityPlanPublished`, plus `CapacityShortageDetected` and
-    `BottleneckDetected` only when the plan has a shortage.
+    `BottleneckDetected` only when the plan has a shortage. Publishing a plan
+    supersedes the plan published before it for the same site, location,
+    path and window (ADR 0024 decision 3): `CapacityPlanSuperseded` of that
+    OLDER plan is queued first, in the same transaction.
     The `ProcessCapacity` aggregate publishes on the same topic and the same
     outbox: `ProcessCapacityRegistered` when its first (native) constraint
     brings it into being, `ProcessCapacityChanged` when a registration
@@ -192,6 +195,7 @@ channels:
           - $ref: "#/components/messages/CapacityPlanPublished"
           - $ref: "#/components/messages/CapacityShortageDetected"
           - $ref: "#/components/messages/BottleneckDetected"
+          - $ref: "#/components/messages/CapacityPlanSuperseded"
           - $ref: "#/components/messages/ProcessCapacityRegistered"
           - $ref: "#/components/messages/ProcessCapacityChanged"
           - $ref: "#/components/messages/WorkloadForecastReceived"
@@ -220,7 +224,8 @@ channels:
         Route on the full `type`; the payloads are the integration payloads plus
         the additive analytics-only fields documented per message (none on the
         WorkloadForecast and LabourPlan copies). The projector folds the four
-        CapacityPlan types and acknowledges every other type unprojected.
+        CapacityPlan types and acknowledges every other type unprojected
+        (CapacityPlanSuperseded included).
       tags:
         - name: analytics
       message:
@@ -229,6 +234,7 @@ channels:
           - $ref: "#/components/messages/CapacityPlanPublishedAnalytics"
           - $ref: "#/components/messages/CapacityShortageDetectedAnalytics"
           - $ref: "#/components/messages/BottleneckDetectedAnalytics"
+          - $ref: "#/components/messages/CapacityPlanSupersededAnalytics"
           - $ref: "#/components/messages/WorkloadForecastReceivedAnalytics"
           - $ref: "#/components/messages/LabourPlanCommittedAnalytics"
           - $ref: "#/components/messages/LabourPlanDriftDetectedAnalytics"
@@ -584,6 +590,51 @@ components:
               bottleneck_step: "REBIN"
               path_capacity: 1000
 
+    CapacityPlanSuperseded:
+      name: CapacityPlanSuperseded
+      title: Capacity plan superseded
+      summary: A newer plan of the same site, location, path and window was published; this plan is SUPERSEDED.
+      description: |
+        Raised when a plan is published while another PUBLISHED plan exists for
+        the same `(site_id, location, path_id, window_start, window_end)` (ADR
+        0024 decision 3). `subject`, the Kafka key and `data.plan_id` are the
+        OLDER plan, the one superseded; `superseded_by` is the newer plan.
+        Queued in the same transaction as, and BEFORE, the newer plan's
+        `CapacityPlanPublished` (then `CapacityShortageDetected` and
+        `BottleneckDetected` when it is short). SUPERSEDED is terminal: a plan
+        is superseded at most once and never published again. It carries the
+        older plan's identity and no quantities. Plans migration 0017 marked
+        SUPERSEDED when it backfilled a database holding several PUBLISHED
+        plans of one key raised NO event.
+        `type` = `com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanSuperseded`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: capacity-plan
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/CapacityPlanSupersededEvent"
+      examples:
+        - name: scenarioPublished
+          summary: Publishing a second scenario of the window supersedes the plan published before it.
+          payload:
+            specversion: "1.0"
+            id: "3c2b1a09-8f7e-4d6c-9b5a-4c3b2a190f8e"
+            source: "/warehouse/warehouse-planning"
+            type: "com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanSuperseded"
+            subject: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:warehouse-planning:events:CapacityPlanSuperseded:v1"
+            time: "2026-10-04T21:45:10Z"
+            data:
+              plan_id: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+              superseded_by: "9d1f0c2a-7b3e-4f5a-8c6d-2e4b1a0f9c87"
+              warehouse_id: "WH-1"
+              site_id: "SIM1"
+              location: "PATH-ZONE-A"
+              path_id: "pick-rebin-pack"
+              window_start: "2026-10-05T08:00:00Z"
+              window_end: "2026-10-05T16:00:00Z"
+
     ProcessCapacityRegistered:
       x-no-consumer-reason: "pending: new capacity fact (WPL #70); consumer not built yet"
       name: ProcessCapacityRegistered
@@ -821,6 +872,40 @@ components:
               window_end: "2026-10-05T16:00:00Z"
               bottleneck_step: "REBIN"
               path_capacity: 1000
+
+    CapacityPlanSupersededAnalytics:
+      name: CapacityPlanSupersededAnalytics
+      title: Capacity plan superseded (analytics stream)
+      summary: The analytics copy of CapacityPlanSuperseded.
+      description: |
+        Same `type`, `id` and payload as the integration CapacityPlanSuperseded;
+        only `dataschema` differs. The projector acknowledges it unprojected.
+      contentType: application/cloudevents+json
+      tags:
+        - name: analytics
+      payload:
+        $ref: "#/components/schemas/CapacityPlanSupersededAnalyticsEvent"
+      examples:
+        - name: scenarioPublished
+          summary: The analytics copy of a supersede.
+          payload:
+            specversion: "1.0"
+            id: "3c2b1a09-8f7e-4d6c-9b5a-4c3b2a190f8e"
+            source: "/warehouse/warehouse-planning"
+            type: "com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanSuperseded"
+            subject: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:warehouse-planning:analytics:CapacityPlanSuperseded:v1"
+            time: "2026-10-04T21:45:10Z"
+            data:
+              plan_id: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+              superseded_by: "9d1f0c2a-7b3e-4f5a-8c6d-2e4b1a0f9c87"
+              warehouse_id: "WH-1"
+              site_id: "SIM1"
+              location: "PATH-ZONE-A"
+              path_id: "pick-rebin-pack"
+              window_start: "2026-10-05T08:00:00Z"
+              window_end: "2026-10-05T16:00:00Z"
 
     WorkloadForecastReceived:
       x-no-consumer-reason: "pending: new requirement fact (ADR 0023); no context consumes the forecast yet"
@@ -1963,6 +2048,79 @@ components:
           format: double
           description: Normalized path capacity, ORDER per HOUR.
           example: 1000
+    CapacityPlanSupersededData:
+      type: object
+      description: Payload of CapacityPlanSuperseded (ADR 0024 decision 3); the identity of the OLDER plan.
+      required:
+        - plan_id
+        - superseded_by
+        - warehouse_id
+        - site_id
+        - location
+        - path_id
+        - window_start
+        - window_end
+      properties:
+        plan_id:
+          type: string
+          description: The superseded (OLDER) CapacityPlan id (UUID); equals the CloudEvents subject and the Kafka key.
+          example: "0b7a4c1e-5d52-4f0e-9a39-6c1f2f3a8b10"
+        superseded_by:
+          type: string
+          description: The id of the newer plan whose publication superseded plan_id.
+          example: "9d1f0c2a-7b3e-4f5a-8c6d-2e4b1a0f9c87"
+        warehouse_id:
+          type: string
+          description: Warehouse the plan is for.
+          example: "WH-1"
+        site_id:
+          type: string
+          description: >
+            Canonical site (a facility-layout Site site_code) the plan is scoped
+            to; always present, "" for a plan stored before migration 0008.
+          example: "SIM1"
+        location:
+          type: string
+          description: ProcessCapacity location the plan evaluates (the same field the plan's other events carry).
+          example: "PATH-ZONE-A"
+        path_id:
+          type: string
+          description: ProcessPath evaluated.
+          example: "pick-rebin-pack"
+        window_start:
+          type: string
+          format: date-time
+          description: Planning window start (RFC 3339, UTC).
+          example: "2026-10-05T08:00:00Z"
+        window_end:
+          type: string
+          format: date-time
+          description: Planning window end, exclusive (RFC 3339, UTC).
+          example: "2026-10-05T16:00:00Z"
+    CapacityPlanSupersededEvent:
+      description: CloudEvents 1.0 envelope of CapacityPlanSuperseded.
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanSuperseded"
+            dataschema:
+              const: "urn:warehouse:warehouse-planning:events:CapacityPlanSuperseded:v1"
+            data:
+              $ref: "#/components/schemas/CapacityPlanSupersededData"
+    CapacityPlanSupersededAnalyticsEvent:
+      description: CloudEvents 1.0 envelope of CapacityPlanSuperseded on the analytics topic.
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.warehouse-planning.capacityplan.CapacityPlanSuperseded"
+            dataschema:
+              const: "urn:warehouse:warehouse-planning:analytics:CapacityPlanSuperseded:v1"
+            data:
+              $ref: "#/components/schemas/CapacityPlanSupersededData"
     CapacityPlanCreatedEvent:
       description: CloudEvents 1.0 envelope of CapacityPlanCreated.
       allOf:
