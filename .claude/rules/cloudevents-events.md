@@ -44,8 +44,9 @@ Kafka key are the order id. Consumed types (exact):
 `com.warehouse.wes.process-path-management.processpath.ProcessPath{Created,Updated,Deactivated}`,
 `com.warehouse.wes.process-path-management.cptschedule.CPTScheduleChanged`,
 `com.warehouse.wes.work-planning.workpool.PathCapacityChanged`,
-`com.warehouse.wes.warehouse-planning.capacityplan.{CapacityPlanCreated,CapacityPlanPublished,CapacityShortageDetected}`
-(+ `BottleneckDetected`, recognised and ignored; ADR-0031, topic
+`com.warehouse.wes.warehouse-planning.capacityplan.{CapacityPlanCreated,CapacityPlanPublished,CapacityShortageDetected,CapacityPlanSuperseded}`
+(CapacityPlanSuperseded → terminal SUPERSEDED row, never constrains, ADR-0052; + `BottleneckDetected`,
+recognised and ignored; ADR-0031, topic
 `warehouse.warehouse-planning.events`, key/subject = plan id),
 `com.warehouse.wms.product-master.product.ProductClassified` (ADR-0036,
 topic `warehouse.product-master.events`, key/subject = SKU; other

@@ -2177,14 +2177,16 @@ components:
         warehouse-planning's CapacityPlanSuperseded payload (its ADR 0024
         decision 3; order-management ADR 0052). plan_id is the OLDER plan
         and equals the CloudEvents subject; superseded_by is the newer
-        plan. It carries no location, warehouse or quantities: site_id
-        becomes the read-model row's location, and on a known row every
-        stored fact is kept. window_end is exclusive.
+        plan. It carries no warehouse or quantities. The optional location
+        (the same field the plan's other events carry) becomes a tombstone
+        row's location, else site_id does; on a known row every stored fact
+        is kept. window_end is exclusive.
       required: [plan_id, superseded_by, site_id, window_start, window_end]
       properties:
         plan_id: { type: string, description: "The superseded (older) CapacityPlan id; equals the CloudEvents subject." }
         superseded_by: { type: string, description: "The newer CapacityPlan id; never equal to plan_id." }
         site_id: { type: string, description: "Site/building code, e.g. SIM1." }
+        location: { type: string, description: "Optional. The plan's location, as on CapacityPlanCreated/Published; preferred over site_id for the row." }
         path_id: { type: string }
         window_start: { type: string, format: date-time }
         window_end: { type: string, format: date-time }

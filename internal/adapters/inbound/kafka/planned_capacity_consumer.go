@@ -79,11 +79,13 @@ type capacityPlanData struct {
 
 // capacityPlanSupersededData is the CapacityPlanSuperseded payload (ADR
 // 0052): plan_id is the OLDER plan, superseded_by the newer one. It
-// carries no location, warehouse or quantities; site_id is the site.
+// carries no quantities; site_id is the site, and the optional location
+// is the same location the plan's other events carry.
 type capacityPlanSupersededData struct {
 	PlanID       string    `json:"plan_id"`
 	SupersededBy string    `json:"superseded_by"`
 	SiteID       string    `json:"site_id"`
+	Location     string    `json:"location"`
 	PathID       string    `json:"path_id"`
 	WindowStart  time.Time `json:"window_start"`
 	WindowEnd    time.Time `json:"window_end"`
@@ -239,10 +241,11 @@ func planningRequestFrom(e ce.Event) (usecases.ApplyPlannedCapacityRequest, bool
 }
 
 // supersededRequestFrom maps a CapacityPlanSuperseded to a SUPERSEDED
-// write (ADR 0052). The event's site_id becomes the row's location: it is
-// the only site field the event carries, and it is what a tombstone (a
-// plan this model never saw) is listed under. On a known row the domain
-// keeps the stored facts (order.PlannedCapacityWindow.ReplacementOf).
+// write (ADR 0052). The row's location is the event's location when it
+// carries one (the same field CapacityPlanCreated/Published carry, so a
+// tombstone is listed where the plan's own rows would be), else its
+// site_id. On a known row the domain keeps the stored facts
+// (order.PlannedCapacityWindow.ReplacementOf).
 func supersededRequestFrom(e ce.Event) (usecases.ApplyPlannedCapacityRequest, bool, error) {
 	var data capacityPlanSupersededData
 	if err := e.DataAs(&data); err != nil {
@@ -251,8 +254,12 @@ func supersededRequestFrom(e ce.Event) (usecases.ApplyPlannedCapacityRequest, bo
 	if err := subjectMatchesPlan(e, data.PlanID); err != nil {
 		return usecases.ApplyPlannedCapacityRequest{}, false, err
 	}
+	location := data.Location
+	if location == "" {
+		location = data.SiteID
+	}
 	w := order.PlannedCapacityWindow{
-		PlanID: data.PlanID, Location: data.SiteID, PathID: data.PathID,
+		PlanID: data.PlanID, Location: location, PathID: data.PathID,
 		Start: data.WindowStart.UTC(), End: data.WindowEnd.UTC(),
 		Status: order.PlannedCapacitySuperseded, SupersededBy: data.SupersededBy,
 		AsOf: e.Time().UTC(),

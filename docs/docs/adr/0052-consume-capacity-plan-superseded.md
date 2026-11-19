@@ -70,7 +70,7 @@ decision, and it must merge before the producer starts publishing.
      `time` wins.
 
 3. **Superseding a known row keeps that row's facts.** The Superseded
-   event carries no `location`, `warehouse_id`, quantities or bottleneck.
+   event carries no `warehouse_id`, quantities or bottleneck.
    When it lands on a row the model already holds, the stored row keeps
    everything it had (location, window, demand, capacity, shortage,
    bottleneck) and changes only `status` → `SUPERSEDED`,
@@ -83,8 +83,9 @@ decision, and it must merge before the producer starts publishing.
    events of the older plan may not have reached this consumer (a
    partition replay, a DLQ replay, an older plan published before this
    consumer existed). The Superseded event then inserts a SUPERSEDED row
-   with only the fields the event carries: `plan_id`, `location` =
-   `site_id` (the only site field the event has), `path_id`, the window,
+   with only the fields the event carries: `plan_id`, `location` = the
+   event's optional `location` (the field the plan's other events carry),
+   else its `site_id`, `path_id`, the window,
    `superseded_by`, the event `time`; `warehouse_id` empty and every
    quantity zero. Because of rule 2, a Published or ShortageDetected for
    that plan arriving later is a no-op: it can never make the plan
@@ -142,8 +143,9 @@ decision, and it must merge before the producer starts publishing.
   follow-up, once warehouse-planning's change merges: refresh the pin
   and add a pinned-example assertion (E1/E2 against the producer's own
   example), then delete the local example.
-- **A tombstone is listed under `site_id`.** Its `location` is the
-  event's `site_id`, and its quantities are zero: `GET /planned-capacity`
+- **A tombstone is listed under the plan's location.** Its `location` is
+  the event's `location` when present, else its `site_id`, and its
+  quantities are zero: `GET /planned-capacity`
   shows it as a SUPERSEDED row with no shortage. That is the truth this
   context knows about a plan it never saw published.
 - **A down migration forgets superseded plans.** Restoring the old CHECK

@@ -154,3 +154,16 @@ func TestPlannedCapacityConsumer_InvalidSupersededIsDeadLetteredNeverApplied(t *
 		})
 	}
 }
+
+func TestPlannedCapacityConsumer_SupersededTombstoneUsesTheEventLocationOverSiteID(t *testing.T) {
+	f := newKPCFixture()
+	data := pcSupersededData()
+	data["location"] = "PATH-ZONE-A"
+	supAt := pcEventAt.Add(time.Minute)
+	f.mustHandle(t, 1, pcTypeSup, "evt-sup", supAt, data)
+
+	w, ok := f.store.get(pcPlanID)
+	if !ok || w.Location != "PATH-ZONE-A" || w.Status != order.PlannedCapacitySuperseded {
+		t.Fatalf("window = %+v (present %v); want a SUPERSEDED tombstone at PATH-ZONE-A, not the site", w, ok)
+	}
+}
