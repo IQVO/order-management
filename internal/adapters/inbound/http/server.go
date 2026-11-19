@@ -272,7 +272,8 @@ func (s *Server) handleGetPlannedCapacity(w http.ResponseWriter, r *http.Request
 			PlanID: c.PlanID, WarehouseID: c.WarehouseID, Location: c.Location, PathID: c.PathID,
 			WindowStart: c.Start.UTC().Format(timeFormat), WindowEnd: c.End.UTC().Format(timeFormat),
 			AssignedDemand: c.AssignedDemand, CapacityOverWindow: c.CapacityOverWindow, Shortage: c.Shortage,
-			BottleneckStep: c.BottleneckStep, Status: string(c.Status), AsOf: c.AsOf.UTC().Format(timeFormat),
+			BottleneckStep: c.BottleneckStep, Status: string(c.Status), SupersededBy: c.SupersededBy,
+			AsOf: c.AsOf.UTC().Format(timeFormat),
 		}
 	}
 	writeJSON(w, http.StatusOK, plannedCapacityResponse{Site: site, Windows: out})

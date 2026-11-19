@@ -24,13 +24,21 @@ func NewPlannedCapacityRepo() *PlannedCapacityRepo {
 }
 
 // Upsert stores w unless it is stale or a downgrade of what is stored.
+// What is stored is the one domain merge (ReplacementOf): a SUPERSEDED
+// write over a known row keeps that row's facts (ADR 0052); over no row
+// it is the tombstone itself.
 func (r *PlannedCapacityRepo) Upsert(_ context.Context, w order.PlannedCapacityWindow) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if prev, ok := r.windows[w.PlanID]; ok && !w.Supersedes(prev) {
+	prev, ok := r.windows[w.PlanID]
+	if !ok {
+		r.windows[w.PlanID] = w
+		return true, nil
+	}
+	if !w.Supersedes(prev) {
 		return false, nil
 	}
-	r.windows[w.PlanID] = w
+	r.windows[w.PlanID] = w.ReplacementOf(prev)
 	return true, nil
 }
 

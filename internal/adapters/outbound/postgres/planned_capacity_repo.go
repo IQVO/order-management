@@ -25,22 +25,37 @@ func NewPlannedCapacityRepo(pool *pgxpool.Pool) *PlannedCapacityRepo {
 }
 
 const plannedCapacityColumns = `plan_id, warehouse_id, location, path_id, window_start, window_end,
-	assigned_demand, capacity_over_window, shortage, bottleneck_step, status, event_time`
+	assigned_demand, capacity_over_window, shortage, bottleneck_step, status, superseded_by, event_time`
 
 func scanPlannedCapacity(row pgx.Row) (order.PlannedCapacityWindow, error) {
 	var w order.PlannedCapacityWindow
 	var status string
+	var supersededBy *string
 	err := row.Scan(&w.PlanID, &w.WarehouseID, &w.Location, &w.PathID, &w.Start, &w.End,
-		&w.AssignedDemand, &w.CapacityOverWindow, &w.Shortage, &w.BottleneckStep, &status, &w.AsOf)
+		&w.AssignedDemand, &w.CapacityOverWindow, &w.Shortage, &w.BottleneckStep, &status, &supersededBy, &w.AsOf)
 	w.Status = order.PlannedCapacityStatus(status)
+	if supersededBy != nil {
+		w.SupersededBy = *supersededBy
+	}
 	w.Start, w.End, w.AsOf = w.Start.UTC(), w.End.UTC(), w.AsOf.UTC()
 	return w, err
 }
 
+// nullableText maps "" to SQL NULL (superseded_by is set only on a
+// SUPERSEDED row, migration 0015).
+func nullableText(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
 // Upsert writes w under its plan id if it supersedes the stored row.
 // The existing row is read FOR UPDATE and the decision is made by the one
-// domain rule (order.PlannedCapacityWindow.Supersedes), so Postgres and the
-// in-memory adapter cannot disagree.
+// domain rule (order.PlannedCapacityWindow.Supersedes); what is written is
+// the one domain merge (ReplacementOf: a SUPERSEDED write keeps a known
+// row's facts, ADR 0052), so Postgres and the in-memory adapter cannot
+// disagree.
 func (r *PlannedCapacityRepo) Upsert(ctx context.Context, w order.PlannedCapacityWindow) (applied bool, err error) {
 	tx, commit, rollback, err := beginOrJoin(ctx, r.pool)
 	if err != nil {
@@ -52,6 +67,7 @@ func (r *PlannedCapacityRepo) Upsert(ctx context.Context, w order.PlannedCapacit
 		}
 	}()
 
+	next := w
 	prev, err := scanPlannedCapacity(tx.QueryRow(ctx,
 		`SELECT `+plannedCapacityColumns+` FROM planned_capacity_windows WHERE plan_id = $1 FOR UPDATE`, w.PlanID))
 	switch {
@@ -61,19 +77,23 @@ func (r *PlannedCapacityRepo) Upsert(ctx context.Context, w order.PlannedCapacit
 		return false, err
 	case !w.Supersedes(prev):
 		return false, commit(ctx)
+	default:
+		next = w.ReplacementOf(prev)
 	}
 
 	if _, err = tx.Exec(ctx, `
 INSERT INTO planned_capacity_windows (`+plannedCapacityColumns+`, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
 ON CONFLICT (plan_id) DO UPDATE SET
 	warehouse_id = EXCLUDED.warehouse_id, location = EXCLUDED.location, path_id = EXCLUDED.path_id,
 	window_start = EXCLUDED.window_start, window_end = EXCLUDED.window_end,
 	assigned_demand = EXCLUDED.assigned_demand, capacity_over_window = EXCLUDED.capacity_over_window,
 	shortage = EXCLUDED.shortage, bottleneck_step = EXCLUDED.bottleneck_step,
-	status = EXCLUDED.status, event_time = EXCLUDED.event_time, updated_at = now()`,
-		w.PlanID, w.WarehouseID, w.Location, w.PathID, w.Start, w.End,
-		w.AssignedDemand, w.CapacityOverWindow, w.Shortage, w.BottleneckStep, string(w.Status), w.AsOf); err != nil {
+	status = EXCLUDED.status, superseded_by = EXCLUDED.superseded_by,
+	event_time = EXCLUDED.event_time, updated_at = now()`,
+		next.PlanID, next.WarehouseID, next.Location, next.PathID, next.Start, next.End,
+		next.AssignedDemand, next.CapacityOverWindow, next.Shortage, next.BottleneckStep, string(next.Status),
+		nullableText(next.SupersededBy), next.AsOf); err != nil {
 		return false, err
 	}
 	return true, commit(ctx)

@@ -28,6 +28,55 @@ func registerPlannedCapacitySteps(sc *godog.ScenarioContext, w *world) {
 	sc.Step(`^the order is not capacity-constrained$`, w.orderNotConstrained)
 	sc.Step(`^the planned capacity lists plan "([^"]*)" as "([^"]*)" with a shortage of (\d+)$`, w.plannedCapacityLists)
 	sc.Step(`^the planned capacity lists no plan "([^"]*)"$`, w.plannedCapacityListsNo)
+	sc.Step(`^warehouse-planning has superseded plan "([^"]*)" by plan "([^"]*)" for site "([^"]*)" from "([^"]*)" to "([^"]*)"$`, w.supersededPlan)
+	sc.Step(`^the order is not capacity-constrained by plan "([^"]*)"$`, w.orderNotConstrainedBy)
+	sc.Step(`^the planned capacity lists plan "([^"]*)" as superseded by plan "([^"]*)" with a shortage of (\d+)$`, w.plannedCapacityListsSuperseded)
+}
+
+// supersededPlan feeds one CapacityPlanSuperseded (ADR 0052) through the
+// same use case the Kafka consumer drives: the wire shape carries the site,
+// path and window but no quantities.
+func (w *world) supersededPlan(planID, by, site, from, to string) error {
+	start, err := time.Parse(time.RFC3339, from)
+	if err != nil {
+		return fmt.Errorf("window start %q: %w", from, err)
+	}
+	end, err := time.Parse(time.RFC3339, to)
+	if err != nil {
+		return fmt.Errorf("window end %q: %w", to, err)
+	}
+	return w.plannedApply.Execute(context.Background(), usecases.ApplyPlannedCapacityRequest{
+		EventID: "evt-bdd-superseded-" + planID,
+		Window: order.PlannedCapacityWindow{
+			PlanID: planID, Location: site, PathID: "pick-rebin-pack", Start: start, End: end,
+			Status: order.PlannedCapacitySuperseded, SupersededBy: by, AsOf: fixedNow.Add(-30 * time.Minute),
+		},
+	})
+}
+
+func (w *world) orderNotConstrainedBy(planID string) error {
+	c, ok, err := w.constraint()
+	if err != nil || !ok {
+		return err
+	}
+	windows, _ := c["windows"].([]any)
+	for _, raw := range windows {
+		if m, _ := raw.(map[string]any); m != nil && m["planId"] == planID {
+			return fmt.Errorf("capacityConstraint unexpectedly names plan %q: %v", planID, windows)
+		}
+	}
+	return nil
+}
+
+func (w *world) plannedCapacityListsSuperseded(planID, by string, shortage int) error {
+	if err := w.plannedCapacityLists(planID, string(order.PlannedCapacitySuperseded), shortage); err != nil {
+		return err
+	}
+	m, _ := w.listedWindow(planID)
+	if m["supersededBy"] != by {
+		return fmt.Errorf("plan %q supersededBy = %v, want %q", planID, m["supersededBy"], by)
+	}
+	return nil
 }
 
 // applyPlan feeds one plan to the read model under a fresh event id.
