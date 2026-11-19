@@ -849,13 +849,13 @@ components:
             id: "1c9d8e7f-6a5b-4c3d-9e2f-1a0b9c8d7e6f"
             source: "/warehouse/warehouse-planning"
             type: "com.warehouse.wes.warehouse-planning.workloadforecast.WorkloadForecastReceived"
-            subject: "SIM1/pick"
+            subject: "SIM1/PICK"
             time: "2026-10-04T21:45:10Z"
             datacontenttype: "application/json"
             dataschema: "urn:warehouse:warehouse-planning:events:WorkloadForecastReceived:v1"
             data:
               site_id: "SIM1"
-              path_id: "pick"
+              path_id: "PICK"
               total_quantity: 12000
               bucket_count: 3
               received_at: "2026-10-04T21:45:10Z"
@@ -891,14 +891,14 @@ components:
             id: "2b3c4d5e-6f70-4a81-9b2c-3d4e5f607182"
             source: "/warehouse/warehouse-planning"
             type: "com.warehouse.wes.warehouse-planning.labourplan.LabourPlanCommitted"
-            subject: "SIM1/SHIFT-AM/pick"
+            subject: "SIM1/SHIFT-AM/PICK"
             time: "2026-10-04T21:45:10Z"
             datacontenttype: "application/json"
             dataschema: "urn:warehouse:warehouse-planning:events:LabourPlanCommitted:v1"
             data:
               site_id: "SIM1"
               shift_id: "SHIFT-AM"
-              path_id: "pick"
+              path_id: "PICK"
               planned_heads: 15
               rate_units_per_hour: 112.5
               hours: 7.5
@@ -913,14 +913,14 @@ components:
             id: "8e7d6c5b-4a39-4281-a7f6-e5d4c3b2a190"
             source: "/warehouse/warehouse-planning"
             type: "com.warehouse.wes.warehouse-planning.labourplan.LabourPlanCommitted"
-            subject: "SIM1/SHIFT-AM/pick"
+            subject: "SIM1/SHIFT-AM/PICK"
             time: "2026-10-04T21:45:10Z"
             datacontenttype: "application/json"
             dataschema: "urn:warehouse:warehouse-planning:events:LabourPlanCommitted:v1"
             data:
               site_id: "SIM1"
               shift_id: "SHIFT-AM"
-              path_id: "pick"
+              path_id: "PICK"
               planned_heads: 12
               rate_units_per_hour: 112.5
               hours: 7.5
@@ -955,14 +955,14 @@ components:
             id: "5f4e3d2c-1b0a-4987-8a6b-5c4d3e2f1a09"
             source: "/warehouse/warehouse-planning"
             type: "com.warehouse.wes.warehouse-planning.labourplan.LabourPlanDriftDetected"
-            subject: "SIM1/SHIFT-AM/pick"
+            subject: "SIM1/SHIFT-AM/PICK"
             time: "2026-10-04T21:45:10Z"
             datacontenttype: "application/json"
             dataschema: "urn:warehouse:warehouse-planning:events:LabourPlanDriftDetected:v1"
             data:
               site_id: "SIM1"
               shift_id: "SHIFT-AM"
-              path_id: "pick"
+              path_id: "PICK"
               planned_heads: 15
               committed_heads: 12
               drift_heads: -3
@@ -989,13 +989,13 @@ components:
             id: "1c9d8e7f-6a5b-4c3d-9e2f-1a0b9c8d7e6f"
             source: "/warehouse/warehouse-planning"
             type: "com.warehouse.wes.warehouse-planning.workloadforecast.WorkloadForecastReceived"
-            subject: "SIM1/pick"
+            subject: "SIM1/PICK"
             time: "2026-10-04T21:45:10Z"
             datacontenttype: "application/json"
             dataschema: "urn:warehouse:warehouse-planning:analytics:WorkloadForecastReceived:v1"
             data:
               site_id: "SIM1"
-              path_id: "pick"
+              path_id: "PICK"
               total_quantity: 12000
               bucket_count: 3
               received_at: "2026-10-04T21:45:10Z"
@@ -1024,14 +1024,14 @@ components:
             id: "2b3c4d5e-6f70-4a81-9b2c-3d4e5f607182"
             source: "/warehouse/warehouse-planning"
             type: "com.warehouse.wes.warehouse-planning.labourplan.LabourPlanCommitted"
-            subject: "SIM1/SHIFT-AM/pick"
+            subject: "SIM1/SHIFT-AM/PICK"
             time: "2026-10-04T21:45:10Z"
             datacontenttype: "application/json"
             dataschema: "urn:warehouse:warehouse-planning:analytics:LabourPlanCommitted:v1"
             data:
               site_id: "SIM1"
               shift_id: "SHIFT-AM"
-              path_id: "pick"
+              path_id: "PICK"
               planned_heads: 15
               rate_units_per_hour: 112.5
               hours: 7.5
@@ -1062,14 +1062,14 @@ components:
             id: "5f4e3d2c-1b0a-4987-8a6b-5c4d3e2f1a09"
             source: "/warehouse/warehouse-planning"
             type: "com.warehouse.wes.warehouse-planning.labourplan.LabourPlanDriftDetected"
-            subject: "SIM1/SHIFT-AM/pick"
+            subject: "SIM1/SHIFT-AM/PICK"
             time: "2026-10-04T21:45:10Z"
             datacontenttype: "application/json"
             dataschema: "urn:warehouse:warehouse-planning:analytics:LabourPlanDriftDetected:v1"
             data:
               site_id: "SIM1"
               shift_id: "SHIFT-AM"
-              path_id: "pick"
+              path_id: "PICK"
               planned_heads: 15
               committed_heads: 12
               drift_heads: -3
@@ -1085,6 +1085,14 @@ components:
         `site_code`, or the deprecated `building_id` when `site_code` is absent
         (ADR 0021): rate = `planned_heads * planned_rate` (UNIT/HOUR), window =
         `[time, time + planned_hours)`. Deduped on the CloudEvents `id`.
+        A line with a `shift_id` then records its committed heads (`planned_heads`)
+        for (site, `shift_id`, `path_id`) and, when a labour plan exists for that key
+        and the drift is news, raises `LabourPlanDriftDetected`, in the same unit of
+        work as the claim and the LABOR constraint (ADR 0023 decision 3). `path_id` is
+        matched case-insensitively: the committed heads are keyed on its canonical
+        form (trimmed, upper case), the form the labour plan is keyed on, so a line
+        for `pack` meets the plan PUT as `PACK`. A line without `shift_id` records no
+        committed heads.
       contentType: application/cloudevents+json
       tags:
         - name: consumed
@@ -2075,8 +2083,8 @@ components:
           example: "SIM1"
         path_id:
           type: string
-          description: The process path the volume is due on.
-          example: "pick"
+          description: The process path the volume is due on, in upper case (trimmed), whatever case it was received in.
+          example: "PICK"
         total_quantity:
           type: integer
           format: int64
@@ -2126,8 +2134,8 @@ components:
           example: "SHIFT-AM"
         path_id:
           type: string
-          description: The process path the heads are planned on.
-          example: "pick"
+          description: The process path the heads are planned on, in upper case (trimmed), whatever case it was committed in.
+          example: "PICK"
         planned_heads:
           type: integer
           minimum: 0
@@ -2179,7 +2187,8 @@ components:
           example: "SHIFT-AM"
         path_id:
           type: string
-          example: "pick"
+          description: The process path of the plan and the commitment, in upper case (trimmed).
+          example: "PICK"
         planned_heads:
           type: integer
           description: The labour plan's planned heads.
@@ -2272,7 +2281,8 @@ components:
         The LABOR constraint is planned_heads x planned_rate UNIT per HOUR at location site_code (or
         building_id when site_code is absent, ADR 0021) for the window [CloudEvents time, time +
         planned_hours); heads, rate and hours are not range-checked here (a value the domain rejects is
-        skipped). shift_id is not read.
+        skipped). A line with a shift_id also records its committed heads for the labour plan drift
+        (ADR 0023 decision 3), keyed on (site, shift_id, path_id in upper case).
       required: [path_id]
       properties:
         site_code:
@@ -2285,10 +2295,13 @@ components:
           example: "BLD1"
         shift_id:
           type: string
+          description: The shift the committed heads are for; absent or blank records no committed heads.
           example: "SHIFT1"
         path_id:
           type: string
-          description: Becomes the ProcessType (upper-cased) of the LABOR constraint.
+          description: >-
+            Case-insensitive. Becomes the ProcessType (upper-cased) of the LABOR constraint and, trimmed
+            and upper-cased, the path of the committed heads.
           example: "pack"
         planned_heads:
           type: integer
