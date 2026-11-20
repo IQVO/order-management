@@ -95,18 +95,20 @@ func (uc *GetPlannedCapacity) Execute(ctx context.Context, site string, from *ti
 
 // OrderCapacityConstraints answers, for one order, which published
 // shortage windows its promise is exposed to (order.CapacityConstraints).
-// The planning `location` it matches on is resolved per order (ADR 0047):
-// the order's caller-assigned FulfillmentSiteID when set — the same site its
-// promise was computed against — else DefaultSiteID, the configured
-// PLANNED_CAPACITY_SITE_ID (itself defaulting to DEFAULT_SITE_ID).
+// The site it matches on is resolved per order (ADR 0047): the order's
+// caller-assigned FulfillmentSiteID when set — the same site its promise
+// was computed against — else DefaultSiteID, the configured
+// PLANNED_CAPACITY_SITE_ID (itself defaulting to DEFAULT_SITE_ID). A plan
+// matches that site by its site_id when it has one, else by its location
+// (ADR 0031 amendment).
 type OrderCapacityConstraints struct {
 	Windows ports.PlannedCapacityRepo
 	Clock   ports.Clock
-	// DefaultSiteID is the location matched for an order without a site.
+	// DefaultSiteID is the site matched for an order without a site.
 	DefaultSiteID string
 }
 
-// SiteFor returns the planning location o is matched against.
+// SiteFor returns the site o is matched against.
 func (uc *OrderCapacityConstraints) SiteFor(o *order.Order) string {
 	return order.PromiseSiteFor(o, uc.DefaultSiteID)
 }
@@ -119,7 +121,7 @@ func (uc *OrderCapacityConstraints) For(ctx context.Context, o *order.Order) ([]
 	}
 	now := uc.Clock.Now()
 	site := uc.SiteFor(o)
-	windows, err := uc.Windows.ListByLocation(ctx, site, now)
+	windows, err := uc.Windows.ListForSite(ctx, site, now)
 	if err != nil {
 		return nil, err
 	}

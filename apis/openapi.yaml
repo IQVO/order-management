@@ -47,8 +47,10 @@ info:
     things (commands are noun sub-resources such as
     `POST /orders/{id}/releases` and `POST /orders/{id}/allocation-retries`),
     EVERY `POST` is behind the Idempotency-Key middleware (a retry replays the
-    stored answer with the response header `Idempotency-Replayed: true`; the
-    same key with a different method, path or body is 409
+    stored answer, when the first answer is final for the request, with the
+    response header `Idempotency-Replayed: true`; a refusal that depends on
+    state that can change is not stored, see the `Idempotency-Key` parameter
+    and ADR 0054; the same key with a different method, path or body is 409
     `idempotency-key-reused`; a missing key is 400
     `idempotency-key-required`, a malformed one 400
     `idempotency-key-invalid`), and `DELETE /orders/{id}` is idempotent by
@@ -188,7 +190,14 @@ paths:
         header. A retry with the same key, method, path and body replays the
         stored answer (with `Idempotency-Replayed: true`) and creates no
         second order; the same key with another body is 409
-        `idempotency-key-reused`.
+        `idempotency-key-reused`. Only a final answer is stored: a 2xx, or a
+        refusal that is a function of the request (400 `malformed-request-body`,
+        `order-without-lines`, `empty-sku`, `invalid-fulfillment-site-id`, 422
+        `non-positive-quantity`, `held-order-must-be-ship-complete`). A
+        refusal that depends on state that can change
+        (`unknown-process-path`, `line-ineligible-for-resolved-path`) and every
+        5xx are not stored: the key is released and a retry under the same
+        key executes again.
       tags: [Orders]
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -453,7 +462,11 @@ paths:
         0023/0048): a retry with the same key, method, path and body replays
         the stored answer with `Idempotency-Replayed: true` and runs nothing
         again, so the key row, the order change and the outbox rows commit
-        together.
+        together. A refusal that depends on the order's state or on a
+        concurrent writer (`order-not-held`, `concurrent-modification`) is not
+        stored: the key is released and a retry under the same key executes
+        again; a refusal that is a function of the request (`empty-order-id`)
+        and a 2xx are stored.
       tags: [Allocation]
       parameters:
         - $ref: "#/components/parameters/OrderId"
@@ -538,7 +551,10 @@ paths:
         0023/0048): a retry with the same key, method, path and body replays
         the stored answer with `Idempotency-Replayed: true` and allocates
         nothing again, so the key row, the order change and the outbox rows
-        commit together.
+        commit together. A refusal that depends on the order's state or on a
+        concurrent writer (`no-backordered-lines`, `concurrent-modification`)
+        and every 5xx are not stored: the key is released and a retry under
+        the same key executes again.
       tags: [Allocation]
       parameters:
         - $ref: "#/components/parameters/OrderId"
@@ -623,9 +639,12 @@ paths:
         warehouse-planning publishes on `warehouse.warehouse-planning.events`.
         It is not live execution state and is never refreshed by calling
         warehouse-planning. Windows of every `status` are listed (a `DRAFT`
-        is visible here but never influences an order; only a `PUBLISHED`
-        plan with `shortage > 0` annotates orders — see `capacityConstraint`
-        on the Order schema). Windows that ended before `from` are omitted.
+        is visible here but never influences an order; a `SUPERSEDED` plan
+        was replaced by a newer one of the same window, names it in
+        `supersededBy` and never influences an order again, ADR 0052; only a
+        `PUBLISHED` plan with `shortage > 0` annotates orders — see
+        `capacityConstraint` on the Order schema). Windows that ended before
+        `from` are omitted.
         This route exists only when the integration is enabled; otherwise it
         is a 404.
 
@@ -735,7 +754,24 @@ components:
         `idempotency-key-invalid`; a replay with the same key and the same
         method, path and body returns the original response plus
         `Idempotency-Replayed: true`, while the same key with a different
-        method, path or body is 409 `idempotency-key-reused`. It is declared
+        method, path or body is 409 `idempotency-key-reused`.
+
+
+        What is replayed (ADR 0054): a 2xx, and a refusal that is a function
+        of the request alone (400 `malformed-request-body`, `order-without-lines`,
+        `empty-sku`, `empty-order-id`, `invalid-fulfillment-site-id`; 404
+        `order-not-found`; 422 `non-positive-quantity`,
+        `held-order-must-be-ship-complete`). What is NOT stored, so the key is
+        released and the same request under the same key executes again
+        (a different body under a released key is a new request, not a reuse):
+        a 5xx (`downstream-unavailable`, `downstream-not-configured`,
+        `internal-error`), and every refusal that depends on state that can
+        change: 409 `concurrent-modification`, `order-not-held`,
+        `no-backordered-lines`, `no-allocated-lines`, `promise-date-not-set`,
+        `order-line-*`, `order-already-released`, and 400
+        `unknown-process-path`, `line-ineligible-for-resolved-path` (the
+        process-path catalogue and product classification are fed by events
+        from other contexts). Retry those with the same key. It is declared
         optional here only because the in-memory development mode (no
         `DATABASE_URL`, the mode the Schemathesis contract job boots) has no
         transactional store and gates the middleware off.
@@ -1010,8 +1046,11 @@ components:
         The order-level status, ALWAYS derived from the line statuses and
         never stored, so it cannot drift out of sync with the lines it
         summarises. `Received` -> `Allocated` | `PartiallyAllocated` |
-        `Backordered` -> `Released` | `PartiallyReleased`, with `Cancelled`
-        reachable only from a pre-release state (BR6).
+        `Backordered` -> `Released` | `PartiallyReleased` -> `PartiallyShipped`
+        | `Shipped`, with `Cancelled` reachable only from a pre-release state
+        (BR6). `Shipped` means every line has shipped and `PartiallyShipped`
+        that some have: both are reached when outbound-shipping's
+        `ShipmentConfirmed` is consumed (ADR 0051).
       enum:
         - Received
         - Allocated
@@ -1019,6 +1058,8 @@ components:
         - Backordered
         - Released
         - PartiallyReleased
+        - PartiallyShipped
+        - Shipped
         - Cancelled
       example: Allocated
 
@@ -1032,8 +1073,9 @@ components:
         same call once ship-complete rule BR3 allows it, ADR 0005 — the
         released lines are then announced on Kafka for wes-work-planning to
         react to independently; nothing waits for it to accept the work);
-        any pre-release state -> `Cancelled`.
-      enum: [Pending, Allocated, Backordered, Released, Cancelled]
+        `Released` -> `Shipped` when outbound-shipping confirms the shipment
+        that carries the line (ADR 0051); any pre-release state -> `Cancelled`.
+      enum: [Pending, Allocated, Backordered, Released, Shipped, Cancelled]
       example: Allocated
 
     OrderLine:
@@ -1157,7 +1199,19 @@ components:
           example: WH-1
         location:
           type: string
-          description: Site/building code.
+          description: >-
+            The ProcessCapacity location the plan evaluates; a site code for
+            a plan that never carried a `siteId`. `GET /planned-capacity`
+            lists by this field.
+          example: SIM1
+        siteId:
+          type: string
+          description: >-
+            The plan's canonical site (warehouse-planning's `site_id`), when
+            it carries one; omitted otherwise. An order is annotated by a
+            plan whose `siteId` equals the order's site, else, for a plan
+            without one, whose `location` does (ADR 0031 amendment). A write
+            without a site id never erases a stored one.
           example: SIM1
         pathId:
           type: string
@@ -1189,9 +1243,18 @@ components:
           example: REBIN
         status:
           type: string
-          enum: [DRAFT, PUBLISHED]
-          description: Only PUBLISHED plans with a shortage annotate orders.
+          enum: [DRAFT, PUBLISHED, SUPERSEDED]
+          description: >-
+            Only PUBLISHED plans with a shortage annotate orders. SUPERSEDED
+            (ADR 0052) is terminal: a newer plan of the same window replaced
+            this one, and it never annotates an order again.
           example: PUBLISHED
+        supersededBy:
+          type: string
+          description: >-
+            The id of the newer plan that replaced this one. Present only
+            when `status` is SUPERSEDED (ADR 0052).
+          example: 7e2f9a1c-3b4d-4e5f-8a6b-9c0d1e2f3a4b
         asOf:
           type: string
           format: date-time

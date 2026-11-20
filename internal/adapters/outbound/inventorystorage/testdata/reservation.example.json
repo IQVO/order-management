@@ -1,0 +1,11 @@
+{
+  "id": "res-a1b2c3d4-0000-0000-0000-000000000001",
+  "sku": "SKU-1",
+  "quantity": 6,
+  "demandRef": "order-42",
+  "ownerRef": "seller-a",
+  "lineNo": 1,
+  "status": "ACTIVE",
+  "createdAt": "2026-08-22T14:20:00Z",
+  "expiresAt": "2026-08-22T14:50:00Z"
+}

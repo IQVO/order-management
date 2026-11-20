@@ -414,6 +414,14 @@ type PlannedCapacityRepo interface {
 	// bounded; the authoritative overlap rule stays in the domain
 	// (PlannedCapacityWindow.Overlaps).
 	ListByLocation(ctx context.Context, location string, endingAfter time.Time) ([]order.PlannedCapacityWindow, error)
+
+	// ListForSite returns every stored window (any status) that
+	// PlannedCapacityWindow.MatchesSite(site) accepts and whose End is
+	// after endingAfter, ordered by Start then PlanID: windows whose
+	// site_id is site, plus windows with no site_id whose location is
+	// site. It feeds the order annotation (ADR 0031 amendment); GET
+	// /planned-capacity keeps listing by location.
+	ListForSite(ctx context.Context, site string, endingAfter time.Time) ([]order.PlannedCapacityWindow, error)
 }
 
 // PlannedCapacityProcessedEvents is ApplyPlannedCapacity's idempotency

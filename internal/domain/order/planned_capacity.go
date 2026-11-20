@@ -9,9 +9,11 @@ import (
 )
 
 // PlannedCapacityStatus is the lifecycle state of a warehouse-planning
-// CapacityPlan as order-management sees it (ADR 0031). Only a PUBLISHED
-// plan is a statement an operator has committed to; a DRAFT is kept in
-// the read model for visibility but never influences an order.
+// CapacityPlan as order-management sees it (ADR 0031, ADR 0052). Only a
+// PUBLISHED plan is a statement an operator has committed to; a DRAFT is
+// kept in the read model for visibility but never influences an order,
+// and a SUPERSEDED plan has been replaced by a newer one and never will
+// again.
 type PlannedCapacityStatus string
 
 const (
@@ -21,6 +23,10 @@ const (
 	// PlannedCapacityPublished: CapacityPlanPublished (or the
 	// CapacityShortageDetected raised with it) was observed.
 	PlannedCapacityPublished PlannedCapacityStatus = "PUBLISHED"
+	// PlannedCapacitySuperseded: CapacityPlanSuperseded was observed — a
+	// newer plan of the same window replaced this one (ADR 0052). Terminal
+	// in the read model and never constrains a promise.
+	PlannedCapacitySuperseded PlannedCapacityStatus = "SUPERSEDED"
 )
 
 // ErrInvalidPlannedCapacity is returned by PlannedCapacityWindow.Validate
@@ -40,9 +46,15 @@ var ErrInvalidPlannedCapacity = errors.New("order: invalid planned capacity wind
 // Identity is PlanID (last writer wins, see Supersedes); End is exclusive,
 // as warehouse-planning publishes it.
 type PlannedCapacityWindow struct {
-	PlanID             string
-	WarehouseID        string
-	Location           string // site/building code, e.g. "SIM1"
+	PlanID      string
+	WarehouseID string
+	Location    string // the ProcessCapacity location the plan evaluates; a site code for a legacy plan
+	// SiteID is the plan's canonical site (warehouse-planning ADR 0012),
+	// empty for a plan that never carried one. Only CapacityPlanPublished
+	// and CapacityPlanSuperseded carry it; a write without one never
+	// erases a stored one (ReplacementOf). MatchesSite is the one place it
+	// is read.
+	SiteID             string
 	PathID             string // warehouse-planning's own path label, informational
 	Start              time.Time
 	End                time.Time
@@ -51,6 +63,9 @@ type PlannedCapacityWindow struct {
 	Shortage           float64
 	BottleneckStep     string
 	Status             PlannedCapacityStatus
+	// SupersededBy is the id of the newer plan that replaced this one;
+	// set only on a SUPERSEDED row (ADR 0052), empty otherwise.
+	SupersededBy string
 	// AsOf is the CloudEvents `time` of the event that wrote this row.
 	AsOf time.Time
 }
@@ -74,13 +89,32 @@ func (w PlannedCapacityWindow) Validate() error {
 	if w.AssignedDemand < 0 || w.CapacityOverWindow < 0 || w.Shortage < 0 {
 		return invalidPlanned("quantities must not be negative")
 	}
-	if w.Status != PlannedCapacityDraft && w.Status != PlannedCapacityPublished {
-		return invalidPlanned("unknown status " + string(w.Status))
+	if err := w.validateStatus(); err != nil {
+		return err
 	}
 	if w.AsOf.IsZero() {
 		return invalidPlanned("event time is required")
 	}
 	return nil
+}
+
+// validateStatus checks the status is known and, for a SUPERSEDED row,
+// that it names a successor other than itself (ADR 0052).
+func (w PlannedCapacityWindow) validateStatus() error {
+	switch w.Status {
+	case PlannedCapacityDraft, PlannedCapacityPublished:
+		return nil
+	case PlannedCapacitySuperseded:
+		if w.SupersededBy == "" {
+			return invalidPlanned("superseded by is required for a superseded plan")
+		}
+		if w.SupersededBy == w.PlanID {
+			return invalidPlanned("a plan cannot supersede itself")
+		}
+		return nil
+	default:
+		return invalidPlanned("unknown status " + string(w.Status))
+	}
 }
 
 func invalidPlanned(reason string) error {
@@ -106,16 +140,73 @@ func (w PlannedCapacityWindow) Constraining() bool {
 	return w.Status == PlannedCapacityPublished && w.Shortage > 0
 }
 
-// Supersedes reports whether w should replace prev for the same PlanID
-// (last-writer-wins). A later (or equal) occurred-at wins, so an
-// out-of-order older event never overwrites a newer one; and a DRAFT
-// never replaces a PUBLISHED row, because a plan is published at most
-// once and is never un-published.
+// Supersedes reports whether w should replace prev for the same PlanID.
+//
+//   - SUPERSEDED is terminal (ADR 0052): nothing replaces a SUPERSEDED
+//     prev — not a later Created/Published/ShortageDetected (a redelivery
+//     or an out-of-order event), not a second Superseded.
+//   - A SUPERSEDED w replaces every other status regardless of time: the
+//     producer never brings a superseded plan back.
+//   - Otherwise last-writer-wins (ADR 0031): a later (or equal)
+//     occurred-at wins, so an out-of-order older event never overwrites a
+//     newer one; and a DRAFT never replaces a PUBLISHED row, because a
+//     plan is published at most once and is never un-published.
 func (w PlannedCapacityWindow) Supersedes(prev PlannedCapacityWindow) bool {
+	if prev.Status == PlannedCapacitySuperseded {
+		return false
+	}
+	if w.Status == PlannedCapacitySuperseded {
+		return true
+	}
 	if prev.Status == PlannedCapacityPublished && w.Status == PlannedCapacityDraft {
 		return false
 	}
 	return !w.AsOf.Before(prev.AsOf)
+}
+
+// ReplacementOf returns the row to store when w supersedes prev (call it
+// only once Supersedes(prev) holds). A CapacityPlanSuperseded carries no
+// warehouse, quantities or bottleneck, so superseding a known row keeps
+// every fact prev had and changes only the status, the successor and
+// AsOf (ADR 0052). Any other write replaces prev whole, window included
+// (a re-planned window overwrites, never accumulates).
+//
+// The site id is merged, never erased (ADR 0031 amendment): the later
+// events of a plan (CapacityShortageDetected, a late Created) carry only
+// `location`, so a write without a site id keeps the stored one. A
+// SUPERSEDED write keeps a stored site id and only fills an empty one; any
+// other write's own site id replaces the stored one.
+func (w PlannedCapacityWindow) ReplacementOf(prev PlannedCapacityWindow) PlannedCapacityWindow {
+	if w.Status != PlannedCapacitySuperseded {
+		w.SiteID = firstNonEmpty(w.SiteID, prev.SiteID)
+		return w
+	}
+	next := prev
+	next.Status = PlannedCapacitySuperseded
+	next.SupersededBy = w.SupersededBy
+	next.AsOf = w.AsOf
+	next.SiteID = firstNonEmpty(prev.SiteID, w.SiteID)
+	return next
+}
+
+// firstNonEmpty returns a, or b when a is empty.
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
+// MatchesSite reports whether w is a statement about site. A plan that
+// carries a site id matches only that site, whatever its location (the
+// location is a ProcessCapacity location, not necessarily a site code); a
+// plan that never carried one matches by location, the behaviour before
+// the site id existed (ADR 0031 amendment). Exact, case-sensitive.
+func (w PlannedCapacityWindow) MatchesSite(site string) bool {
+	if w.SiteID != "" {
+		return w.SiteID == site
+	}
+	return w.Location == site
 }
 
 // CapacityConstraints returns the published shortage windows at site that
@@ -138,7 +229,7 @@ func CapacityConstraints(o *Order, now time.Time, site string, windows []Planned
 	cutoffs := promiseCutoffs(o)
 	var out []PlannedCapacityWindow
 	for _, w := range windows {
-		if w.Location != site || !w.Constraining() {
+		if !w.MatchesSite(site) || !w.Constraining() {
 			continue
 		}
 		for _, cutoff := range cutoffs {

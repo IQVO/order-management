@@ -114,14 +114,21 @@ func (s *kpcStore) Upsert(_ context.Context, w order.PlannedCapacityWindow) (boo
 			return false, err
 		}
 	}
-	if prev, ok := s.windows[w.PlanID]; ok && !w.Supersedes(prev) {
-		return false, nil
+	if prev, ok := s.windows[w.PlanID]; ok {
+		if !w.Supersedes(prev) {
+			return false, nil
+		}
+		w = w.ReplacementOf(prev)
 	}
 	s.windows[w.PlanID] = w
 	return true, nil
 }
 
 func (s *kpcStore) ListByLocation(context.Context, string, time.Time) ([]order.PlannedCapacityWindow, error) {
+	return nil, nil
+}
+
+func (s *kpcStore) ListForSite(context.Context, string, time.Time) ([]order.PlannedCapacityWindow, error) {
 	return nil, nil
 }
 

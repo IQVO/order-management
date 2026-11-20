@@ -41,6 +41,8 @@ integrations are switched off.
 | Exit with `… PRODUCT_CLASSIFICATION_MODE=kafka requires PRODUCT_CLASSIFICATION_CONSUMER_GROUP …` or `… requires KAFKA_BROKERS` | `kafka` mode without its group or brokers. | Container env. | Set both. The chart renders `KAFKA_BROKERS` when `productClassification.consumerGroup` is set. |
 | Exit with `PATH_CATALOGUE_SOURCE=kafka requires KAFKA_BROKERS to be set` | Catalogue enabled through `extraEnv` while the chart did not render `KAFKA_BROKERS` (it only does for `eventPublisher=kafka` or a consumer group). | Rendered Deployment env. | Add `KAFKA_BROKERS` to `extraEnv` or enable one of the conditions. |
 | Exit with `invalid release confirmation configuration: …` (`unknown RELEASE_CONFIRMATION_MODE "x" (want kafka or off)`, or `RELEASE_CONFIRMATION_MODE=kafka requires RELEASE_CONFIRMATION_CONSUMER_GROUP`, `… requires KAFKA_BROKERS`, `… requires DATABASE_URL`, `… requires EVENT_PUBLISHER=kafka`) | The release-confirmation loop (ADR 0043) is switched on without one of its prerequisites, or the mode is misspelt. | Container env; the message names the missing variable. | Set it, or leave `releaseConfirmation.mode` empty (`RELEASE_CONFIRMATION_MODE=off`, the default). In the chart set `releaseConfirmation.mode=kafka` together with `config.eventPublisher=kafka` and a database; the chart renders the group and `KAFKA_BROKERS`. |
+| Exit with `invalid outbound shipping consumer configuration: …` (`unknown OUTBOUND_SHIPPING_CONSUMER_MODE "x" (want kafka or off)`, or `OUTBOUND_SHIPPING_CONSUMER_MODE=kafka requires OUTBOUND_SHIPPING_CONSUMER_GROUP`, `… requires KAFKA_BROKERS`, `… requires DATABASE_URL`) | The outbound-shipping consumer (ADR 0051) is switched on without one of its prerequisites, or the mode is misspelt. | Container env; the message names the missing variable. | Set it, or leave `OUTBOUND_SHIPPING_CONSUMER_MODE` unset (`off`). |
+| Orders stay `Released` after their load departed | The outbound-shipping consumer is off (the default, and the chart and `warehouse-infra` do not set it), or the event named an order this service does not know or one with no `Released` line (WARN `shipment confirmation names …, skipping`). | `OUTBOUND_SHIPPING_CONSUMER_MODE` in the container env; the WARN lines; the lag of `OUTBOUND_SHIPPING_CONSUMER_GROUP` on `warehouse.outbound-shipping.events`. | Enable the consumer (runbook, "Turn the outbound-shipping consumer on or off"). A skipped order is not retried. |
 | Exit with `process-path catalogue did not become ready within 1m0s` (or the CPT-schedule or path-capacity variant) | The cache could not replay its topic in 60 s: broker unreachable, or a very large topic. | Broker health; the offsets of `warehouse.process-path-management.events` and `warehouse.work-planning.events`. | Fix broker reachability. Each boot replays the whole topic, so very long retention slows boot. |
 | Exit with `run migrations (after 5 attempts): …` or `ping database (after 5 attempts): …` | Postgres unreachable or rejecting the credentials for longer than the boot retry budget (5 attempts, about 15 s of backoff). | The last error in the message (it is the real one, for example `password authentication failed`). | Fix the DSN or the database. One or two `retrying` lines in the first ~10 s are normal: the Istio sidecar resets the first dial. |
 | Pods crash-loop with `pq: unnamed prepared statement does not exist` or `canceling statement due to statement timeout` during migrations | Migrations go through PgBouncer in transaction-pooling mode, where golang-migrate's advisory lock does not hold (ADR 0029). | Is `MIGRATIONS_DATABASE_URL` set, and is it a direct DSN? | Provision the direct DSN under the Secret key `MIGRATIONS_DATABASE_URL`. |
@@ -60,15 +62,15 @@ Optimistic concurrency surfaces as `409 concurrent-modification`.
 | --- | --- | --- | --- |
 | 400 | `malformed-request-body` | Body is not valid JSON. | Fix the client. |
 | 400 | `order-without-lines`, `empty-sku`, `empty-order-id`, `empty-path-id`, `order-line-not-found` | Validation in the adapter or domain. | Fix the request. |
-| 400 | `unknown-process-path` | The path chosen for a line is not active in the process-path catalogue (`PATH_CATALOGUE_SOURCE=kafka`). When no active path declares `CUSTOMER_ORDER` in its intake, selection falls back to `pick`, so this also fires if `pick` itself is not in the catalogue ([ADR 0042](../adr/0042-path-selection-honours-process-path-intake.md)). | Check process-path-management's catalogue for a deactivated path, and that its declared catalogue was seeded (`GET /process-paths` shows `intake: ["CUSTOMER_ORDER"]` on PICK). |
+| 400 | `unknown-process-path` | Retry with the same key once the catalogue has the path (not stored, ADR 0054). The path chosen for a line is not active in the process-path catalogue (`PATH_CATALOGUE_SOURCE=kafka`). When no active path declares `CUSTOMER_ORDER` in its intake, selection falls back to `pick`, so this also fires if `pick` itself is not in the catalogue ([ADR 0042](../adr/0042-path-selection-honours-process-path-intake.md)). | Check process-path-management's catalogue for a deactivated path, and that its declared catalogue was seeded (`GET /process-paths` shows `intake: ["CUSTOMER_ORDER"]` on PICK). |
 | 400 | `idempotency-key-required` | `POST /orders` without `Idempotency-Key` while `DATABASE_URL` is set. | Send a fresh key per new order. The operator MFE sends one per submission (ADR 0038) and CORS allows the header; if the MFE still gets this, it is running an old `web/` build. |
 | 400 | `invalid-query-parameter` | `GET /planned-capacity` without `site`, or with a `from` that is not RFC 3339. | Fix the query. |
 | 404 | `order-not-found` | Unknown id. In-memory mode loses every order on restart. | Check the id and `DATABASE_URL`. |
 | 404 (no problem body) | n/a | `GET /planned-capacity` while `PLANNED_CAPACITY_CONSUMER_GROUP` is unset: the route is not registered. | Set the group. |
-| 409 | `order-already-released` | Cancel after any line was released (BR6). | Expected; v1 has no claw-back (ADR 0004). |
+| 409 | `order-already-released` | Cancel after any line was released or shipped (BR6). | Expected; v1 has no claw-back (ADR 0004). |
 | 409 | `no-backordered-lines`, `no-allocated-lines`, `promise-date-not-set`, `order-not-held`, `order-line-already-allocated`, `order-line-not-pending`, `order-line-not-backordered`, `order-line-not-allocated` | The order is not in the state the command needs: for example `retry-allocation` on an order with nothing backordered, or `release` on an order that was not held. | Read the order first (`GET /orders/{id}`). |
 | 409 | `idempotency-key-reused` | Same `Idempotency-Key` with a different method, path or body (was 422 before ADR 0048). | Use a new key for a different request. |
-| 409 | `concurrent-modification` | Another writer (an HTTP call or the re-promise consumer) saved the order first; the `version` column check failed (ADR 0024). | Re-read and retry. |
+| 409 | `concurrent-modification` | Another writer (an HTTP call or the re-promise consumer) saved the order first; the `version` column check failed (ADR 0024). | Re-read and retry with the same key: the refusal is not stored (ADR 0054). |
 | 422 | `non-positive-quantity`, `line-ineligible-for-resolved-path` | Line validation; no eligible path for the line's attributes. | Fix the line, or check the product classification copy. |
 | 422 | `held-order-must-be-ship-complete` | `releaseOnAllocation: false` with `allowPartialShipment: true`. | Send one or the other (ADR 0020). |
 | 503 | `downstream-not-configured` | `INVENTORY_STORAGE_MODE` is permissive. `POST /orders` still answers `201` with the order `Received` and its lines `Pending`; commands that must call inventory-storage answer 503. | Set `INVENTORY_STORAGE_MODE=http` and `INVENTORY_STORAGE_BASE_URL`. |
@@ -78,13 +80,24 @@ Optimistic concurrency surfaces as `409 concurrent-modification`.
 
 ### Idempotency-Key behaviour
 
-- The middleware wraps `POST /orders` only, and only when `DATABASE_URL`
-  is set.
+- The middleware wraps every `POST` (`/orders`, `/orders/{id}/releases`,
+  `/orders/{id}/allocation-retries`), and only when `DATABASE_URL` is set.
 - The key and a SHA-256 of the body are stored in `idempotency_keys` in
   the **same transaction** as the order and its outbox rows.
-- **Every** normal response is cached, errors included. A retry with the
-  same key and body replays the stored status and body, even a `500`.
-  To try again after a failure, use a new key.
+- A retry with the same key and body replays the stored status and body
+  (`Idempotency-Replayed: true`) only when the first answer is final for the
+  request (ADR 0054): a 2xx, or a refusal that is a function of the request
+  (`FINAL`, e.g. `422 non-positive-quantity`, `404 order-not-found`).
+- A refusal that depends on state that can change (`RETRYABLE`:
+  `concurrent-modification`, `unknown-process-path`,
+  `line-ineligible-for-resolved-path`, `order-not-held`, `no-backordered-lines`
+  and the other state refusals) and every 5xx or panic are **not stored**: the
+  key row is rolled back with the rest of the request, a retry under the same
+  key executes again, and a different body under that key is a new request.
+  Do not mint a new key to retry them. A refusal that declares no class is
+  released the same way. The class of every problem type is the table in
+  [ADR 0054](../adr/0054-idempotency-replay-classes.md)
+  (`replay_class_test.go` holds it equal to the catalogue).
 - Keys expire after `IDEMPOTENCY_KEY_TTL` (24 h). After that the same key
   creates a new order.
 - A panic inside the handler rolls back and caches nothing.

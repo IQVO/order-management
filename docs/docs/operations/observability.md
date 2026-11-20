@@ -76,6 +76,7 @@ emits no HTTP metrics.
 | `kafka.consume warehouse.warehouse-planning.events` | consumer | planned-capacity consumer | same shape |
 | `kafka.consume warehouse.product-master.events` | consumer | product-classification consumer | same shape |
 | `kafka.consume warehouse.work-planning.events` | consumer | release-confirmation consumer (`RELEASE_CONFIRMATION_MODE=kafka`, ADR 0043) | parent extracted from the message headers; `messaging.system`, `messaging.destination.name`, `messaging.operation.name=process`, `messaging.message.id`, `cloudevents.event_type`, `cloudevents.event_source` |
+| `kafka.consume warehouse.outbound-shipping.events` | consumer | outbound-shipping consumer (`OUTBOUND_SHIPPING_CONSUMER_MODE=kafka`, ADR 0051) | parent extracted from the message headers (`otel.GetTextMapPropagator().Extract`) |
 | `kafka.consume warehouse.order-management.analytics` | consumer | analytics consumer in `cmd/order-projector` | parent extracted from the headers; `messaging.system`, `messaging.destination.name`, `messaging.operation.name=process` |
 | `mcp.tool get_order`, `mcp.tool get_promise_health` | internal | `cmd/mcp`, `internal/adapters/inbound/mcp/tools.go` | `mcp.tool.name`; status `Error` with the message when the tool fails |
 
@@ -112,6 +113,9 @@ Every binary writes JSON lines to stdout through `log/slog`, at
 | `release confirmation: kafka unavailable, retrying` | `stage`, `retry_in`, `error`, `partition`, `offset` | release-confirmation consumer, WARN |
 | `release confirmation: non-CloudEvents message, sending to dead-letter topic` / `…invalid work unit event, …` / `…exhausted retries, …` | `topic`, `partition`, `offset`, `dlq_topic`, `error`, `ce_id`/`ce_type` when it was a CloudEvent | release-confirmation consumer, WARN |
 | `release confirmation consumer configured` | `topic`, `group_id`, `timeout` | `cmd/order` boot, INFO, only with `RELEASE_CONFIRMATION_MODE=kafka` |
+| `outbound shipping consumer configured` | `topic`, `group_id` | `cmd/order` boot, INFO, only with `OUTBOUND_SHIPPING_CONSUMER_MODE=kafka` |
+| `outbound shipping: kafka unavailable, retrying` / `outbound shipping: …, sending to dead-letter topic` | `stage`, `retry_in`, `error`, `partition`, `offset` / `topic`, `dlq_topic`, `error` | outbound-shipping consumer, WARN |
+| `shipment confirmation names an unknown order, skipping` / `…names an order with no released lines, skipping` / `…already processed, skipping` / `…re-delivered under a new id, order already shipped` / `…names no orders, skipping` | the event id, load id and order id | `ConfirmShipment`, WARN, one record per non-shipped outcome |
 | `repromise: kafka unavailable, retrying` | `stage`, `retry_in`, `error`, `partition`, `offset` | re-promise consumer |
 | `repromise: non-CloudEvents message, sending to dead-letter topic` | `topic`, `partition`, `offset`, `dlq_topic`, `error` | re-promise consumer |
 | `repromise: exhausted retries, sending to dead-letter topic` | `topic`, `dlq_topic`, `ce_id`, `ce_type`, `attempts`, `error` | re-promise consumer |

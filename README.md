@@ -165,7 +165,7 @@ summarises.
   `RetryAllocation` clears it. `RetryAllocation` is the only route from
   `Backordered` back to `Allocated`.
 - **BR6 — the cancellation boundary is release.** Cancelling is legal only
-  while no line is `Released`; the boundary is checked *before* any
+  while no line is `Released` or `Shipped`; the boundary is checked *before* any
   reservation is revoked. See
   [ADR 0004](docs/docs/adr/0004-cancellation-boundary-at-release.md), including
   its documented known gap.
@@ -244,8 +244,10 @@ Release no longer calls any Supplier synchronously — see
 | `RELEASE_CONFIRMATION_CONSUMER_GROUP` | *(unset)* | Stable consumer group of that consumer on `warehouse.work-planning.events`; **required** when the mode is `kafka`, no default on purpose (ADR 0043). |
 | `RELEASE_CONFIRMATION_TIMEOUT` | `15m` | A `PENDING` line older than this becomes `UNCONFIRMED` in the housekeeping sweep and raises the analytics-only `OrderReleaseUnconfirmed`; `0` disables the sweep (ADR 0043). |
 | `RELEASE_CONFIRMATION_RETENTION` | `168h` | Age (by `confirmed_at`) after which `CONFIRMED` rows are swept; `0` keeps them. `PENDING` and `UNCONFIRMED` rows are never swept (ADR 0043). |
+| `OUTBOUND_SHIPPING_CONSUMER_MODE` | `off` | `off` or `kafka` (anything else fails boot). `kafka` runs a consumer of outbound-shipping's `ShipmentConfirmed` (the named orders' `Released` lines become `Shipped`) and `PackageMissedLoad` (an order-wide re-promise) on `warehouse.outbound-shipping.events` (ADR 0051). Available, off by default: `off` changes nothing. Needs `KAFKA_BROKERS`, `DATABASE_URL` and the consumer group below, or boot fails naming the missing one. |
+| `OUTBOUND_SHIPPING_CONSUMER_GROUP` | *(unset)* | Stable consumer group of that consumer; **required** when the mode is `kafka`, no default on purpose (ADR 0051). |
 | `PLANNED_CAPACITY_CONSUMER_GROUP` | *(unset)* | Stable consumer group for warehouse-planning's capacity plans; unset ⇒ the feature is off and `GET /planned-capacity` is not registered (ADR 0031). |
-| `PLANNED_CAPACITY_SITE_ID` | `DEFAULT_SITE_ID` | Site whose planned-capacity windows annotate an order without a `fulfillmentSiteId` (ADR 0031); an order that carries one is matched on its own site (ADR 0047). |
+| `PLANNED_CAPACITY_SITE_ID` | `DEFAULT_SITE_ID` | Site whose planned-capacity windows annotate an order without a `fulfillmentSiteId` (ADR 0031); an order that carries one is matched on its own site (ADR 0047). A plan matches that site by its `site_id` when it has one, else by its `location` (ADR 0053). |
 | `DEMAND_PROJECTION_SITE_ID` | *(unset)* | Static demand-site scope for the additive, PII-free `SiteSkuDemandChanged` integration event (keyed `<order_id>/line/<line_no>`, assignment_version `static-site-v1`); unset ⇒ the projection is off for orders without a caller-assigned `fulfillmentSiteId` (ADR 0035); an order that carries one projects to its own site, `order-site-v1` (ADR 0044). |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:5173,http://localhost:5181` | Console / MFE origins (ADR 0007). |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OTLP/gRPC endpoint for metrics and traces (ADR 0009); there is no `/metrics` scrape route. |
@@ -322,13 +324,18 @@ subscriber) consumes independently:
   `PATH_CATALOGUE_SOURCE=kafka`; the same `warehouse.work-planning.events`
   topic (`WorkUnitCreated`) feeds the release-confirmation consumer when
   `RELEASE_CONFIRMATION_MODE=kafka` (ADR 0043);
+  `warehouse.outbound-shipping.events` (`ShipmentConfirmed`,
+  `PackageMissedLoad`) feeds the outbound-shipping consumer when
+  `OUTBOUND_SHIPPING_CONSUMER_MODE=kafka` (ADR 0051, off by default);
   `warehouse.fulfillment.events`
   (`TaskCPTMissed`, `PackageManifested`) drives the re-promise consumer
   (group `order-management-repromise`) whenever `KAFKA_BROKERS` is set;
   `warehouse.warehouse-planning.events` (`CapacityPlanCreated`,
-  `CapacityPlanPublished`, `CapacityShortageDetected`) feeds the
+  `CapacityPlanPublished`, `CapacityShortageDetected`,
+  `CapacityPlanSuperseded`) feeds the
   planned-capacity read model when `PLANNED_CAPACITY_CONSUMER_GROUP` is set
-  (ADR 0031). Poison messages on the stable-group consumers that dead-letter
+  (ADR 0031; a superseded plan becomes a terminal `SUPERSEDED` row that
+  never annotates an order, ADR 0052). Poison messages on the stable-group consumers that dead-letter
   (re-promise, planned-capacity, release-confirmation) go to `<topic>.dlq`
   (ADR 0025, ADR 0043).
 - **Transactional outbox.** With `DATABASE_URL` set, every Kafka-bound
@@ -402,7 +409,13 @@ two read-only tools over Streamable HTTP on `MCP_ADDR` (default `:8090`):
 `get_order` (the `GetOrder` use case) and `get_promise_health` (the
 analytics report store). There is no write tool and, since
 [ADR 0012](docs/docs/adr/0012-remove-rest-mcp-bearer-auth.md), no
-authentication.
+authentication. Every tool and A2A skill declares its agent authority
+level (`com.warehouse/authority`, `L1` here — the surface is read-only),
+the handler is stateless (it also answers the 2026-07-28 protocol
+revision), and the server offers one resource
+(`warehouse://order-management/orders/{orderId}`, the order read model)
+and one prompt (`investigate_order`, the operator SOP) —
+[ADR 0049](docs/docs/adr/0049-agent-authority-levels-and-complete-mcp-surface.md).
 
 ## A2A agent
 
@@ -500,9 +513,15 @@ and headers, plus `Idempotency-Replayed: true`) instead of creating a second
 order; the same key with a DIFFERENT method, path or body is rejected with
 `409` `idempotency-key-reused`; a missing key is rejected with `400`
 `idempotency-key-required` and a key that is not 1-128 printable ASCII
-characters with `400` `idempotency-key-invalid`. 2xx and 4xx answers are
-stored; a 5xx is rolled back with the order and never stored, so the retry
-re-executes.
+characters with `400` `idempotency-key-invalid`. Only an answer that is final
+for the request is stored: a 2xx, or a refusal that is a function of the
+request (`FINAL`, for example `422` `non-positive-quantity`). A refusal that
+depends on state that can change (`RETRYABLE`: `409` `concurrent-modification`,
+`400` `unknown-process-path`, `409` `order-not-held`, ...) and every 5xx are
+rolled back with the key row and never stored, so a retry under the same key
+executes again (and another body under that key is a new request). Every
+problem type declares its class on its catalogue entry; the table is in
+[ADR 0054](docs/docs/adr/0054-idempotency-replay-classes.md).
 
 ```bash
 curl -s -X POST localhost:8080/orders \
@@ -560,7 +579,7 @@ curl -s -i -X DELETE localhost:8080/orders/$ORDER_ID
 # 204 No Content
 ```
 
-Rejected by BR6 once any line has been released — which, since a
+Rejected by BR6 once any line has been released or shipped — which, since a
 ship-complete order that allocates cleanly is released automatically
 inside `POST /orders`, can happen right after intake:
 
@@ -745,9 +764,10 @@ above — have been removed from it.)
   derived from fulfillment capability (ADR 0014), with `LeadTimePolicy` as the
   tagged fallback — it ends at the building's door. There is no live carrier
   integration, and no such service exists in this fleet to call.
-- **Sweeping an orphaned hold.** Nothing expires an order held with
-  `releaseOnAllocation: false` that its caller never releases or cancels
-  (ADR 0020); it keeps its inventory reservations until someone does.
+- **Sweeping an orphaned hold (not here, by design).** Nothing in this service expires an order held with
+  `releaseOnAllocation: false` that its caller never releases or cancels (ADR 0020, accepted deferral). The sweep lives in
+  network-fulfillment: its `SweepOrphanedHolds` (ADR 0024 there) cancels a hold nobody decided, past `acknowledgeBy` plus a grace
+  period, through `DELETE /orders/{id}`.
 - **Clawing back released work on cancellation.** Documented in detail in
   [ADR 0004](docs/docs/adr/0004-cancellation-boundary-at-release.md).
 - **Killing the surviving promise boundary mutants.** Done for
@@ -838,6 +858,10 @@ GitHub Pages on every push to `main` that touches `docs/**`, publishing to
 43. [0043 — Confirm an order-line release from WorkUnitCreated, and flag OrderReleaseUnconfirmed](docs/docs/adr/0043-release-confirmation-from-workunitcreated.md) (amends 0005's no-confirmation-loop decision)
 46. [0046 — A2A inbound adapter (read-only third driving adapter)](docs/docs/adr/0046-a2a-inbound-adapter.md)
 47. [0047 — An order is promised against its own fulfillment site](docs/docs/adr/0047-promise-at-the-orders-own-fulfillment-site.md) (amends 0044, 0014 step A and 0031 §5)
+48. [0048 — Adopt the fleet REST API guideline](docs/docs/adr/0048-adopt-fleet-rest-api-guideline.md) (amends 0023 and 0038)
+49. [0049 — Agent authority levels and the complete MCP surface](docs/docs/adr/0049-agent-authority-levels-and-complete-mcp-surface.md) (extends 0010 and 0046)
+50. [0050 — OrderAllocated/OrderPartiallyAllocated carry the order's fulfillment site](docs/docs/adr/0050-allocation-events-carry-the-orders-fulfillment-site.md)
+51. [0051 — Consume ShipmentConfirmed/PackageMissedLoad: the Order ships](docs/docs/adr/0051-consume-shipment-confirmed-and-package-missedload.md)
 
 ## License
 

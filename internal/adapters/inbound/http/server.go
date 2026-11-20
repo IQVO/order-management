@@ -245,7 +245,7 @@ func (s *Server) handleCancelOrder(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetPlannedCapacity(w http.ResponseWriter, r *http.Request) {
 	site := r.URL.Query().Get("site")
 	if site == "" {
-		writeProblem(w, http.StatusBadRequest, problemInfo{"invalid-query-parameter", "A required query parameter is missing or invalid"},
+		writeProblem(w, http.StatusBadRequest, problemInvalidQueryParameter,
 			"query parameter \"site\" is required", r.URL.Path)
 		return
 	}
@@ -255,7 +255,7 @@ func (s *Server) handleGetPlannedCapacity(w http.ResponseWriter, r *http.Request
 		// never a silent "now".
 		t, err := time.Parse(timeFormat, r.URL.Query().Get("from"))
 		if err != nil {
-			writeProblem(w, http.StatusBadRequest, problemInfo{"invalid-query-parameter", "A required query parameter is missing or invalid"},
+			writeProblem(w, http.StatusBadRequest, problemInvalidQueryParameter,
 				"query parameter \"from\" must be an RFC 3339 timestamp", r.URL.Path)
 			return
 		}
@@ -269,10 +269,11 @@ func (s *Server) handleGetPlannedCapacity(w http.ResponseWriter, r *http.Request
 	out := make([]plannedCapacityWindowResponse, len(windows))
 	for i, c := range windows {
 		out[i] = plannedCapacityWindowResponse{
-			PlanID: c.PlanID, WarehouseID: c.WarehouseID, Location: c.Location, PathID: c.PathID,
+			PlanID: c.PlanID, WarehouseID: c.WarehouseID, Location: c.Location, SiteID: c.SiteID, PathID: c.PathID,
 			WindowStart: c.Start.UTC().Format(timeFormat), WindowEnd: c.End.UTC().Format(timeFormat),
 			AssignedDemand: c.AssignedDemand, CapacityOverWindow: c.CapacityOverWindow, Shortage: c.Shortage,
-			BottleneckStep: c.BottleneckStep, Status: string(c.Status), AsOf: c.AsOf.UTC().Format(timeFormat),
+			BottleneckStep: c.BottleneckStep, Status: string(c.Status), SupersededBy: c.SupersededBy,
+			AsOf: c.AsOf.UTC().Format(timeFormat),
 		}
 	}
 	writeJSON(w, http.StatusOK, plannedCapacityResponse{Site: site, Windows: out})

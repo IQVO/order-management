@@ -195,8 +195,9 @@ paths:
     a major e-commerce retailer's PO/ASIN/acknowledgement vocabulary and customer PII are
     explicitly OUT: they live in `network-fulfillment`, and `arch-go`
     cannot catch a vocabulary leak — that check is human. Known gap
-    recorded: nothing here sweeps an orphaned hold, which sits on real
-    inventory reservations. Shipped: `POST /orders/{id}/releases`
+    recorded at the time: nothing here sweeps an orphaned hold. network-fulfillment's
+    `SweepOrphanedHolds` (its ADR 0024) now cancels it through `DELETE /orders/{id}`,
+    past `acknowledgeBy` plus a grace period. Shipped: `POST /orders/{id}/releases`
     (`releaseHeldOrder`), `releaseOnAllocation`/`requiredShipBy` on
     `POST /orders`, `ErrOrderNotHeld` -> 409 `order-not-held`, migrations
     `0005_release_on_allocation`/`0006_required_ship_by`. The caller is
@@ -428,6 +429,16 @@ Other ADR-adjacent facts worth knowing without opening every file:
   `OrderRepromised`, reason `PackageMissedLoad`). The three shipped
   domain events are local-only for now (analytics gap recorded in the
   ADR).
+
+- **0054 — ACCEPTED: every problem type has an idempotency replay class.**
+  `problemInfo{slug,title,class}` (`inbound/http/errors.go`, `problems.go`):
+  FINAL / OUTCOME / RETRYABLE declared on the catalogue entry, no default;
+  `writeProblem` marks the middleware's `capture` (`replay_class.go`) and
+  `runFreshRequest` stores a 2xx or a FINAL/OUTCOME refusal, and rolls a
+  RETRYABLE one (or one with no class) back with its key row like a 5xx. The
+  class table lives in the ADR and is held equal to the catalogue by
+  `replay_class_test.go`. Narrows 0023 §7. A new problem type is classified
+  by the PR that adds it.
 
 - Gateway API `HTTPRoute` chart template exists (`charts/order-management`
   `values.yaml` `gatewayApi:` block, `enabled: false` by default) —

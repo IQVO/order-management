@@ -37,31 +37,29 @@ func poisonRequest(key string) *http.Request {
 	return req
 }
 
-// A mapped 409 over an aborted transaction is committed and replayed, and the
-// replay never re-runs the handler.
-func TestIdempotency_409FromAnAbortedTransactionCommitsTheOutcome(t *testing.T) {
+// A FINAL refusal (422 non-positive-quantity) over an aborted transaction is
+// committed and replayed, and the replay never re-runs the handler.
+func TestIdempotency_FinalRefusalFromAnAbortedTransactionCommitsTheOutcome(t *testing.T) {
 	pool := idempotencyDB(t)
 	var calls atomic.Int64
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		poisonTx(t, r)
-		w.Header().Set("Content-Type", "application/problem+json")
-		w.WriteHeader(http.StatusConflict)
-		_, _ = w.Write([]byte(`{"type":"concurrent-modification","title":"Conflict","status":409}`))
+		inboundhttp.RefuseForTest(w, r, "non-positive-quantity", http.StatusUnprocessableEntity)
 	})
 	mw := inboundhttp.RequireIdempotencyKey(pool)(handler)
 
 	first := httptest.NewRecorder()
 	mw.ServeHTTP(first, poisonRequest("k-poison"))
-	if first.Code != http.StatusConflict {
-		t.Fatalf("first = %d %s, want the truthful 409", first.Code, first.Body.String())
+	if first.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("first = %d %s, want the truthful 422", first.Code, first.Body.String())
 	}
 
 	var statusCode int
 	if err := pool.QueryRow(t.Context(), `SELECT status_code FROM idempotency_keys WHERE key = 'k-poison'`).Scan(&statusCode); err != nil {
-		t.Fatalf("the 409 outcome was not committed: %v", err)
+		t.Fatalf("the 422 outcome was not committed: %v", err)
 	}
-	if statusCode != http.StatusConflict {
+	if statusCode != http.StatusUnprocessableEntity {
 		t.Fatalf("cached status = %d", statusCode)
 	}
 
@@ -70,6 +68,58 @@ func TestIdempotency_409FromAnAbortedTransactionCommitsTheOutcome(t *testing.T) 
 	assertReplayed(t, first, replay)
 	if calls.Load() != 1 {
 		t.Fatalf("handler ran %d times, want 1 (the replay must not re-run it)", calls.Load())
+	}
+}
+
+// A RETRYABLE refusal (the 409 a lost race maps to) over an aborted transaction
+// answers truthfully and stores nothing: the key is released and the same key
+// executes again.
+func TestIdempotency_RetryableRefusalFromAnAbortedTransactionIsReleased(t *testing.T) {
+	pool := idempotencyDB(t)
+	var calls atomic.Int64
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		poisonTx(t, r)
+		inboundhttp.RefuseForTest(w, r, "concurrent-modification", http.StatusConflict)
+	})
+	mw := inboundhttp.RequireIdempotencyKey(pool)(handler)
+
+	first := httptest.NewRecorder()
+	mw.ServeHTTP(first, poisonRequest("k-poison-retry"))
+	if first.Code != http.StatusConflict {
+		t.Fatalf("first = %d %s, want the truthful 409", first.Code, first.Body.String())
+	}
+	if got := keyRows(t, pool, "k-poison-retry"); got != 0 {
+		t.Fatalf("key rows = %d, want 0: a RETRYABLE refusal releases its key", got)
+	}
+	again := httptest.NewRecorder()
+	mw.ServeHTTP(again, poisonRequest("k-poison-retry"))
+	if again.Header().Get(inboundhttp.IdempotencyReplayedHeader) != "" || calls.Load() != 2 {
+		t.Fatalf("second = replayed %q after %d handler runs, want a fresh execution (2 runs)", again.Header().Get(inboundhttp.IdempotencyReplayedHeader), calls.Load())
+	}
+}
+
+// A refusal that declares no class (a handler that answers a 4xx without the
+// problem writer) is released like RETRYABLE: the safe fallback.
+func TestIdempotency_ARefusalWithNoClassIsReleased(t *testing.T) {
+	pool := idempotencyDB(t)
+	var calls atomic.Int64
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"type":"unclassified","status":409}`))
+	})
+	mw := inboundhttp.RequireIdempotencyKey(pool)(handler)
+
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		mw.ServeHTTP(rec, poisonRequest("k-no-class"))
+		if rec.Code != http.StatusConflict || rec.Header().Get(inboundhttp.IdempotencyReplayedHeader) != "" {
+			t.Fatalf("call %d = %d replayed %q, want a fresh 409", i+1, rec.Code, rec.Header().Get(inboundhttp.IdempotencyReplayedHeader))
+		}
+	}
+	if got := keyRows(t, pool, "k-no-class"); got != 0 || calls.Load() != 2 {
+		t.Fatalf("key rows = %d, handler runs = %d, want 0 and 2", got, calls.Load())
 	}
 }
 

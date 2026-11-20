@@ -18,6 +18,10 @@ metadata:
     app.kubernetes.io/component: reports
   annotations:
     konghq.com/plugins: {{ include "order-management.kongPluginNames" . | quote }}
+    # The reports prefix must outrank the API prefix under Kong's traditional
+    # router: both become regex paths (~/api/<ctx>(/.*) and
+    # ~/api/<ctx>/reports(/.*)) and equal priorities match in no fixed order.
+    konghq.com/regex-priority: "10"
 spec:
   parentRefs:
     {{- range .Values.analytics.reports.route.parentRefs }}

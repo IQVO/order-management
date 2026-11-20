@@ -9,14 +9,15 @@ description: The order-management test pyramid as it exists in the repo — unit
 
 Every layer below exists in the repository today. Counts were taken from
 the `develop` tree on 2026-10-12 (`func Test…` declarations, Gherkin
-`Scenario:` headings); they drift as tests are added.
+`Scenario:` headings); they drift as tests are added. The BDD counts were
+re-measured on 2026-11-15, after the documentation-derived scenarios.
 
 ```mermaid
 flowchart TB
   M["Mutation (gremlins)<br/>internal/domain/order on every push<br/>internal/domain weekly"]
   C["Contract (Schemathesis)<br/>apis/openapi.yaml vs a live in-memory cmd/order"]
   E["MCP evals E1-E3<br/>13 Gherkin scenarios + conformance + governance"]
-  B["BDD (godog)<br/>16 feature files, 60 scenarios"]
+  B["BDD (godog)<br/>20 feature files, 164 scenario definitions, 194 executed"]
   I["Integration (Testcontainers)<br/>28 files, 63 tests, 12 packages"]
   A["Architecture fitness<br/>internal/architecture"]
   U["Unit + httptest<br/>99 files, 502 tests"]
@@ -121,9 +122,19 @@ parallel test processes contend for the reaper.
 `TestFeatures` (`features_test.go` at the repo root) runs every file in
 `features/` with `Strict: true`, so an undefined or pending step fails
 the suite. Step definitions live in `features_test.go`,
-`features_planned_capacity_test.go` and `features_wave2_test.go`. The
+`features_planned_capacity_test.go`, `features_fulfillment_site_test.go`,
+`features_wave2_test.go`, `steps_rules_test.go` and `steps_closeout_test.go`. The
 scenarios drive the use cases, and for the REST contract scenarios the
 router through `httptest`, all on in-memory adapters.
+
+The default tag filter is `~@known-bug`; `BDD_TAGS` overrides it
+(`BDD_TAGS=@known-bug go test . -run TestFeatures` runs only the tagged
+scenarios). No scenario carries `@known-bug` today; the tag and the filter
+stay for the next documented-but-unimplemented rule. The former occupant,
+"A shipped order can no longer be cancelled" (`event_driven_rules.feature`),
+passes by default since `Order.EnsureCancellable` rejects a `Shipped` line as
+well as a `Released` one (`internal/domain/order/order.go`, ADR 0004 addendum
+2026-11-15).
 
 | Feature file | Scenarios |
 | --- | --- |
@@ -134,16 +145,25 @@ router through `httptest`, all on in-memory adapters.
 | `cancellation_extended.feature` | 2 |
 | `domain_events.feature` | 2 |
 | `error_paths.feature` | 4 |
+| `event_driven_rules.feature` | 32 (consumer rules driven through the use cases: repromise ADR 0018, release confirmation ADR 0043, shipment ADR 0051, missed load, shipped order not cancellable) |
+| `fulfillment_site.feature` | 7 |
 | `held_orders.feature` | 5 |
 | `held_orders_extended.feature` | 3 |
 | `intake_validation.feature` | 4 |
+| `mutation_closeout.feature` | 10 (rules the first rule files left unpinned: found by mutation) |
 | `order_lifecycle.feature` | 2 |
+| `order_rules.feature` | 55 (REST-reachable documented rules: intake, path selection, allocation and retry, held orders, cancellation, promise policy, demand projection, readiness) |
 | `partial_shipment.feature` | 2 |
 | `planned_capacity.feature` | 10 |
 | `planned_capacity_extended.feature` | 5 |
 | `required_ship_by.feature` | 2 |
 | `ship_complete.feature` | 2 |
-| **16 files** | **60** |
+| **20 files** | **164** |
+
+The counts are `Scenario` and `Scenario Outline` definitions
+(`git grep -c -E "^[[:space:]]*Scenario" -- features`). With outline rows
+expanded the runner executes **195 scenarios**, none skipped by the default
+filter.
 
 ## Contract tests (Schemathesis)
 
@@ -205,7 +225,7 @@ flags a known-bad fixture.
 | Level | Tests | What |
 | --- | --- | --- |
 | E1 governance | `TestEval_InputSchemasResolveAndConstrain`, `TestEval_ParametersAreDescribed`, `TestEval_ToolRegistryMatchesGolden`, `TestEval_FleetToolNamesAreGloballyUnique` | Schemas resolve, every parameter has a description, the registry matches `tool_registry.golden`, tool names are unique across the fleet snapshot. |
-| E2 conformance | nine `TestEvalConformance_*` tests | Handshake, unknown tool, wrong-typed and extra arguments, no resources or prompts advertised, session close. |
+| E2 conformance | nine `TestEvalConformance_*` tests | Handshake, unknown tool, wrong-typed and extra arguments, exactly one resource template and one prompt advertised (ADR 0049), session close. |
 | E3 behaviour | `TestMCPEvalSuite` | 13 scenarios in `testdata/features/mcp_tools.feature`, run through godog with `Strict: true`. |
 
 ## Frontend (`web/`)

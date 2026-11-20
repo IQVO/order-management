@@ -2,8 +2,10 @@ package mcp_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -120,5 +122,82 @@ func TestServer_CallToolRejectsUnknownOrder(t *testing.T) {
 	}
 	if !res.IsError {
 		t.Fatal("expected tool-level error for an unknown order")
+	}
+}
+
+// TestServer_ResourceListAndRead proves the order resource template is
+// listed and readable over the real transport: reading
+// warehouse://order-management/orders/ORD-1 returns the SAME order DTO the
+// get_order tool returns, as JSON text (AS-3).
+func TestServer_ResourceListAndRead(t *testing.T) {
+	url := newServer(t)
+	session := connect(t, url)
+	ctx := context.Background()
+
+	list, err := session.ListResourceTemplates(ctx, nil)
+	if err != nil {
+		t.Fatalf("list resource templates: %v", err)
+	}
+	found := false
+	for _, r := range list.ResourceTemplates {
+		if strings.Contains(r.URITemplate, "orders/{orderId}") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no order resource template listed: %+v", list.ResourceTemplates)
+	}
+
+	res, err := session.ReadResource(ctx, &sdk.ReadResourceParams{
+		URI: "warehouse://order-management/orders/ORD-1",
+	})
+	if err != nil {
+		t.Fatalf("read resource: %v", err)
+	}
+	if len(res.Contents) == 0 || res.Contents[0].Text == "" {
+		t.Fatalf("empty resource contents: %+v", res.Contents)
+	}
+	var dto map[string]any
+	if err := json.Unmarshal([]byte(res.Contents[0].Text), &dto); err != nil {
+		t.Fatalf("resource text is not JSON: %v", err)
+	}
+	if dto["id"] != "ORD-1" {
+		t.Fatalf("resource order id = %v, want ORD-1", dto["id"])
+	}
+}
+
+// TestServer_ResourceReadRejectsUnknownOrder keeps the resource honest: a
+// missing order is an error, not an empty document.
+func TestServer_ResourceReadRejectsUnknownOrder(t *testing.T) {
+	url := newServer(t)
+	session := connect(t, url)
+	if _, err := session.ReadResource(context.Background(), &sdk.ReadResourceParams{
+		URI: "warehouse://order-management/orders/GHOST",
+	}); err == nil {
+		t.Fatal("expected an error reading an unknown order resource")
+	}
+}
+
+// TestServer_PromptGet proves the investigate_order prompt is listed and
+// returns its SOP message (AS-3).
+func TestServer_PromptGet(t *testing.T) {
+	url := newServer(t)
+	session := connect(t, url)
+	ctx := context.Background()
+
+	prompts, err := session.ListPrompts(ctx, nil)
+	if err != nil {
+		t.Fatalf("list prompts: %v", err)
+	}
+	if len(prompts.Prompts) == 0 {
+		t.Fatal("no prompts listed")
+	}
+
+	res, err := session.GetPrompt(ctx, &sdk.GetPromptParams{Name: "investigate_order"})
+	if err != nil {
+		t.Fatalf("get prompt: %v", err)
+	}
+	if len(res.Messages) == 0 {
+		t.Fatal("investigate_order prompt returned no messages")
 	}
 }

@@ -17,7 +17,13 @@ a caller-assigned site); the capacity annotation here still matches on
 `PLANNED_CAPACITY_SITE_ID` and is unchanged. **§5 amended by
 [ADR 0047](./0047-promise-at-the-orders-own-fulfillment-site.md):** the annotation now
 matches the order's own `fulfillmentSiteId` when it carries one, with
-`PLANNED_CAPACITY_SITE_ID` as the fallback; it stays advisory. Builds on
+`PLANNED_CAPACITY_SITE_ID` as the fallback; it stays advisory. **§1 and §2 extended by
+[ADR 0052](./0052-consume-capacity-plan-superseded.md):** `CapacityPlanSuperseded` moves a
+plan's row to a terminal `SUPERSEDED` status that never constrains an order. **§5 amended
+(again) and §1's row extended by
+[ADR 0053](./0053-match-planned-capacity-by-plan-site-id.md):** a window matches the
+order's site by the plan's `site_id` when it has one, else by `location`, and a write
+without a `site_id` never erases a stored one. Builds on
 [ADR 0014](./0014-promise-derived-from-fulfillment-capability.md) (the promise
 is a CPT window), [ADR 0015](./0015-wes-work-planning-path-capacity-changed-wired.md)
 (the existing Kafka-fed capacity input), [ADR 0017](./0017-per-shipment-group-promising.md)

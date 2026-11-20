@@ -162,6 +162,7 @@ func (w *world) cptWindows(path string, minutes int, table *godog.Table) error {
 		DefaultSiteId: "SIM1",
 	}
 	w.receive.Promise, w.retry.Promise, w.release.Promise = policy, policy, policy
+	w.rules.setPromise(w, policy)
 	return nil
 }
 

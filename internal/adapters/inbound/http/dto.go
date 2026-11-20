@@ -155,6 +155,7 @@ type plannedCapacityWindowResponse struct {
 	PlanID             string  `json:"planId"`
 	WarehouseID        string  `json:"warehouseId"`
 	Location           string  `json:"location"`
+	SiteID             string  `json:"siteId,omitempty"`
 	PathID             string  `json:"pathId,omitempty"`
 	WindowStart        string  `json:"windowStart"`
 	WindowEnd          string  `json:"windowEnd"`
@@ -163,6 +164,7 @@ type plannedCapacityWindowResponse struct {
 	Shortage           float64 `json:"shortage"`
 	BottleneckStep     string  `json:"bottleneckStep,omitempty"`
 	Status             string  `json:"status"`
+	SupersededBy       string  `json:"supersededBy,omitempty"`
 	AsOf               string  `json:"asOf"`
 }
 

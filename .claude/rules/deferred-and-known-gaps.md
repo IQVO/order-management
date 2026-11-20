@@ -35,9 +35,10 @@ Still deferred, as of the last verified pass:
   Also deferred from ADR-0031: a path-level planned-capacity match (planning's
   `path_id` is its own label), pushing the promise on a shortage (a shortage
   is a quantity, not a delay) and an `OrderCapacityConstrained` event.
-- **Sweeping an orphaned hold (ADR-0020).** Nothing here expires an order
-  held with `releaseOnAllocation=false` that its caller never releases or
-  cancels — it keeps real inventory reservations until someone does.
+- **Sweeping an orphaned hold (ADR-0020), not here by design.** Nothing here
+  expires an order held with `releaseOnAllocation=false`; network-fulfillment's
+  `SweepOrphanedHolds` (its ADR 0024) cancels an undecided hold past
+  `acknowledgeBy` plus a grace period through `DELETE /orders/{id}`.
 - **Kafka release-confirmation reply events from wes-work-planning.**
   v1 (ADR-0005) ships fire-and-forget: this service publishes
   `OrderAllocated`/`OrderPartiallyAllocated` and never learns whether

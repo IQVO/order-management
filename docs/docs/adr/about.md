@@ -108,7 +108,12 @@ Typos, broken links and formatting are of course fair game.
 | [0046](./0046-a2a-inbound-adapter.md) | A2A inbound adapter (third driving adapter, read-only) | Accepted |
 | [0047](./0047-promise-at-the-orders-own-fulfillment-site.md) | An order is promised against its own fulfillment site | Accepted; amends 0044, 0014 step A and 0031 §5 |
 | [0048](./0048-adopt-fleet-rest-api-guideline.md) | Adopt the fleet REST API guideline | Accepted; amends 0023 and 0038 |
+| [0049](./0049-agent-authority-levels-and-complete-mcp-surface.md) | Agent authority levels and the complete MCP surface | Accepted; extends 0010 and 0046 |
 | [0050](./0050-allocation-events-carry-the-orders-fulfillment-site.md) | OrderAllocated/OrderPartiallyAllocated carry the order's fulfillment site | Accepted; additively supersedes 0044 §7's freeze |
+| [0051](./0051-consume-shipment-confirmed-and-package-missedload.md) | Consume ShipmentConfirmed/PackageMissedLoad: the Order ships | Accepted |
+| [0052](./0052-consume-capacity-plan-superseded.md) | Consume CapacityPlanSuperseded: a superseded plan stops constraining orders | Accepted; extends 0031 §1 and §2 |
+| [0053](./0053-match-planned-capacity-by-plan-site-id.md) | Match planned capacity to an order's site by the plan's site_id | Accepted; amends 0031 §5 and extends §1 |
+| [0054](./0054-idempotency-replay-classes.md) | Every problem type has an idempotency replay class; a retryable refusal is not stored | Accepted; narrows 0023 §7 and 0048's replay sentence |
 
 Each of these reconstructs a decision that is actually visible in this
 repository's `CLAUDE.md` and code — none is a generic placeholder.
@@ -122,7 +127,7 @@ repository's `CLAUDE.md` and code — none is a generic placeholder.
    the decision feel inevitable, the context is incomplete — or the
    decision is wrong.
 4. Fill in *Consequences* honestly, including the ones you dislike.
-5. Add it to the table above and to `sidebars.ts`.
+5. Add it to the table above, to [the ADR index](./index.md) and to `sidebars.ts`.
 6. Raise it as a pull request; the discussion belongs on the PR, not
    inside the record.
 7. On merge, flip the status to **Accepted**.

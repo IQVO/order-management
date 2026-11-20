@@ -93,21 +93,23 @@ func TestEvalConformance_ExtraArgumentsAreRejected(t *testing.T) {
 	}
 }
 
-// TestEvalConformance_NoResourceTemplatesAdvertised pins this server's
-// deliberate zero-resource surface: order-management's only meaningful
-// read is one order by id, which the get_order tool already covers (a
-// resource template would be the same lookup behind a second, redundant
-// surface — server.go's design note). A host therefore discovers NO
-// resource templates, and that emptiness is the contract.
-func TestEvalConformance_NoResourceTemplatesAdvertised(t *testing.T) {
+// TestEvalConformance_OrderResourceTemplateAdvertised pins the AS-3 surface
+// (Agentic Standard v2, ADR 0049): the server advertises exactly ONE
+// resource template — the order read model at
+// warehouse://order-management/orders/{orderId} — and no static resources
+// (every read is scoped by the template's orderId variable).
+func TestEvalConformance_OrderResourceTemplateAdvertised(t *testing.T) {
 	h := newEvalHarness(t)
 
 	templates, err := h.session.ListResourceTemplates(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("list resource templates: %v", err)
 	}
-	if len(templates.ResourceTemplates) != 0 {
-		t.Fatalf("server advertises resource templates it must not have: %+v", templates.ResourceTemplates)
+	if len(templates.ResourceTemplates) != 1 {
+		t.Fatalf("server advertises %d resource templates, want exactly 1: %+v", len(templates.ResourceTemplates), templates.ResourceTemplates)
+	}
+	if got := templates.ResourceTemplates[0].URITemplate; got != "warehouse://order-management/orders/{orderId}" {
+		t.Fatalf("resource template URI = %q, want the order read model", got)
 	}
 
 	resources, err := h.session.ListResources(t.Context(), nil)
@@ -115,7 +117,7 @@ func TestEvalConformance_NoResourceTemplatesAdvertised(t *testing.T) {
 		t.Fatalf("list resources: %v", err)
 	}
 	if len(resources.Resources) != 0 {
-		t.Fatalf("server advertises resources it must not have: %+v", resources.Resources)
+		t.Fatalf("server advertises static resources it must not have: %+v", resources.Resources)
 	}
 }
 
@@ -130,19 +132,22 @@ func TestEvalConformance_UnknownResourceIsRejected(t *testing.T) {
 	}
 }
 
-// TestEvalConformance_NoPromptsAdvertised pins this server's deliberate
-// zero-prompt surface: there is no multi-step operational SOP here worth a
-// prompt (server.go's design note), so prompts/list returns an empty list
-// rather than an error.
-func TestEvalConformance_NoPromptsAdvertised(t *testing.T) {
+// TestEvalConformance_InvestigateOrderPromptAdvertised pins the AS-3
+// surface (Agentic Standard v2, ADR 0049): the server advertises exactly
+// ONE prompt — the investigate_order operator SOP — and prompts/list
+// returns it rather than an empty list.
+func TestEvalConformance_InvestigateOrderPromptAdvertised(t *testing.T) {
 	h := newEvalHarness(t)
 
 	prompts, err := h.session.ListPrompts(t.Context(), nil)
 	if err != nil {
 		t.Fatalf("list prompts: %v", err)
 	}
-	if len(prompts.Prompts) != 0 {
-		t.Fatalf("server advertises prompts it must not have: %+v", prompts.Prompts)
+	if len(prompts.Prompts) != 1 {
+		t.Fatalf("server advertises %d prompts, want exactly 1: %+v", len(prompts.Prompts), prompts.Prompts)
+	}
+	if prompts.Prompts[0].Name != "investigate_order" {
+		t.Fatalf("prompt name = %q, want investigate_order", prompts.Prompts[0].Name)
 	}
 }
 

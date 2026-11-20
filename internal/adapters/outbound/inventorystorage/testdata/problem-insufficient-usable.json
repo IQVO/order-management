@@ -1,0 +1,7 @@
+{
+  "type": "https://errors.inventory-storage.warehouse-systems.dev/insufficient-usable",
+  "title": "Requested quantity exceeds usable inventory",
+  "status": 409,
+  "detail": "requested quantity exceeds usable inventory",
+  "instance": "/reservations"
+}
