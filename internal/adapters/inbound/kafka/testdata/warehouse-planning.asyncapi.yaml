@@ -88,6 +88,21 @@ info:
     analytics topic is never read, and an unusable payload is dead-lettered to
     `warehouse.labor-performance.events.dlq`.
 
+    **Consumed (ADR 0025).** process-path-management's `ProcessFlowDefined`,
+    `ProcessFlowRevised` and `ProcessFlowRetired` (topic
+    `warehouse.process-path-management.events`, its INTEGRATION topic; group
+    `PROCESS_FLOW_CONSUMER_GROUP`) keep a local copy of the process flows, one
+    row per `flow_id`. Every message is the FULL state of the flow and carries
+    its `version`; it is applied only when its version is greater than the
+    stored one, so a redelivery, the producer's startup republish and a
+    reordered message are harmless. The path capacity resolves a `path_id` from
+    an ACTIVE flow first (its steps are the stages' `process_type` values in
+    order) and falls back to the locally declared path; the REST and MCP reads
+    of a path carry a read-only `source` (`flow` or `local`). Every other type
+    on that topic is ignored, the producer's analytics topic is never read, and
+    an unusable payload (an unknown `process_type`, no stages, a bad status or
+    version) is dead-lettered to `warehouse.process-path-management.events.dlq`.
+
     **Analytics stream (ADR 0005).** The same four events are ALSO written to
     `warehouse.warehouse-planning.analytics` in the SAME outbox transaction
     (two outbox rows per event, one per topic), as CloudEvents 1.0 with the
@@ -432,6 +447,39 @@ channels:
         oneOf:
           - $ref: "#/components/messages/LaborStandardDefined"
           - $ref: "#/components/messages/LaborStandardRevised"
+
+  warehouse.process-path-management.events:
+    description: |
+      process-path-management's integration topic (`ProcessPathManagementTopic`; the flow events
+      are keyed by `flow_id`, its ADR 0042). This service consumes it with a STABLE consumer
+      group read from env `PROCESS_FLOW_CONSUMER_GROUP` (REQUIRED, no default; ADR 0016/0025).
+      Only the full types `com.warehouse.wes.process-path-management.processflow.ProcessFlowDefined`,
+      `...processflow.ProcessFlowRevised` and `...processflow.ProcessFlowRetired` are acted on;
+      every other `type` (`ProcessPathCreated`, `ProcessPathUpdated`, `ProcessPathDeactivated`,
+      `CPTScheduleChanged`) is acknowledged and ignored. A message that is not CloudEvents 1.0,
+      or a flow without `flow_id`, without stages, with a stage without `path_id` or with a
+      `process_type` outside PICK, REBIN, PACK, SLAM, DISPATCH, ARRIVAL, RELOCATE, REPLENISH,
+      a `status` other than ACTIVE or RETIRED, a `version` below 1 or no event `time`, is
+      published to `warehouse.process-path-management.events.dlq` (raw bytes plus `x-dlq-*`
+      headers) and never applied.
+    publish:
+      operationId: consumeProcessFlowEvents
+      summary: Consume process-path-management's ProcessFlowDefined / ProcessFlowRevised / ProcessFlowRetired.
+      description: |
+        Consumed by this service into a LOCAL copy of the process flows (`process_flows`, one
+        row per `flow_id`; additive). Each message is the full state of the flow; it is applied
+        ONLY when its `version` is greater than the stored one (equal or lower is acknowledged
+        and changes nothing; a first message of any of the three types for an unknown flow is
+        stored, a Retired one as a RETIRED row). The idempotency claim on the CloudEvents `id`
+        and the write commit in ONE transaction. See
+        docs/adr/0025-process-flows-from-process-path-management.md.
+      tags:
+        - name: consumed
+      message:
+        oneOf:
+          - $ref: "#/components/messages/ProcessFlowDefined"
+          - $ref: "#/components/messages/ProcessFlowRevised"
+          - $ref: "#/components/messages/ProcessFlowRetired"
 
 components:
   messages:
@@ -1599,6 +1647,126 @@ components:
               previous_expected_seconds: 14
               site_code: "SIM1"
               effective_from: "2026-10-02T06:00:00Z"
+
+    ProcessFlowDefined:
+      name: ProcessFlowDefined
+      title: Process flow defined (consumed)
+      summary: process-path-management defined a process flow (version 1).
+      description: |
+        CONSUMED from `warehouse.process-path-management.events` (producer: process-path-management,
+        its own `apis/asyncapi.yaml`, ADR 0042). The FULL state of the flow at its version; applied to
+        the local `process_flows` copy only when `version` is greater than the stored one (a first
+        message for an unknown flow is stored). `type` =
+        `com.warehouse.wes.process-path-management.processflow.ProcessFlowDefined`, `subject` and Kafka
+        key = `flow_id`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/ProcessFlowDefinedEvent"
+      examples:
+        - name: singleUnitDefined
+          summary: The flow single-unit at version 1.
+          payload:
+            specversion: "1.0"
+            id: "7a1e5c32-6b04-4d58-9e3f-2c8d1f0a4b66"
+            source: "/warehouse/process-path-management"
+            type: "com.warehouse.wes.process-path-management.processflow.ProcessFlowDefined"
+            subject: "single-unit"
+            time: "2026-11-20T08:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:process-path-management:events:ProcessFlowDefined:v1"
+            data:
+              flow_id: "single-unit"
+              name: "Single unit"
+              stages:
+                - path_id: "PICK"
+                  process_type: "PICK"
+                - path_id: "PACK"
+                  process_type: "PACK"
+              status: "ACTIVE"
+              version: 1
+
+    ProcessFlowRevised:
+      name: ProcessFlowRevised
+      title: Process flow revised (consumed)
+      summary: process-path-management revised a process flow, or republished it at its start.
+      description: |
+        CONSUMED from `warehouse.process-path-management.events`. The FULL new state at the next
+        version; also the producer's startup republish of every ACTIVE flow at its CURRENT version,
+        which a caught-up copy ignores (equal version) and a fresh one learns. `type` =
+        `com.warehouse.wes.process-path-management.processflow.ProcessFlowRevised`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/ProcessFlowRevisedEvent"
+      examples:
+        - name: singleUnitRevised
+          summary: The flow single-unit at version 2, a REBIN stage added.
+          payload:
+            specversion: "1.0"
+            id: "7a1e5c32-6b04-4d58-9e3f-2c8d1f0a4b67"
+            source: "/warehouse/process-path-management"
+            type: "com.warehouse.wes.process-path-management.processflow.ProcessFlowRevised"
+            subject: "single-unit"
+            time: "2026-11-20T08:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:process-path-management:events:ProcessFlowRevised:v1"
+            data:
+              flow_id: "single-unit"
+              name: "Single unit"
+              stages:
+                - path_id: "PICK"
+                  process_type: "PICK"
+                - path_id: "REBIN"
+                  process_type: "REBIN"
+                - path_id: "PACK"
+                  process_type: "PACK"
+              status: "ACTIVE"
+              version: 2
+
+    ProcessFlowRetired:
+      name: ProcessFlowRetired
+      title: Process flow retired (consumed)
+      summary: process-path-management retired a process flow.
+      description: |
+        CONSUMED from `warehouse.process-path-management.events`. The FULL state with status RETIRED
+        at the next version. A RETIRED flow does not resolve a path id: the locally declared path of
+        that id, if any, is used. `type` =
+        `com.warehouse.wes.process-path-management.processflow.ProcessFlowRetired`.
+      contentType: application/cloudevents+json
+      tags:
+        - name: consumed
+        - name: warehouse-planning
+      payload:
+        $ref: "#/components/schemas/ProcessFlowRetiredEvent"
+      examples:
+        - name: singleUnitRetired
+          summary: The flow single-unit at version 3.
+          payload:
+            specversion: "1.0"
+            id: "7a1e5c32-6b04-4d58-9e3f-2c8d1f0a4b68"
+            source: "/warehouse/process-path-management"
+            type: "com.warehouse.wes.process-path-management.processflow.ProcessFlowRetired"
+            subject: "single-unit"
+            time: "2026-11-20T09:00:00Z"
+            datacontenttype: "application/json"
+            dataschema: "urn:warehouse:process-path-management:events:ProcessFlowRetired:v1"
+            data:
+              flow_id: "single-unit"
+              name: "Single unit"
+              stages:
+                - path_id: "PICK"
+                  process_type: "PICK"
+                - path_id: "REBIN"
+                  process_type: "REBIN"
+                - path_id: "PACK"
+                  process_type: "PACK"
+              status: "RETIRED"
+              version: 3
 
   schemas:
     CloudEventEnvelope:
@@ -2828,3 +2996,71 @@ components:
               const: "com.warehouse.wes.labor-performance.standard.LaborStandardRevised"
             data:
               $ref: "#/components/schemas/LaborStandardData"
+    ProcessFlowData:
+      type: object
+      description: >-
+        The FULL state of one process flow at one version, as this service reads it from
+        process-path-management's ProcessFlowDefined / ProcessFlowRevised / ProcessFlowRetired `data`
+        (hand-mirrored, never imported; docs/adr/0025 decision 1). Applied only when `version` is
+        greater than the stored one.
+      required: [flow_id, name, stages, status, version]
+      properties:
+        flow_id:
+          type: string
+          description: The flow's identity, also the `path_id` plans and path-capacity reads use.
+          example: "single-unit"
+        name:
+          type: string
+          example: "Single unit"
+        stages:
+          type: array
+          minItems: 1
+          description: The ordered stages; the array order IS the flow's order and the steps of a plan.
+          items:
+            type: object
+            required: [path_id, process_type]
+            properties:
+              path_id:
+                type: string
+                example: "PICK"
+              process_type:
+                type: string
+                enum: [PICK, REBIN, PACK, SLAM, DISPATCH, ARRIVAL, RELOCATE, REPLENISH]
+                description: A value outside the closed set is dead-lettered and never applied.
+        status:
+          type: string
+          enum: [ACTIVE, RETIRED]
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+    ProcessFlowDefinedEvent:
+      description: CloudEvents 1.0 envelope of process-path-management's ProcessFlowDefined (consumed).
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.process-path-management.processflow.ProcessFlowDefined"
+            data:
+              $ref: "#/components/schemas/ProcessFlowData"
+    ProcessFlowRevisedEvent:
+      description: CloudEvents 1.0 envelope of process-path-management's ProcessFlowRevised (consumed).
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.process-path-management.processflow.ProcessFlowRevised"
+            data:
+              $ref: "#/components/schemas/ProcessFlowData"
+    ProcessFlowRetiredEvent:
+      description: CloudEvents 1.0 envelope of process-path-management's ProcessFlowRetired (consumed).
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: "com.warehouse.wes.process-path-management.processflow.ProcessFlowRetired"
+            data:
+              $ref: "#/components/schemas/ProcessFlowData"
