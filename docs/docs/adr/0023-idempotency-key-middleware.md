@@ -11,6 +11,8 @@ description: "ADR 0023 — POST /orders requires a caller-supplied Idempotency-K
 ## Status
 
 > Amended by [ADR 0048](./0048-adopt-fleet-rest-api-guideline.md): key reuse is now `409`, the middleware wraps every `POST` (release and retry-allocation included), and the replay header is `Idempotency-Replayed`.
+>
+> 2026-11-19: §7 (every normal response is cached, 4xx included) is narrowed by [ADR 0054](./0054-idempotency-replay-classes.md): a refusal is stored only when its problem type declares `FINAL` or `OUTCOME`; a `RETRYABLE` refusal rolls back with its key row like a 5xx.
 
 Accepted — implemented in the same change that introduced this record.
 Intended as the reference pattern the rest of the warehouse-systems

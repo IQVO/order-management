@@ -430,6 +430,16 @@ Other ADR-adjacent facts worth knowing without opening every file:
   domain events are local-only for now (analytics gap recorded in the
   ADR).
 
+- **0054 — ACCEPTED: every problem type has an idempotency replay class.**
+  `problemInfo{slug,title,class}` (`inbound/http/errors.go`, `problems.go`):
+  FINAL / OUTCOME / RETRYABLE declared on the catalogue entry, no default;
+  `writeProblem` marks the middleware's `capture` (`replay_class.go`) and
+  `runFreshRequest` stores a 2xx or a FINAL/OUTCOME refusal, and rolls a
+  RETRYABLE one (or one with no class) back with its key row like a 5xx. The
+  class table lives in the ADR and is held equal to the catalogue by
+  `replay_class_test.go`. Narrows 0023 §7. A new problem type is classified
+  by the PR that adds it.
+
 - Gateway API `HTTPRoute` chart template exists (`charts/order-management`
   `values.yaml` `gatewayApi:` block, `enabled: false` by default) —
   it is not itself the subject of a numbered ADR in this list; check the

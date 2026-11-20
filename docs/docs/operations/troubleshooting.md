@@ -62,7 +62,7 @@ Optimistic concurrency surfaces as `409 concurrent-modification`.
 | --- | --- | --- | --- |
 | 400 | `malformed-request-body` | Body is not valid JSON. | Fix the client. |
 | 400 | `order-without-lines`, `empty-sku`, `empty-order-id`, `empty-path-id`, `order-line-not-found` | Validation in the adapter or domain. | Fix the request. |
-| 400 | `unknown-process-path` | The path chosen for a line is not active in the process-path catalogue (`PATH_CATALOGUE_SOURCE=kafka`). When no active path declares `CUSTOMER_ORDER` in its intake, selection falls back to `pick`, so this also fires if `pick` itself is not in the catalogue ([ADR 0042](../adr/0042-path-selection-honours-process-path-intake.md)). | Check process-path-management's catalogue for a deactivated path, and that its declared catalogue was seeded (`GET /process-paths` shows `intake: ["CUSTOMER_ORDER"]` on PICK). |
+| 400 | `unknown-process-path` | Retry with the same key once the catalogue has the path (not stored, ADR 0054). The path chosen for a line is not active in the process-path catalogue (`PATH_CATALOGUE_SOURCE=kafka`). When no active path declares `CUSTOMER_ORDER` in its intake, selection falls back to `pick`, so this also fires if `pick` itself is not in the catalogue ([ADR 0042](../adr/0042-path-selection-honours-process-path-intake.md)). | Check process-path-management's catalogue for a deactivated path, and that its declared catalogue was seeded (`GET /process-paths` shows `intake: ["CUSTOMER_ORDER"]` on PICK). |
 | 400 | `idempotency-key-required` | `POST /orders` without `Idempotency-Key` while `DATABASE_URL` is set. | Send a fresh key per new order. The operator MFE sends one per submission (ADR 0038) and CORS allows the header; if the MFE still gets this, it is running an old `web/` build. |
 | 400 | `invalid-query-parameter` | `GET /planned-capacity` without `site`, or with a `from` that is not RFC 3339. | Fix the query. |
 | 404 | `order-not-found` | Unknown id. In-memory mode loses every order on restart. | Check the id and `DATABASE_URL`. |
@@ -70,7 +70,7 @@ Optimistic concurrency surfaces as `409 concurrent-modification`.
 | 409 | `order-already-released` | Cancel after any line was released or shipped (BR6). | Expected; v1 has no claw-back (ADR 0004). |
 | 409 | `no-backordered-lines`, `no-allocated-lines`, `promise-date-not-set`, `order-not-held`, `order-line-already-allocated`, `order-line-not-pending`, `order-line-not-backordered`, `order-line-not-allocated` | The order is not in the state the command needs: for example `retry-allocation` on an order with nothing backordered, or `release` on an order that was not held. | Read the order first (`GET /orders/{id}`). |
 | 409 | `idempotency-key-reused` | Same `Idempotency-Key` with a different method, path or body (was 422 before ADR 0048). | Use a new key for a different request. |
-| 409 | `concurrent-modification` | Another writer (an HTTP call or the re-promise consumer) saved the order first; the `version` column check failed (ADR 0024). | Re-read and retry. |
+| 409 | `concurrent-modification` | Another writer (an HTTP call or the re-promise consumer) saved the order first; the `version` column check failed (ADR 0024). | Re-read and retry with the same key: the refusal is not stored (ADR 0054). |
 | 422 | `non-positive-quantity`, `line-ineligible-for-resolved-path` | Line validation; no eligible path for the line's attributes. | Fix the line, or check the product classification copy. |
 | 422 | `held-order-must-be-ship-complete` | `releaseOnAllocation: false` with `allowPartialShipment: true`. | Send one or the other (ADR 0020). |
 | 503 | `downstream-not-configured` | `INVENTORY_STORAGE_MODE` is permissive. `POST /orders` still answers `201` with the order `Received` and its lines `Pending`; commands that must call inventory-storage answer 503. | Set `INVENTORY_STORAGE_MODE=http` and `INVENTORY_STORAGE_BASE_URL`. |
@@ -80,13 +80,24 @@ Optimistic concurrency surfaces as `409 concurrent-modification`.
 
 ### Idempotency-Key behaviour
 
-- The middleware wraps `POST /orders` only, and only when `DATABASE_URL`
-  is set.
+- The middleware wraps every `POST` (`/orders`, `/orders/{id}/releases`,
+  `/orders/{id}/allocation-retries`), and only when `DATABASE_URL` is set.
 - The key and a SHA-256 of the body are stored in `idempotency_keys` in
   the **same transaction** as the order and its outbox rows.
-- **Every** normal response is cached, errors included. A retry with the
-  same key and body replays the stored status and body, even a `500`.
-  To try again after a failure, use a new key.
+- A retry with the same key and body replays the stored status and body
+  (`Idempotency-Replayed: true`) only when the first answer is final for the
+  request (ADR 0054): a 2xx, or a refusal that is a function of the request
+  (`FINAL`, e.g. `422 non-positive-quantity`, `404 order-not-found`).
+- A refusal that depends on state that can change (`RETRYABLE`:
+  `concurrent-modification`, `unknown-process-path`,
+  `line-ineligible-for-resolved-path`, `order-not-held`, `no-backordered-lines`
+  and the other state refusals) and every 5xx or panic are **not stored**: the
+  key row is rolled back with the rest of the request, a retry under the same
+  key executes again, and a different body under that key is a new request.
+  Do not mint a new key to retry them. A refusal that declares no class is
+  released the same way. The class of every problem type is the table in
+  [ADR 0054](../adr/0054-idempotency-replay-classes.md)
+  (`replay_class_test.go` holds it equal to the catalogue).
 - Keys expire after `IDEMPOTENCY_KEY_TTL` (24 h). After that the same key
   creates a new order.
 - A panic inside the handler rolls back and caches nothing.

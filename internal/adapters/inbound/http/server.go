@@ -245,7 +245,7 @@ func (s *Server) handleCancelOrder(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetPlannedCapacity(w http.ResponseWriter, r *http.Request) {
 	site := r.URL.Query().Get("site")
 	if site == "" {
-		writeProblem(w, http.StatusBadRequest, problemInfo{"invalid-query-parameter", "A required query parameter is missing or invalid"},
+		writeProblem(w, http.StatusBadRequest, problemInvalidQueryParameter,
 			"query parameter \"site\" is required", r.URL.Path)
 		return
 	}
@@ -255,7 +255,7 @@ func (s *Server) handleGetPlannedCapacity(w http.ResponseWriter, r *http.Request
 		// never a silent "now".
 		t, err := time.Parse(timeFormat, r.URL.Query().Get("from"))
 		if err != nil {
-			writeProblem(w, http.StatusBadRequest, problemInfo{"invalid-query-parameter", "A required query parameter is missing or invalid"},
+			writeProblem(w, http.StatusBadRequest, problemInvalidQueryParameter,
 				"query parameter \"from\" must be an RFC 3339 timestamp", r.URL.Path)
 			return
 		}

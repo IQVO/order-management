@@ -19,6 +19,8 @@ REST cutover: it ships and is deployed together with the other services'
 cutover PRs, because the new routes and the key contract are breaking for every
 client.
 
+> 2026-11-19: what a retry replays is narrowed by [ADR 0054](./0054-idempotency-replay-classes.md): a 2xx and a refusal that is final for the request are replayed; a refusal that depends on state that can change is not stored and its key is released.
+
 ## Context
 
 The 2026-10-30 portfolio assessment measured two spellings of the replay header,

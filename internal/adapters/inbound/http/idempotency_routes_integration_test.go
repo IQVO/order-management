@@ -150,7 +150,11 @@ func TestIdempotency_AllocationRetries_ConcurrentSameKeyOneEffect(t *testing.T) 
 	}
 }
 
-func TestIdempotency_ClientErrorIsCachedAndReplayed(t *testing.T) {
+// 409 order-not-held depends on the stored order (ADR 0054: RETRYABLE, not a
+// function of the request alone): it is not stored, so the key is free and a
+// retry executes again. A FINAL refusal (422 non-positive-quantity) is still
+// stored and replayed: TestIdempotency_BusinessErrorResponse_IsCachedAndReplayed.
+func TestIdempotency_ClientErrorOfStateIsNotStoredAndTheRetryReExecutes(t *testing.T) {
 	pool := idempotencyDB(t)
 	h := routesRouter(pool, &scriptedInventory{}, &txOutbox{pool: pool})
 	id := intake(t, h, "k-intake", releasedOrderBody) // not held: nothing to release on demand
@@ -160,7 +164,13 @@ func TestIdempotency_ClientErrorIsCachedAndReplayed(t *testing.T) {
 	if first.Code != http.StatusConflict || !strings.HasSuffix(problemType(t, first), "order-not-held") {
 		t.Fatalf("release of an unheld order = %d %s, want 409 order-not-held", first.Code, first.Body.String())
 	}
-	assertReplayed(t, first, postKeyed(h, "/orders/"+id+"/releases", "k-409", ""))
+	if got := rowCount(t, pool, "idempotency_keys"); got != 1 { // only the intake's
+		t.Fatalf("idempotency_keys rows = %d, want 1: the refusal released its key", got)
+	}
+	again := postKeyed(h, "/orders/"+id+"/releases", "k-409", "")
+	if again.Code != http.StatusConflict || again.Header().Get("Idempotency-Replayed") != "" {
+		t.Fatalf("the retry = %d replayed=%q, want a fresh execution of the same refusal", again.Code, again.Header().Get("Idempotency-Replayed"))
+	}
 	if got := rowCount(t, pool, "outbox_events"); got != outboxBefore {
 		t.Fatalf("a rejected release wrote outbox rows (%d -> %d)", outboxBefore, got)
 	}
