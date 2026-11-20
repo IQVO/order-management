@@ -43,7 +43,8 @@ info:
       row, so a redelivery carries the same `id`; `(source, id)` is the
       consumer idempotency key.
     - `subject` is the aggregate id (`path_id` for ProcessPath* events,
-      `site_id` for CPTScheduleChanged) — the same value as the Kafka key.
+      `site_id` for CPTScheduleChanged, `flow_id` for ProcessFlow* events) —
+      the same value as the Kafka key.
     - `type` = `com.warehouse.wes.process-path-management.<entity>.<EventName>`.
       These exact strings are a cross-service contract (consumed by
       fulfillment-execution, wes-work-planning, workforce-management and
@@ -54,7 +55,7 @@ info:
     - A breaking payload change ships as a new `.v2` type with a new
       dataschema version, never by mutating an existing one.
 
-    ## Single, shared topic for four event types
+    ## Single, shared topic for seven event types
 
     A single topic (not one per event type) per stream. Consumers dispatch
     on the CloudEvents `type`. `ProcessPathCreated`, `ProcessPathUpdated`,
@@ -63,6 +64,21 @@ info:
     aggregate on the same topic, so a consumer replaying the topic sees a
     given path's or a given site's events in publish order, never
     interleaved with another aggregate's out of order.
+
+    ## ADR 0042: process flows
+
+    `ProcessFlowDefined`, `ProcessFlowRevised` and `ProcessFlowRetired`
+    (entity `processflow`, keyed by `flow_id`) carry the FULL state of one
+    flow: `flow_id`, `name`, `stages` (`[{path_id, process_type}]`, in
+    order), `status` (`ACTIVE` | `RETIRED`) and `version`. The version
+    starts at 1 and grows by one per accepted change (a revision that
+    changes something, or the retirement); a change that changes nothing
+    raises no event and keeps it. A consumer applies a message only when
+    its `version` is greater than the one it holds, so a redelivery, and
+    the `ProcessFlowRevised` the startup republish re-enqueues for every
+    ACTIVE flow (at its current version), are no-ops for a consumer that is
+    caught up. The three types are additive on a topic whose consumers
+    already ignore a type they do not handle.
 
     ## ADR 0010: the fulfillment capability contract
 
@@ -132,6 +148,8 @@ tags:
     description: Events describing the ProcessPath aggregate lifecycle.
   - name: cpt-schedule
     description: Events describing the site-scoped CPTSchedule aggregate (ADR 0010).
+  - name: process-flow
+    description: Events describing the ProcessFlow aggregate, the ordered stages of process paths (ADR 0042).
 
 servers:
   production:
@@ -148,10 +166,12 @@ channels:
   warehouse.process-path-management.events:
     description: >-
       This service's own integration topic (its `kafka.Topic` constant).
-      Carries all three ProcessPath* event types plus CPTScheduleChanged
-      (ADR 0010) as CloudEvents 1.0 (ADR 0016), dispatched by consumers on
-      the full `type`. Kafka message key = the CloudEvents `subject`
-      (`path_id`, or `site_id` for CPTScheduleChanged), hash-balanced.
+      Carries all three ProcessPath* event types, CPTScheduleChanged
+      (ADR 0010) and the three ProcessFlow* event types (ADR 0042) as
+      CloudEvents 1.0 (ADR 0016), dispatched by consumers on the full
+      `type`. Kafka message key = the CloudEvents `subject` (`path_id`,
+      `site_id` for CPTScheduleChanged, `flow_id` for ProcessFlow*),
+      hash-balanced.
       Every message carries the Kafka header `content-type:
       application/cloudevents+json; charset=UTF-8` plus `traceparent` /
       `tracestate` when raised inside a traced operation. Events travel
@@ -160,12 +180,14 @@ channels:
       topic is auto-created by the broker on first write.
     publish:
       operationId: publishProcessPathEvents
-      summary: Publish ProcessPathCreated / ProcessPathUpdated / ProcessPathDeactivated / CPTScheduleChanged.
+      summary: Publish ProcessPathCreated / ProcessPathUpdated / ProcessPathDeactivated / CPTScheduleChanged / ProcessFlowDefined / ProcessFlowRevised / ProcessFlowRetired.
       description: >-
         One message per domain event raised by the DefinePath, RevisePath,
-        DeactivatePath, and DefineCPTSchedule use cases. A no-op revision
-        (RevisePath or DefineCPTSchedule with no actual change) and a
-        no-op deactivation (already-deactivated path) raise nothing —
+        DeactivatePath, DefineCPTSchedule, DefineProcessFlow and
+        RetireProcessFlow use cases. A no-op revision (RevisePath,
+        DefineCPTSchedule or DefineProcessFlow with no actual change), a
+        no-op deactivation (already-deactivated path) and a no-op
+        retirement (already-retired flow) raise nothing —
         consumers never have to diff two identical payloads to notice
         nothing changed.
 
@@ -174,8 +196,10 @@ channels:
         its whole CURRENT catalogue through the same transactional outbox:
         one `ProcessPathUpdated` (the path's full current state) per ACTIVE
         path, in ascending `path_id` order, then one `CPTScheduleChanged` per
-        site, in ascending `site_id` order. Deactivated paths are not
-        republished. This keeps the topic carrying the current state of
+        site, in ascending `site_id` order, then one `ProcessFlowRevised`
+        (the flow's full current state at its current `version`, ADR 0042)
+        per ACTIVE flow, in ascending `flow_id` order. Deactivated paths
+        and retired flows are not republished. This keeps the topic carrying the current state of
         every live path and schedule even after the broker's retention
         expired their original events, so a consumer that rebuilds its
         catalogue by replaying the topic from the earliest offset never
@@ -183,17 +207,21 @@ channels:
         same `data`, same `dataschema`, no new attribute; applying one
         for an already-known path or site is an idempotent upsert. The
         republish is NOT written to the analytics topic. It is bounded
-        to 1000 paths and 1000 schedules per start; beyond that the rest
+        to 1000 paths, 1000 schedules and 1000 flows per start; beyond that the rest
         are not republished and an ERROR is logged.
       tags:
         - name: process-path
         - name: cpt-schedule
+        - name: process-flow
       message:
         oneOf:
           - $ref: "#/components/messages/ProcessPathCreated"
           - $ref: "#/components/messages/ProcessPathUpdated"
           - $ref: "#/components/messages/ProcessPathDeactivated"
           - $ref: "#/components/messages/CPTScheduleChanged"
+          - $ref: "#/components/messages/ProcessFlowDefined"
+          - $ref: "#/components/messages/ProcessFlowRevised"
+          - $ref: "#/components/messages/ProcessFlowRetired"
 
   warehouse.process-path-management.analytics:
     description: >-
@@ -211,17 +239,21 @@ channels:
         sharing its CloudEvents `id`. The startup catalogue republish
         (ADR 0038) is the one exception: it is not a catalogue change, so
         it is not written here and never inflates the revised-paths
-        report. Kafka key and headers are the same as on the integration
+        report (and, likewise, never a ProcessFlowRevised). Kafka key and headers are the same as on the integration
         topic.
       tags:
         - name: process-path
         - name: cpt-schedule
+        - name: process-flow
       message:
         oneOf:
           - $ref: "#/components/messages/ProcessPathCreatedAnalytics"
           - $ref: "#/components/messages/ProcessPathUpdatedAnalytics"
           - $ref: "#/components/messages/ProcessPathDeactivatedAnalytics"
           - $ref: "#/components/messages/CPTScheduleChangedAnalytics"
+          - $ref: "#/components/messages/ProcessFlowDefinedAnalytics"
+          - $ref: "#/components/messages/ProcessFlowRevisedAnalytics"
+          - $ref: "#/components/messages/ProcessFlowRetiredAnalytics"
     subscribe:
       operationId: receiveProcessPathAnalyticsEvents
       summary: Receive the analytics occurrence of the catalogue events (own projector).
@@ -232,7 +264,9 @@ channels:
         and projects only `ProcessPathCreated`, `ProcessPathUpdated` and
         `ProcessPathDeactivated` (counting them per UTC day by the event
         `time`, deduplicated on the CloudEvents `id`). Any other valid
-        type, `CPTScheduleChanged` included, is ignored. A message that
+        type, `CPTScheduleChanged` and the three `ProcessFlow*` types
+        (ADR 0042) included, is acknowledged and not projected: it is
+        committed as a no-op, never retried and never dead-lettered. A message that
         fails CloudEvents validation, or whose handler keeps failing after
         its retries, is copied unmodified to the dead-letter topic
         `warehouse.process-path-management.analytics.dlq` and the offset is
@@ -503,6 +537,112 @@ components:
                   ship_method: ground
                   eligible_path_ids: ["PICK", "PACK"]
 
+    ProcessFlowDefined:
+      name: ProcessFlowDefined
+      title: ProcessFlowDefined
+      summary: A process flow was defined.
+      description: >-
+        Raised by DefineProcessFlow the first time a flow_id is defined (PUT /process-flows/{flowId}). Carries the FULL state of the flow at version 1. Keyed by `flow_id`, so one flow's events stay in order on one partition.
+      contentType: application/cloudevents+json
+      tags:
+        - name: process-flow
+      payload:
+        $ref: "#/components/schemas/ProcessFlowDefinedCloudEvent"
+      examples:
+        - name: singleUnitDefined
+          summary: The flow single-unit at version 1.
+          payload:
+            specversion: "1.0"
+            id: 7a1e5c32-6b04-4d58-9e3f-2c8d1f0a4b66
+            source: /warehouse/process-path-management
+            type: com.warehouse.wes.process-path-management.processflow.ProcessFlowDefined
+            subject: single-unit
+            time: "2026-11-20T08:00:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:process-path-management:events:ProcessFlowDefined:v1"
+            data:
+              flow_id: single-unit
+              name: Single unit
+              stages:
+                - path_id: PICK
+                  process_type: PICK
+                - path_id: PACK
+                  process_type: PACK
+              status: ACTIVE
+              version: 1
+
+    ProcessFlowRevised:
+      name: ProcessFlowRevised
+      title: ProcessFlowRevised
+      summary: A process flow was revised (or republished at start).
+      description: >-
+        Raised by DefineProcessFlow when a revision of an ACTIVE flow changes its name or stages, with the full new state and the next version. Also enqueued once per ACTIVE flow at every service start (ADR 0038) with the CURRENT state at the CURRENT version: a consumer that is caught up (it applies a message only when its version is greater than the one it holds) ignores it, a fresh one learns the flow. Keyed by `flow_id`, so one flow's events stay in order on one partition.
+      contentType: application/cloudevents+json
+      tags:
+        - name: process-flow
+      payload:
+        $ref: "#/components/schemas/ProcessFlowRevisedCloudEvent"
+      examples:
+        - name: singleUnitRevised
+          summary: The flow single-unit at version 2.
+          payload:
+            specversion: "1.0"
+            id: 7a1e5c32-6b04-4d58-9e3f-2c8d1f0a4b66
+            source: /warehouse/process-path-management
+            type: com.warehouse.wes.process-path-management.processflow.ProcessFlowRevised
+            subject: single-unit
+            time: "2026-11-20T08:00:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:process-path-management:events:ProcessFlowRevised:v1"
+            data:
+              flow_id: single-unit
+              name: Single unit
+              stages:
+                - path_id: PICK
+                  process_type: PICK
+                - path_id: REBIN
+                  process_type: REBIN
+                - path_id: PACK
+                  process_type: PACK
+              status: ACTIVE
+              version: 2
+
+    ProcessFlowRetired:
+      name: ProcessFlowRetired
+      title: ProcessFlowRetired
+      summary: A process flow was retired.
+      description: >-
+        Raised by RetireProcessFlow the first time a flow is retired: the full state with status RETIRED and the next version. A retired flow cannot be revised. Keyed by `flow_id`, so one flow's events stay in order on one partition.
+      contentType: application/cloudevents+json
+      tags:
+        - name: process-flow
+      payload:
+        $ref: "#/components/schemas/ProcessFlowRetiredCloudEvent"
+      examples:
+        - name: singleUnitRetired
+          summary: The flow single-unit at version 3.
+          payload:
+            specversion: "1.0"
+            id: 7a1e5c32-6b04-4d58-9e3f-2c8d1f0a4b66
+            source: /warehouse/process-path-management
+            type: com.warehouse.wes.process-path-management.processflow.ProcessFlowRetired
+            subject: single-unit
+            time: "2026-11-20T08:00:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:process-path-management:events:ProcessFlowRetired:v1"
+            data:
+              flow_id: single-unit
+              name: Single unit
+              stages:
+                - path_id: PICK
+                  process_type: PICK
+                - path_id: REBIN
+                  process_type: REBIN
+                - path_id: PACK
+                  process_type: PACK
+              status: RETIRED
+              version: 3
+
     ProcessPathCreatedAnalytics:
       name: ProcessPathCreated
       title: ProcessPathCreated (analytics stream)
@@ -618,6 +758,112 @@ components:
                   ship_method: ground
                   eligible_path_ids: ["PICK"]
 
+    ProcessFlowDefinedAnalytics:
+      name: ProcessFlowDefined
+      title: ProcessFlowDefined (analytics stream)
+      summary: Analytics occurrence of ProcessFlowDefined (acknowledged, not projected, by this service's projector).
+      description: >-
+        Raised by DefineProcessFlow the first time a flow_id is defined (PUT /process-flows/{flowId}). Carries the FULL state of the flow at version 1. Same type, subject, time and data as the integration occurrence; only dataschema differs.
+      contentType: application/cloudevents+json
+      tags:
+        - name: process-flow
+      payload:
+        $ref: "#/components/schemas/ProcessFlowDefinedAnalyticsCloudEvent"
+      examples:
+        - name: singleUnitDefinedAnalytics
+          summary: The flow single-unit at version 1.
+          payload:
+            specversion: "1.0"
+            id: 7a1e5c32-6b04-4d58-9e3f-2c8d1f0a4b66
+            source: /warehouse/process-path-management
+            type: com.warehouse.wes.process-path-management.processflow.ProcessFlowDefined
+            subject: single-unit
+            time: "2026-11-20T08:00:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:process-path-management:analytics:ProcessFlowDefined:v1"
+            data:
+              flow_id: single-unit
+              name: Single unit
+              stages:
+                - path_id: PICK
+                  process_type: PICK
+                - path_id: PACK
+                  process_type: PACK
+              status: ACTIVE
+              version: 1
+
+    ProcessFlowRevisedAnalytics:
+      name: ProcessFlowRevised
+      title: ProcessFlowRevised (analytics stream)
+      summary: Analytics occurrence of ProcessFlowRevised (acknowledged, not projected, by this service's projector).
+      description: >-
+        Raised by DefineProcessFlow when a revision of an ACTIVE flow changes its name or stages, with the full new state and the next version. The startup republish (ADR 0038) is not written to this topic. Same type, subject, time and data as the integration occurrence; only dataschema differs.
+      contentType: application/cloudevents+json
+      tags:
+        - name: process-flow
+      payload:
+        $ref: "#/components/schemas/ProcessFlowRevisedAnalyticsCloudEvent"
+      examples:
+        - name: singleUnitRevisedAnalytics
+          summary: The flow single-unit at version 2.
+          payload:
+            specversion: "1.0"
+            id: 7a1e5c32-6b04-4d58-9e3f-2c8d1f0a4b66
+            source: /warehouse/process-path-management
+            type: com.warehouse.wes.process-path-management.processflow.ProcessFlowRevised
+            subject: single-unit
+            time: "2026-11-20T08:00:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:process-path-management:analytics:ProcessFlowRevised:v1"
+            data:
+              flow_id: single-unit
+              name: Single unit
+              stages:
+                - path_id: PICK
+                  process_type: PICK
+                - path_id: REBIN
+                  process_type: REBIN
+                - path_id: PACK
+                  process_type: PACK
+              status: ACTIVE
+              version: 2
+
+    ProcessFlowRetiredAnalytics:
+      name: ProcessFlowRetired
+      title: ProcessFlowRetired (analytics stream)
+      summary: Analytics occurrence of ProcessFlowRetired (acknowledged, not projected, by this service's projector).
+      description: >-
+        Raised by RetireProcessFlow the first time a flow is retired: the full state with status RETIRED and the next version. A retired flow cannot be revised. Same type, subject, time and data as the integration occurrence; only dataschema differs.
+      contentType: application/cloudevents+json
+      tags:
+        - name: process-flow
+      payload:
+        $ref: "#/components/schemas/ProcessFlowRetiredAnalyticsCloudEvent"
+      examples:
+        - name: singleUnitRetiredAnalytics
+          summary: The flow single-unit at version 3.
+          payload:
+            specversion: "1.0"
+            id: 7a1e5c32-6b04-4d58-9e3f-2c8d1f0a4b66
+            source: /warehouse/process-path-management
+            type: com.warehouse.wes.process-path-management.processflow.ProcessFlowRetired
+            subject: single-unit
+            time: "2026-11-20T08:00:00Z"
+            datacontenttype: application/json
+            dataschema: "urn:warehouse:process-path-management:analytics:ProcessFlowRetired:v1"
+            data:
+              flow_id: single-unit
+              name: Single unit
+              stages:
+                - path_id: PICK
+                  process_type: PICK
+                - path_id: REBIN
+                  process_type: REBIN
+                - path_id: PACK
+                  process_type: PACK
+              status: RETIRED
+              version: 3
+
   schemas:
     CloudEventEnvelope:
       type: object
@@ -709,6 +955,45 @@ components:
             data:
               $ref: "#/components/schemas/CPTScheduleData"
 
+    ProcessFlowDefinedCloudEvent:
+      title: CloudEvent + ProcessFlowDefined data (events stream)
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: com.warehouse.wes.process-path-management.processflow.ProcessFlowDefined
+            dataschema:
+              const: "urn:warehouse:process-path-management:events:ProcessFlowDefined:v1"
+            data:
+              $ref: "#/components/schemas/ProcessFlowData"
+
+    ProcessFlowRevisedCloudEvent:
+      title: CloudEvent + ProcessFlowRevised data (events stream)
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: com.warehouse.wes.process-path-management.processflow.ProcessFlowRevised
+            dataschema:
+              const: "urn:warehouse:process-path-management:events:ProcessFlowRevised:v1"
+            data:
+              $ref: "#/components/schemas/ProcessFlowData"
+
+    ProcessFlowRetiredCloudEvent:
+      title: CloudEvent + ProcessFlowRetired data (events stream)
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: com.warehouse.wes.process-path-management.processflow.ProcessFlowRetired
+            dataschema:
+              const: "urn:warehouse:process-path-management:events:ProcessFlowRetired:v1"
+            data:
+              $ref: "#/components/schemas/ProcessFlowData"
+
     ProcessPathCreatedAnalyticsCloudEvent:
       title: CloudEvent + ProcessPathCreated data (analytics stream)
       allOf:
@@ -760,6 +1045,45 @@ components:
               const: "urn:warehouse:process-path-management:analytics:CPTScheduleChanged:v1"
             data:
               $ref: "#/components/schemas/CPTScheduleData"
+
+    ProcessFlowDefinedAnalyticsCloudEvent:
+      title: CloudEvent + ProcessFlowDefined data (analytics stream)
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: com.warehouse.wes.process-path-management.processflow.ProcessFlowDefined
+            dataschema:
+              const: "urn:warehouse:process-path-management:analytics:ProcessFlowDefined:v1"
+            data:
+              $ref: "#/components/schemas/ProcessFlowData"
+
+    ProcessFlowRevisedAnalyticsCloudEvent:
+      title: CloudEvent + ProcessFlowRevised data (analytics stream)
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: com.warehouse.wes.process-path-management.processflow.ProcessFlowRevised
+            dataschema:
+              const: "urn:warehouse:process-path-management:analytics:ProcessFlowRevised:v1"
+            data:
+              $ref: "#/components/schemas/ProcessFlowData"
+
+    ProcessFlowRetiredAnalyticsCloudEvent:
+      title: CloudEvent + ProcessFlowRetired data (analytics stream)
+      allOf:
+        - $ref: "#/components/schemas/CloudEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: com.warehouse.wes.process-path-management.processflow.ProcessFlowRetired
+            dataschema:
+              const: "urn:warehouse:process-path-management:analytics:ProcessFlowRetired:v1"
+            data:
+              $ref: "#/components/schemas/ProcessFlowData"
 
     ProcessPathDeactivatedData:
       type: object
@@ -921,3 +1245,48 @@ components:
             from (local_time, days_of_week, timezone) — this service
             never publishes absolute timestamps for a recurring rule.
           example: ["PICK", "PACK"]
+
+    ProcessFlowData:
+      type: object
+      required: [flow_id, name, stages, status, version]
+      description: >-
+        The FULL state of one flow at one version (ADR 0042), the payload of
+        all three ProcessFlow* types. A consumer applies a message only when
+        `version` is greater than the one it holds.
+      properties:
+        flow_id:
+          type: string
+          example: single-unit
+          description: The flow's identity; also the CloudEvents `subject` and the Kafka key.
+        name:
+          type: string
+          example: Single unit
+        stages:
+          type: array
+          minItems: 1
+          description: The ordered stages; the array order IS the flow's order. A path_id appears at most once.
+          items:
+            $ref: "#/components/schemas/FlowStageData"
+        status:
+          type: string
+          enum: [ACTIVE, RETIRED]
+          description: ACTIVE on Defined and Revised; RETIRED on Retired.
+        version:
+          type: integer
+          minimum: 1
+          example: 2
+          description: Starts at 1, grows by one per accepted change (a revision that changes something, or the retirement).
+
+    FlowStageData:
+      type: object
+      required: [path_id, process_type]
+      properties:
+        path_id:
+          type: string
+          example: PICK
+          description: An ACTIVE ProcessPath of this service's own catalogue when the stage was accepted.
+        process_type:
+          type: string
+          enum: [PICK, REBIN, PACK, SLAM, DISPATCH, ARRIVAL, RELOCATE, REPLENISH]
+          example: PICK
+          description: A closed set (the task types fulfillment-execution publishes).
