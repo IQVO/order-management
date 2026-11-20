@@ -61,6 +61,56 @@ func TestPlannedCapacityRepo_LastWriterWinsAgainstRealPostgres(t *testing.T) {
 	}
 }
 
+// ADR 0053 against real Postgres: site_id is stored, a write without one
+// never erases it, and ListForSite mirrors order.MatchesSite while
+// ListByLocation keeps filtering on location alone.
+func TestPlannedCapacityRepo_SiteIDAgainstRealPostgres(t *testing.T) {
+	ctx := context.Background()
+	repo := postgres.NewPlannedCapacityRepo(outboxDB(t))
+	asOf := time.Date(2026, 10, 4, 21, 45, 10, 0, time.UTC)
+	from := time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)
+
+	withSite := func(w order.PlannedCapacityWindow, siteID string) order.PlannedCapacityWindow {
+		w.SiteID = siteID
+		return w
+	}
+	for _, w := range []order.PlannedCapacityWindow{
+		withSite(pcRow("zone-plan", "PATH-ZONE-A", order.PlannedCapacityPublished, asOf, 10), "SIM1"),
+		withSite(pcRow("elsewhere", "SIM1", order.PlannedCapacityPublished, asOf, 20), "SIM2"),
+		pcRow("legacy", "SIM1", order.PlannedCapacityPublished, asOf, 30),
+		pcRow("other-legacy", "SIM2", order.PlannedCapacityPublished, asOf, 40),
+		// The ShortageDetected that follows the Published carries no site_id.
+		pcRow("zone-plan", "PATH-ZONE-A", order.PlannedCapacityPublished, asOf.Add(time.Second), 15),
+	} {
+		if _, err := repo.Upsert(ctx, w); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ids := func(ws []order.PlannedCapacityWindow) []string {
+		var out []string
+		for _, w := range ws {
+			out = append(out, w.PlanID)
+		}
+		return out
+	}
+	forSite, err := repo.ListForSite(ctx, "SIM1", from)
+	if err != nil || len(forSite) != 2 || forSite[0].PlanID != "legacy" && forSite[1].PlanID != "legacy" {
+		t.Fatalf("ListForSite(SIM1) = %v, %v; want zone-plan and legacy", ids(forSite), err)
+	}
+	for _, w := range forSite {
+		if w.PlanID == "zone-plan" && (w.SiteID != "SIM1" || w.Shortage != 15) {
+			t.Fatalf("zone-plan = %+v; want the shortage write with the stored site_id", w)
+		}
+	}
+	if rows, _ := repo.ListForSite(ctx, "PATH-ZONE-A", from); len(rows) != 0 {
+		t.Fatalf("ListForSite(zone) = %v; a zone is not a site", ids(rows))
+	}
+	if rows, _ := repo.ListByLocation(ctx, "SIM1", from); len(rows) != 2 {
+		t.Fatalf("ListByLocation(SIM1) = %v; want elsewhere and legacy (location only)", ids(rows))
+	}
+}
+
 // The heart of the at-least-once guarantee, against a real database: the
 // idempotency claim and the upsert share ONE transaction, so a failure after
 // both rolls BOTH back, and the redelivery is processed (not skipped).

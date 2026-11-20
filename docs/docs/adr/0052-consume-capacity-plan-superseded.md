@@ -135,14 +135,15 @@ decision, and it must merge before the producer starts publishing.
 
 **Harder / what this does NOT solve**
 
-- **Lands before the producer.** warehouse-planning's pinned spec does
-  not document `CapacityPlanSuperseded` yet. The consumer contract test
-  therefore reads a LOCAL example
-  (`internal/adapters/inbound/kafka/testdata/capacity-plan-superseded.example.json`)
-  built from ADR 0024's field list, not the pinned producer spec. The
-  follow-up, once warehouse-planning's change merges: refresh the pin
-  and add a pinned-example assertion (E1/E2 against the producer's own
-  example), then delete the local example.
+- **The producer now publishes the type (done).** The consumer contract
+  test first read a LOCAL example built from ADR 0024's field list,
+  because warehouse-planning had not published the type. Follow-up done:
+  the pin is refreshed and `consumer_contract_capacity_plan_superseded_test.go`
+  asserts against warehouse-planning's own pinned example (E1 the topic
+  documents the type, E2 the example decodes through
+  `supersededRequestFrom` with subject = `plan_id` and `location` and
+  `warehouse_id` present, E3 the envelope, E4 additive fields); the local
+  example is deleted.
 - **A tombstone is listed under the plan's location.** Its `location` is
   the event's `location` when present, else its `site_id`, and its
   quantities are zero: `GET /planned-capacity`

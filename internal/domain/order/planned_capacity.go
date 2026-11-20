@@ -46,9 +46,15 @@ var ErrInvalidPlannedCapacity = errors.New("order: invalid planned capacity wind
 // Identity is PlanID (last writer wins, see Supersedes); End is exclusive,
 // as warehouse-planning publishes it.
 type PlannedCapacityWindow struct {
-	PlanID             string
-	WarehouseID        string
-	Location           string // site/building code, e.g. "SIM1"
+	PlanID      string
+	WarehouseID string
+	Location    string // the ProcessCapacity location the plan evaluates; a site code for a legacy plan
+	// SiteID is the plan's canonical site (warehouse-planning ADR 0012),
+	// empty for a plan that never carried one. Only CapacityPlanPublished
+	// and CapacityPlanSuperseded carry it; a write without one never
+	// erases a stored one (ReplacementOf). MatchesSite is the one place it
+	// is read.
+	SiteID             string
 	PathID             string // warehouse-planning's own path label, informational
 	Start              time.Time
 	End                time.Time
@@ -160,19 +166,47 @@ func (w PlannedCapacityWindow) Supersedes(prev PlannedCapacityWindow) bool {
 
 // ReplacementOf returns the row to store when w supersedes prev (call it
 // only once Supersedes(prev) holds). A CapacityPlanSuperseded carries no
-// location, warehouse, quantities or bottleneck, so superseding a known
-// row keeps every fact prev had and changes only the status, the
-// successor and AsOf (ADR 0052). Any other write replaces prev whole,
-// window included (a re-planned window overwrites, never accumulates).
+// warehouse, quantities or bottleneck, so superseding a known row keeps
+// every fact prev had and changes only the status, the successor and
+// AsOf (ADR 0052). Any other write replaces prev whole, window included
+// (a re-planned window overwrites, never accumulates).
+//
+// The site id is merged, never erased (ADR 0031 amendment): the later
+// events of a plan (CapacityShortageDetected, a late Created) carry only
+// `location`, so a write without a site id keeps the stored one. A
+// SUPERSEDED write keeps a stored site id and only fills an empty one; any
+// other write's own site id replaces the stored one.
 func (w PlannedCapacityWindow) ReplacementOf(prev PlannedCapacityWindow) PlannedCapacityWindow {
 	if w.Status != PlannedCapacitySuperseded {
+		w.SiteID = firstNonEmpty(w.SiteID, prev.SiteID)
 		return w
 	}
 	next := prev
 	next.Status = PlannedCapacitySuperseded
 	next.SupersededBy = w.SupersededBy
 	next.AsOf = w.AsOf
+	next.SiteID = firstNonEmpty(prev.SiteID, w.SiteID)
 	return next
+}
+
+// firstNonEmpty returns a, or b when a is empty.
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}
+
+// MatchesSite reports whether w is a statement about site. A plan that
+// carries a site id matches only that site, whatever its location (the
+// location is a ProcessCapacity location, not necessarily a site code); a
+// plan that never carried one matches by location, the behaviour before
+// the site id existed (ADR 0031 amendment). Exact, case-sensitive.
+func (w PlannedCapacityWindow) MatchesSite(site string) bool {
+	if w.SiteID != "" {
+		return w.SiteID == site
+	}
+	return w.Location == site
 }
 
 // CapacityConstraints returns the published shortage windows at site that
@@ -195,7 +229,7 @@ func CapacityConstraints(o *Order, now time.Time, site string, windows []Planned
 	cutoffs := promiseCutoffs(o)
 	var out []PlannedCapacityWindow
 	for _, w := range windows {
-		if w.Location != site || !w.Constraining() {
+		if !w.MatchesSite(site) || !w.Constraining() {
 			continue
 		}
 		for _, cutoff := range cutoffs {

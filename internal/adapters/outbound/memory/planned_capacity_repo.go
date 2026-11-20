@@ -42,14 +42,24 @@ func (r *PlannedCapacityRepo) Upsert(_ context.Context, w order.PlannedCapacityW
 	return true, nil
 }
 
+// ListForSite returns the windows w.MatchesSite(site) accepts that end
+// after endingAfter, ordered by Start then PlanID.
+func (r *PlannedCapacityRepo) ListForSite(_ context.Context, site string, endingAfter time.Time) ([]order.PlannedCapacityWindow, error) {
+	return r.list(func(w order.PlannedCapacityWindow) bool { return w.MatchesSite(site) }, endingAfter), nil
+}
+
 // ListByLocation returns the windows at location ending after endingAfter,
 // ordered by Start then PlanID.
 func (r *PlannedCapacityRepo) ListByLocation(_ context.Context, location string, endingAfter time.Time) ([]order.PlannedCapacityWindow, error) {
+	return r.list(func(w order.PlannedCapacityWindow) bool { return w.Location == location }, endingAfter), nil
+}
+
+func (r *PlannedCapacityRepo) list(keep func(order.PlannedCapacityWindow) bool, endingAfter time.Time) []order.PlannedCapacityWindow {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var out []order.PlannedCapacityWindow
 	for _, w := range r.windows {
-		if w.Location == location && w.End.After(endingAfter) {
+		if keep(w) && w.End.After(endingAfter) {
 			out = append(out, w)
 		}
 	}
@@ -59,7 +69,7 @@ func (r *PlannedCapacityRepo) ListByLocation(_ context.Context, location string,
 		}
 		return out[i].PlanID < out[j].PlanID
 	})
-	return out, nil
+	return out
 }
 
 // PlannedCapacityProcessedEventsRepo is an in-memory

@@ -45,7 +45,7 @@ func TestPlannedCapacityConsumer_SupersededAfterPublishedStopsConstraining(t *te
 
 	w, _ := f.store.get(pcPlanID)
 	want := order.PlannedCapacityWindow{
-		PlanID: pcPlanID, WarehouseID: "WH-1", Location: "SIM1", PathID: "pick-rebin-pack",
+		PlanID: pcPlanID, WarehouseID: "WH-1", Location: "SIM1", SiteID: "SIM1", PathID: "pick-rebin-pack",
 		Start: pcWinFrom, End: pcWinTo, AssignedDemand: 12000, CapacityOverWindow: 8000, Shortage: 4000,
 		BottleneckStep: "REBIN", Status: order.PlannedCapacitySuperseded, SupersededBy: pcNewerPlan, AsOf: supAt,
 	}
@@ -83,7 +83,7 @@ func TestPlannedCapacityConsumer_SupersededForAnUnseenPlanThenPublishedNeverCons
 	f.mustHandle(t, 1, pcTypeSup, "evt-sup", supAt, pcSupersededData())
 
 	tombstone := order.PlannedCapacityWindow{
-		PlanID: pcPlanID, Location: "SIM1", PathID: "pick-rebin-pack", Start: pcWinFrom, End: pcWinTo,
+		PlanID: pcPlanID, Location: "SIM1", SiteID: "SIM1", PathID: "pick-rebin-pack", Start: pcWinFrom, End: pcWinTo,
 		Status: order.PlannedCapacitySuperseded, SupersededBy: pcNewerPlan, AsOf: supAt,
 	}
 	if w, ok := f.store.get(pcPlanID); !ok || w != tombstone {

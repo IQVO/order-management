@@ -59,12 +59,14 @@ docs-site regeneration and local run: `.claude/rules/ci-quality-gates.md` and
 - **Planned capacity is advisory (ADR-0031):** `warehouse-planning`'s CapacityPlan events feed a LOCAL
   read model (`order.PlannedCapacityWindow`, Postgres `planned_capacity_windows`; never a live call to
   that service). A PUBLISHED shortage overlapping an order's `[now, promise cutoff)` at
-  `PLANNED_CAPACITY_SITE_ID` only ANNOTATES the order response (`capacityConstraint`, derived at read
+  the order's site (`PLANNED_CAPACITY_SITE_ID` or its `fulfillmentSiteId`; a plan matches by its
+  `site_id` when it has one, else by `location`, ADR-0053) only ANNOTATES the order response (`capacityConstraint`, derived at read
   time): it MUST NOT move a promise, reject/hold an order, change `Status`, or touch allocation or
   reservations (ADR-0003/0017 fill-or-kill is unchanged). A `CapacityPlanSuperseded` (ADR-0052) moves
   the older plan to a terminal `SUPERSEDED` status that never constrains and is never replaced; one for
-  a plan never seen inserts a SUPERSEDED tombstone. `Supersedes`/`ReplacementOf` in
-  `planned_capacity.go` are the only places that decide this. The consumer group id comes from
+  a plan never seen inserts a SUPERSEDED tombstone. `Supersedes`/`ReplacementOf`/`MatchesSite`
+  in `planned_capacity.go` are the only places that decide this; a write without a `site_id` never
+  erases a stored one. The consumer group id comes from
   `PLANNED_CAPACITY_CONSUMER_GROUP` (no default; unset = feature off). Read the ADR before touching
   `internal/domain/order/planned_capacity.go` or `inbound/kafka/planned_capacity_consumer.go`.
 - **Tests:** never hit a real network in a unit test. Kafka `-tags=integration`

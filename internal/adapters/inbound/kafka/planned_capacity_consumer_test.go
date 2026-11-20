@@ -128,6 +128,10 @@ func (s *kpcStore) ListByLocation(context.Context, string, time.Time) ([]order.P
 	return nil, nil
 }
 
+func (s *kpcStore) ListForSite(context.Context, string, time.Time) ([]order.PlannedCapacityWindow, error) {
+	return nil, nil
+}
+
 func (s *kpcStore) get(id string) (order.PlannedCapacityWindow, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

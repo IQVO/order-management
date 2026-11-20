@@ -112,6 +112,7 @@ Typos, broken links and formatting are of course fair game.
 | [0050](./0050-allocation-events-carry-the-orders-fulfillment-site.md) | OrderAllocated/OrderPartiallyAllocated carry the order's fulfillment site | Accepted; additively supersedes 0044 §7's freeze |
 | [0051](./0051-consume-shipment-confirmed-and-package-missedload.md) | Consume ShipmentConfirmed/PackageMissedLoad: the Order ships | Accepted |
 | [0052](./0052-consume-capacity-plan-superseded.md) | Consume CapacityPlanSuperseded: a superseded plan stops constraining orders | Accepted; extends 0031 §1 and §2 |
+| [0053](./0053-match-planned-capacity-by-plan-site-id.md) | Match planned capacity to an order's site by the plan's site_id | Accepted; amends 0031 §5 and extends §1 |
 
 Each of these reconstructs a decision that is actually visible in this
 repository's `CLAUDE.md` and code — none is a generic placeholder.

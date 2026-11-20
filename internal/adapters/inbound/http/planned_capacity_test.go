@@ -43,6 +43,10 @@ func (r pcFailingRepo) ListByLocation(context.Context, string, time.Time) ([]ord
 	return nil, r.err
 }
 
+func (r pcFailingRepo) ListForSite(context.Context, string, time.Time) ([]order.PlannedCapacityWindow, error) {
+	return nil, r.err
+}
+
 // newPlannedCapacityEnv builds the real router with the planned-capacity
 // read model wired (site SIM1) over repo.
 func newPlannedCapacityEnv(t *testing.T, repo ports.PlannedCapacityRepo) *testEnv {

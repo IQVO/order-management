@@ -24,14 +24,14 @@ func NewPlannedCapacityRepo(pool *pgxpool.Pool) *PlannedCapacityRepo {
 	return &PlannedCapacityRepo{pool: pool}
 }
 
-const plannedCapacityColumns = `plan_id, warehouse_id, location, path_id, window_start, window_end,
+const plannedCapacityColumns = `plan_id, warehouse_id, location, site_id, path_id, window_start, window_end,
 	assigned_demand, capacity_over_window, shortage, bottleneck_step, status, superseded_by, event_time`
 
 func scanPlannedCapacity(row pgx.Row) (order.PlannedCapacityWindow, error) {
 	var w order.PlannedCapacityWindow
 	var status string
 	var supersededBy *string
-	err := row.Scan(&w.PlanID, &w.WarehouseID, &w.Location, &w.PathID, &w.Start, &w.End,
+	err := row.Scan(&w.PlanID, &w.WarehouseID, &w.Location, &w.SiteID, &w.PathID, &w.Start, &w.End,
 		&w.AssignedDemand, &w.CapacityOverWindow, &w.Shortage, &w.BottleneckStep, &status, &supersededBy, &w.AsOf)
 	w.Status = order.PlannedCapacityStatus(status)
 	if supersededBy != nil {
@@ -83,15 +83,16 @@ func (r *PlannedCapacityRepo) Upsert(ctx context.Context, w order.PlannedCapacit
 
 	if _, err = tx.Exec(ctx, `
 INSERT INTO planned_capacity_windows (`+plannedCapacityColumns+`, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
 ON CONFLICT (plan_id) DO UPDATE SET
-	warehouse_id = EXCLUDED.warehouse_id, location = EXCLUDED.location, path_id = EXCLUDED.path_id,
+	warehouse_id = EXCLUDED.warehouse_id, location = EXCLUDED.location, site_id = EXCLUDED.site_id,
+	path_id = EXCLUDED.path_id,
 	window_start = EXCLUDED.window_start, window_end = EXCLUDED.window_end,
 	assigned_demand = EXCLUDED.assigned_demand, capacity_over_window = EXCLUDED.capacity_over_window,
 	shortage = EXCLUDED.shortage, bottleneck_step = EXCLUDED.bottleneck_step,
 	status = EXCLUDED.status, superseded_by = EXCLUDED.superseded_by,
 	event_time = EXCLUDED.event_time, updated_at = now()`,
-		next.PlanID, next.WarehouseID, next.Location, next.PathID, next.Start, next.End,
+		next.PlanID, next.WarehouseID, next.Location, next.SiteID, next.PathID, next.Start, next.End,
 		next.AssignedDemand, next.CapacityOverWindow, next.Shortage, next.BottleneckStep, string(next.Status),
 		nullableText(next.SupersededBy), next.AsOf); err != nil {
 		return false, err
@@ -101,10 +102,22 @@ ON CONFLICT (plan_id) DO UPDATE SET
 
 // ListByLocation returns the windows at location ending after endingAfter.
 func (r *PlannedCapacityRepo) ListByLocation(ctx context.Context, location string, endingAfter time.Time) ([]order.PlannedCapacityWindow, error) {
+	return r.list(ctx, `location = $1`, location, endingAfter)
+}
+
+// ListForSite returns the windows PlannedCapacityWindow.MatchesSite(site)
+// accepts that end after endingAfter: a plan with a site_id matches by it
+// alone, a plan without one by its location. The predicate mirrors the
+// domain rule; the domain re-applies it when it builds the annotation.
+func (r *PlannedCapacityRepo) ListForSite(ctx context.Context, site string, endingAfter time.Time) ([]order.PlannedCapacityWindow, error) {
+	return r.list(ctx, `((site_id <> '' AND site_id = $1) OR (site_id = '' AND location = $1))`, site, endingAfter)
+}
+
+func (r *PlannedCapacityRepo) list(ctx context.Context, predicate, key string, endingAfter time.Time) ([]order.PlannedCapacityWindow, error) {
 	rows, err := querierFrom(ctx, r.pool).Query(ctx, `
 SELECT `+plannedCapacityColumns+` FROM planned_capacity_windows
-WHERE location = $1 AND window_end > $2
-ORDER BY window_start, plan_id`, location, endingAfter)
+WHERE `+predicate+` AND window_end > $2
+ORDER BY window_start, plan_id`, key, endingAfter)
 	if err != nil {
 		return nil, err
 	}
