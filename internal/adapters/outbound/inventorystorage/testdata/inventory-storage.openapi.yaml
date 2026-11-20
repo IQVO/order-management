@@ -38,9 +38,13 @@ info:
     things (commands are noun sub-resources such as `POST /stowages` or
     `POST /reservations/{id}/pick-confirmations`), EVERY `POST` is behind the
     Idempotency-Key middleware (a retry replays the stored answer with the
-    response header `Idempotency-Replayed: true`; the same key with a
-    different method, path or body is 409 `idempotency-key-reused`; a missing
-    key is 400 `idempotency-key-required`), and every collection `GET` is
+    response header `Idempotency-Replayed: true` when that answer is final for
+    the request: a success, a validation error, or a refusal that committed
+    state; a refusal that depends on state that can change, such as
+    `concurrent-modification` or `bin-not-found`, is NOT stored and the same
+    key executes again, ADR 0053; the same key with a different method, path
+    or body is 409 `idempotency-key-reused`; a missing key is 400
+    `idempotency-key-required`), and every collection `GET` is
     keyset-paginated as `{items, nextCursor}` with `limit` and `cursor`.
 
 
@@ -605,9 +609,11 @@ paths:
         account by the replay guard (two lines of one order with the same
         SKU and quantity stay two reservations when their `lineNo`
         differ). Replays of the same Idempotency-Key with an identical
-        body still return the cached response (with `Idempotency-Replayed:
-        true`); adding `lineNo` to a key first used without it is a
-        different request (409 `idempotency-key-reused`).
+        body still return the cached success (with `Idempotency-Replayed:
+        true`); a refusal that depends on stock (`insufficient-usable`,
+        `concurrent-modification`) is not cached: the same key executes
+        again (ADR 0053). Adding `lineNo` to a key first used without it is
+        a different request (409 `idempotency-key-reused`).
       tags: [Reservations]
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -1221,7 +1227,8 @@ paths:
         new Idempotency-Key represents a new physical count event and is
         intentionally repeatable (recounting a bin is a normal operational
         action); a retry with the SAME Idempotency-Key replays the first
-        answer and counts nothing again.
+        answer and counts nothing again (a first answer of 409
+        `concurrent-modification` is not stored: that retry executes).
       tags: [Bins]
       parameters:
         - $ref: "#/components/parameters/BinId"
@@ -2665,7 +2672,10 @@ components:
       description: >
         Present, with the value `true`, ONLY when this response is a replay
         of the stored answer for the request's Idempotency-Key (the handler
-        did not run again). The first execution of a key never carries it.
+        did not run again). The first execution of a key never carries it,
+        and neither does a retry of a refusal that was not stored (ADR 0053:
+        `concurrent-modification` and every refusal that depends on state
+        that can change): that retry executes again.
       schema:
         type: string
         enum: ["true"]
@@ -2715,6 +2725,20 @@ components:
         method, path and body returns the original response plus
         `Idempotency-Replayed: true`, while the same key with a different
         method, path or body is 409 `idempotency-key-reused`.
+
+        What is replayed (ADR 0053): a 2xx; a refusal that is a function of
+        the request alone (validation: 400, 422; `reservation-not-found` and
+        `held-unit-not-found`, ids minted by this service and never deleted);
+        and a refusal that committed state (`reservation-already-resolved`,
+        `transfer-scan-quarantined`). What is NOT replayed: a 5xx, and every
+        refusal that depends on state that can change, among them
+        `concurrent-modification`, `bin-not-found`, `container-not-found`,
+        `insufficient-usable`, `insufficient-reserved`, `bin-full`,
+        `receipt-not-staged`, `container-not-sealed`, `container-not-stowed`,
+        `hazmat-zone-required`, `temperature-class-mismatch` and
+        `location-classification-unavailable`. For those the key is released:
+        retry with the SAME key and the request executes again, and a
+        different body under the released key is a new request.
       schema:
         type: string
         minLength: 1
