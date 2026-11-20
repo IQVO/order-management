@@ -15,7 +15,10 @@ paths:
   set the route is wrapped by `RequireIdempotencyKey` (ADR-0023): 400
   `idempotency-key-required` without the header, 409
   `idempotency-key-reused` for the same key with a different body, stored
-  response replayed otherwise (the header is not declared in the spec).
+  response replayed otherwise when it is final for the request (2xx, FINAL
+  or OUTCOME refusal); a RETRYABLE refusal or a 5xx is not stored and its
+  key is released (ADR-0054; the class is on each problem type's catalogue
+  entry in `errors.go`/`problems.go`).
   Optional `releaseOnAllocation` (default `true`; `false` = hold after
   allocation, ADR-0020 — combining it with `allowPartialShipment: true` is
   rejected 422 `held-order-must-be-ship-complete`,

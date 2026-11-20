@@ -513,9 +513,15 @@ and headers, plus `Idempotency-Replayed: true`) instead of creating a second
 order; the same key with a DIFFERENT method, path or body is rejected with
 `409` `idempotency-key-reused`; a missing key is rejected with `400`
 `idempotency-key-required` and a key that is not 1-128 printable ASCII
-characters with `400` `idempotency-key-invalid`. 2xx and 4xx answers are
-stored; a 5xx is rolled back with the order and never stored, so the retry
-re-executes.
+characters with `400` `idempotency-key-invalid`. Only an answer that is final
+for the request is stored: a 2xx, or a refusal that is a function of the
+request (`FINAL`, for example `422` `non-positive-quantity`). A refusal that
+depends on state that can change (`RETRYABLE`: `409` `concurrent-modification`,
+`400` `unknown-process-path`, `409` `order-not-held`, ...) and every 5xx are
+rolled back with the key row and never stored, so a retry under the same key
+executes again (and another body under that key is a new request). Every
+problem type declares its class on its catalogue entry; the table is in
+[ADR 0054](docs/docs/adr/0054-idempotency-replay-classes.md).
 
 ```bash
 curl -s -X POST localhost:8080/orders \

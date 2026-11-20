@@ -47,8 +47,10 @@ info:
     things (commands are noun sub-resources such as
     `POST /orders/{id}/releases` and `POST /orders/{id}/allocation-retries`),
     EVERY `POST` is behind the Idempotency-Key middleware (a retry replays the
-    stored answer with the response header `Idempotency-Replayed: true`; the
-    same key with a different method, path or body is 409
+    stored answer, when the first answer is final for the request, with the
+    response header `Idempotency-Replayed: true`; a refusal that depends on
+    state that can change is not stored, see the `Idempotency-Key` parameter
+    and ADR 0054; the same key with a different method, path or body is 409
     `idempotency-key-reused`; a missing key is 400
     `idempotency-key-required`, a malformed one 400
     `idempotency-key-invalid`), and `DELETE /orders/{id}` is idempotent by
@@ -188,7 +190,14 @@ paths:
         header. A retry with the same key, method, path and body replays the
         stored answer (with `Idempotency-Replayed: true`) and creates no
         second order; the same key with another body is 409
-        `idempotency-key-reused`.
+        `idempotency-key-reused`. Only a final answer is stored: a 2xx, or a
+        refusal that is a function of the request (400 `malformed-request-body`,
+        `order-without-lines`, `empty-sku`, `invalid-fulfillment-site-id`, 422
+        `non-positive-quantity`, `held-order-must-be-ship-complete`). A
+        refusal that depends on state that can change
+        (`unknown-process-path`, `line-ineligible-for-resolved-path`) and every
+        5xx are not stored: the key is released and a retry under the same
+        key executes again.
       tags: [Orders]
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -453,7 +462,11 @@ paths:
         0023/0048): a retry with the same key, method, path and body replays
         the stored answer with `Idempotency-Replayed: true` and runs nothing
         again, so the key row, the order change and the outbox rows commit
-        together.
+        together. A refusal that depends on the order's state or on a
+        concurrent writer (`order-not-held`, `concurrent-modification`) is not
+        stored: the key is released and a retry under the same key executes
+        again; a refusal that is a function of the request (`empty-order-id`)
+        and a 2xx are stored.
       tags: [Allocation]
       parameters:
         - $ref: "#/components/parameters/OrderId"
@@ -538,7 +551,10 @@ paths:
         0023/0048): a retry with the same key, method, path and body replays
         the stored answer with `Idempotency-Replayed: true` and allocates
         nothing again, so the key row, the order change and the outbox rows
-        commit together.
+        commit together. A refusal that depends on the order's state or on a
+        concurrent writer (`no-backordered-lines`, `concurrent-modification`)
+        and every 5xx are not stored: the key is released and a retry under
+        the same key executes again.
       tags: [Allocation]
       parameters:
         - $ref: "#/components/parameters/OrderId"
@@ -738,7 +754,24 @@ components:
         `idempotency-key-invalid`; a replay with the same key and the same
         method, path and body returns the original response plus
         `Idempotency-Replayed: true`, while the same key with a different
-        method, path or body is 409 `idempotency-key-reused`. It is declared
+        method, path or body is 409 `idempotency-key-reused`.
+
+
+        What is replayed (ADR 0054): a 2xx, and a refusal that is a function
+        of the request alone (400 `malformed-request-body`, `order-without-lines`,
+        `empty-sku`, `empty-order-id`, `invalid-fulfillment-site-id`; 404
+        `order-not-found`; 422 `non-positive-quantity`,
+        `held-order-must-be-ship-complete`). What is NOT stored, so the key is
+        released and the same request under the same key executes again
+        (a different body under a released key is a new request, not a reuse):
+        a 5xx (`downstream-unavailable`, `downstream-not-configured`,
+        `internal-error`), and every refusal that depends on state that can
+        change: 409 `concurrent-modification`, `order-not-held`,
+        `no-backordered-lines`, `no-allocated-lines`, `promise-date-not-set`,
+        `order-line-*`, `order-already-released`, and 400
+        `unknown-process-path`, `line-ineligible-for-resolved-path` (the
+        process-path catalogue and product classification are fed by events
+        from other contexts). Retry those with the same key. It is declared
         optional here only because the in-memory development mode (no
         `DATABASE_URL`, the mode the Schemathesis contract job boots) has no
         transactional store and gates the middleware off.
