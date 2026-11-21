@@ -80,6 +80,8 @@ tags:
       `ReceiptCartonReceived`; it is stowed into a case bin, and broken
       (`BreakCase`) into loose eaches. The ledger stays in eaches. Quantity
       is booked once, by `ReceiptLineReceived`, never by a container.
+  - name: Totes
+    description: Reusable license-plated containers the WCS moves (ADR 0054)
   - name: Reservations
     description: >
       Revocable bindings of usable stock to demand. A Reservation can be
@@ -397,13 +399,22 @@ paths:
             facility-layout classification lookup was unavailable for a
             classified, rule-relevant SKU, or the SKU carries a DOT hazard
             class (ADR 0010) that is incompatible with another SKU already
-            occupying the target bin (same-bin DOT segregation).
+            occupying the target bin (same-bin DOT segregation),
+            or the bin is an `AutomatedStorage` location, which holds container stock only (automated-storage-requires-container, ADR 0054).
             The same Idempotency-Key reused with a different method, path or body is also a 409 (idempotency-key-reused).
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/Problem"
               examples:
+                automatedStorageRequiresContainer:
+                  summary: Loose stock into an AutomatedStorage location
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/automated-storage-requires-container
+                    title: An automated storage location holds container stock only
+                    status: 409
+                    detail: an automated storage location holds container stock only
+                    instance: /stowages
                 binFull:
                   summary: Bin capacity exceeded
                   value:
@@ -614,6 +625,9 @@ paths:
         `concurrent-modification`) is not cached: the same key executes
         again (ADR 0053). Adding `lineNo` to a key first used without it is
         a different request (409 `idempotency-key-reused`).
+        When automated storage holds the SKU, one container covering the
+        remainder after the forward faces is drawn first and every
+        allocation names its container in `containerId` (ADR 0054).
       tags: [Reservations]
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -1609,13 +1623,22 @@ paths:
             No STAGED receipt for this line (stow-before-stage, or the
             line is unknown), a bin outside the destination site's
             custody, a bin quantity sum mismatch, or the receipt already
-            has a DIFFERENT staged scan.
+            has a DIFFERENT staged scan,
+            or the bin is an `AutomatedStorage` location, which holds container stock only (automated-storage-requires-container, ADR 0054).
             The same Idempotency-Key reused with a different method, path or body is also a 409 (idempotency-key-reused).
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/Problem"
               examples:
+                automatedStorageRequiresContainer:
+                  summary: Loose stock into an AutomatedStorage location
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/automated-storage-requires-container
+                    title: An automated storage location holds container stock only
+                    status: 409
+                    detail: an automated storage location holds container stock only
+                    instance: /transfers/tl-1/stowages
                 receiptNotStaged:
                   summary: Stow before stage
                   value:
@@ -1757,13 +1780,22 @@ paths:
             A bin is not in siteCode (bin-not-at-site), the usable quantity
             of the SKU in fromBin is below quantity (insufficient-usable),
             toBin has no room (bin-full), or a concurrent writer changed a
-            bin or a touched unit (concurrent-modification).
+            bin or a touched unit (concurrent-modification),
+            or the bin is an `AutomatedStorage` location, which holds container stock only (automated-storage-requires-container, ADR 0054).
             The same Idempotency-Key reused with a different method, path or body is also a 409 (idempotency-key-reused).
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/Problem"
               examples:
+                automatedStorageRequiresContainer:
+                  summary: Loose stock into an AutomatedStorage location
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/automated-storage-requires-container
+                    title: An automated storage location holds container stock only
+                    status: 409
+                    detail: an automated storage location holds container stock only
+                    instance: /relocations
                 binNotAtSite:
                   summary: A bin outside the site
                   value:
@@ -2159,13 +2191,22 @@ paths:
             looseBin does not accept loose eaches (bin-handling-unit-mismatch),
             looseBin is in another site (container-not-at-site) or has no
             room (bin-full), or a concurrent writer changed it
-            (concurrent-modification).
+            (concurrent-modification),
+            or the bin is an `AutomatedStorage` location, which holds container stock only (automated-storage-requires-container, ADR 0054).
             The same Idempotency-Key reused with a different method, path or body is also a 409 (idempotency-key-reused).
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/Problem"
               examples:
+                automatedStorageRequiresContainer:
+                  summary: Loose stock into an AutomatedStorage location
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/automated-storage-requires-container
+                    title: An automated storage location holds container stock only
+                    status: 409
+                    detail: an automated storage location holds container stock only
+                    instance: /containers/003400000000000017/case-breaks
                 containerReserved:
                   summary: "Container is reserved"
                   value:
@@ -2279,6 +2320,658 @@ paths:
                 status: 404
                 detail: bin not found
                 instance: /bins/NOPE/containers
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /totes/{lpn}:
+    put:
+      operationId: registerTote
+      summary: Register a tote by its license plate
+      description: >-
+        Commission a reusable tote (ADR 0054): its license plate is its
+        permanent label, printed once (pre-printed by the tote supplier, or
+        by the floor client from the LPN as CODE128); this service mints no
+        LPN and prints no label. Idempotent by method: the first call
+        creates the tote in no bin and answers 201, a repeat answers 200
+        with the tote as it is now. One license-plate namespace with the
+        sealed cases (ADR 0045): a plate that already names a sealed case
+        is 409 `license-plate-taken`. Raises `ToteRegistered` when the tote
+        is created.
+      tags: [Totes]
+      parameters:
+        - name: lpn
+          in: path
+          required: true
+          description: "The tote's license plate: its permanent label, registered once (ADR 0054). One namespace with sealed cases."
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+            pattern: '^[A-Za-z0-9._-]+$'
+            example: TOTE-000123
+      responses:
+        "201":
+          description: The tote was registered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tote"
+              example:
+                lpn: TOTE-000123
+                contents: []
+        "200":
+          description: The tote already existed; it is answered as it is now.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tote"
+              example:
+                lpn: TOTE-000123
+                siteId: WH1
+                binId: WH1-RCV-DEC-D01-01-01-A
+                contents: []
+        "409":
+          description: The license plate already names a sealed case (license-plate-taken).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/license-plate-taken
+                title: The license plate already names another container
+                status: 409
+                detail: license plate is already registered
+                instance: /totes/003400000000000017
+        "400":
+          description: The lpn is longer than 64 characters (invalid-lpn).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/invalid-lpn
+                title: lpn must be 1 to 64 characters of [A-Za-z0-9._-]
+                status: 400
+                detail: 'lpn must be 1 to 64 characters of [A-Za-z0-9._-]: "00000000000000000000000000000000000000000000000000000000000000000"'
+                instance: /totes/00000000000000000000000000000000000000000000000000000000000000000
+        "404":
+          description: >-
+            No route matches: the lpn holds a character outside
+            `[A-Za-z0-9._-]` (route-not-found). No tote is created.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/route-not-found
+                title: No such resource
+                status: 404
+                detail: no route matches PUT /totes/TOTE%2F1
+                instance: /totes/TOTE%2F1
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: getTote
+      summary: Read one tote and its contents
+      description: >-
+        The tote (ADR 0054) with this license plate: its site and bin (its
+        logical location; absent until its first stow) and its contents,
+        one entry per stock unit in the tote, ordered by SKU then stock unit
+        id (empty, never null, for an empty tote). Side-effect-free.
+      tags: [Totes]
+      parameters:
+        - name: lpn
+          in: path
+          required: true
+          description: "The tote's license plate: its permanent label, registered once (ADR 0054). One namespace with sealed cases."
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+            pattern: '^[A-Za-z0-9._-]+$'
+            example: TOTE-000123
+      responses:
+        "200":
+          description: The tote and its contents.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tote"
+              example:
+                lpn: TOTE-000123
+                siteId: WH1
+                binId: WH1-AUTO-ASRS-ASRS1-00-00-S
+                contents:
+                  - stockUnitId: su-9a1e0f3c-2b4d-4c6e-8f00-112233445566
+                    sku: SKU-1
+                    ownerRef: seller-a
+                    quantity: 6
+                    reserved: 0
+        "404":
+          description: No tote has this LPN.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/tote-not-found
+                title: Tote not found
+                status: 404
+                detail: tote not found
+                instance: /totes/NOPE
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /totes/{lpn}/fills:
+    post:
+      operationId: fillTote
+      summary: Fill a tote with loose eaches at its current bin
+      description: >-
+        Scan the item, scan the tote (ADR 0054): the same semantics, placement
+        checks and events as `POST /stowages`, at the bin the tote is in (the
+        decant station). Creates one stock unit of the SKU in the tote, raises
+        `ItemStowed`, `LocationRecorded`, `BinStockLevelChanged` and
+        `ToteFilled`. A tote in no bin is 409 `tote-not-placed`: stow it
+        first.
+
+
+        Behind the Idempotency-Key middleware like every other POST (ADR
+        0018).
+      tags: [Totes]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: lpn
+          in: path
+          required: true
+          description: "The tote's license plate: its permanent label, registered once (ADR 0054). One namespace with sealed cases."
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+            pattern: '^[A-Za-z0-9._-]+$'
+            example: TOTE-000123
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FillToteRequest"
+            example:
+              sku: SKU-1
+              quantity: 6
+              ownerRef: seller-a
+      responses:
+        "201":
+          description: The tote with its contents, the new stock unit included.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tote"
+              example:
+                lpn: TOTE-000123
+                siteId: WH1
+                binId: WH1-RCV-DEC-D01-01-01-A
+                contents:
+                  - stockUnitId: su-9a1e0f3c-2b4d-4c6e-8f00-112233445566
+                    sku: SKU-1
+                    ownerRef: seller-a
+                    quantity: 6
+                    reserved: 0
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+        "400":
+          description: >-
+            Malformed body, an empty sku (empty-sku), a malformed ownerRef
+            (invalid-owner-ref), or the Idempotency-Key header absent.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                emptySku:
+                  summary: SKU must not be empty
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/empty-sku
+                    title: SKU must not be empty
+                    status: 400
+                    detail: sku must not be empty
+                    instance: /totes/TOTE-000123/fills
+                invalidOwnerRef:
+                  summary: ownerRef malformed
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/invalid-owner-ref
+                    title: ownerRef must be at most 64 characters of [A-Za-z0-9._-]
+                    status: 400
+                    detail: owner ref must be at most 64 characters of [A-Za-z0-9._-]
+                    instance: /totes/TOTE-000123/fills
+                idempotencyKeyRequired:
+                  summary: Idempotency-Key header missing or invalid (REST guideline 2.2)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-required
+                    title: Idempotency-Key header is required
+                    status: 400
+                    detail: This endpoint changes state and requires a caller-supplied Idempotency-Key header so a retried request is never applied twice.
+                    instance: /totes/TOTE-000123/fills
+        "404":
+          description: The tote, or the bin it is in, is unknown.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                toteNotFound:
+                  summary: No tote has this LPN
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/tote-not-found
+                    title: Tote not found
+                    status: 404
+                    detail: tote not found
+                    instance: /totes/NOPE/fills
+                binNotFound:
+                  summary: The tote's bin is not registered
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/bin-not-found
+                    title: Bin not found
+                    status: 404
+                    detail: bin not found
+                    instance: /totes/TOTE-000123/fills
+        "409":
+          description: >-
+            The tote is in no bin (tote-not-placed), the bin has no room
+            (bin-full), the SKU fails the bin's placement rules
+            (hazmat-zone-required, temperature-class-mismatch,
+            hazmat-class-incompatible), the facility-layout lookup is
+            unavailable for a Hazmat or TemperatureSensitive SKU
+            (location-classification-unavailable), or a concurrent writer
+            changed the bin or the tote (concurrent-modification).
+            The same Idempotency-Key reused with a different method, path or body is also a 409 (idempotency-key-reused).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                toteNotPlaced:
+                  summary: The tote is in no bin
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/tote-not-placed
+                    title: Tote is not in a bin; stow it before filling it
+                    status: 409
+                    detail: tote is not in a bin
+                    instance: /totes/TOTE-000123/fills
+                binFull:
+                  summary: Bin capacity exceeded
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/bin-full
+                    title: "Bin is full: capacity exceeded"
+                    status: 409
+                    detail: "bin is full: capacity exceeded"
+                    instance: /totes/TOTE-000123/fills
+                hazmatZoneRequired:
+                  summary: Hazmat SKU into a non-hazmat-rated zone
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/hazmat-zone-required
+                    title: Hazmat SKU requires a hazmat-rated zone
+                    status: 409
+                    detail: hazmat sku requires a hazmat-rated zone
+                    instance: /totes/TOTE-000123/fills
+                temperatureClassMismatch:
+                  summary: TemperatureSensitive SKU into a mismatched zone
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/temperature-class-mismatch
+                    title: Bin temperature class does not match the SKU's required temperature class
+                    status: 409
+                    detail: bin temperature class does not match the sku's required temperature class
+                    instance: /totes/TOTE-000123/fills
+                locationClassificationUnavailable:
+                  summary: facility-layout lookup unavailable for a classified SKU
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/location-classification-unavailable
+                    title: Location classification lookup unavailable
+                    status: 409
+                    detail: location classification lookup unavailable
+                    instance: /totes/TOTE-000123/fills
+                hazmatClassIncompatible:
+                  summary: DOT hazard class incompatible with another SKU already in the bin
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/hazmat-class-incompatible
+                    title: DOT hazard class incompatible with another SKU already stowed in this bin
+                    status: 409
+                    detail: dot hazard class incompatible with another sku already stowed in this bin
+                    instance: /totes/TOTE-000123/fills
+                concurrentModification:
+                  summary: The bin or the tote was modified by another request (ADR 0019)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/concurrent-modification
+                    title: The resource was modified by another request; re-fetch the latest version and retry
+                    status: 409
+                    detail: the resource was modified by another request; re-fetch the latest version and retry
+                    instance: /totes/TOTE-000123/fills
+                idempotencyKeyReused:
+                  summary: Idempotency-Key reused with a different method, path or body (REST guideline 2.3)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-reused
+                    title: Idempotency-Key was already used with a different request
+                    status: 409
+                    detail: The Idempotency-Key header on this request was already used with a different method, path or body. Use a new Idempotency-Key for a genuinely different request.
+                    instance: /totes/TOTE-000123/fills
+        "422":
+          description: Quantity present but not a positive number.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/zero-quantity
+                title: Quantity must be greater than zero
+                status: 422
+                detail: quantity must be greater than zero
+                instance: /totes/TOTE-000123/fills
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /totes/{lpn}/stowages:
+    post:
+      operationId: stowTote
+      summary: Stow a tote and all its contents into a bin
+      description: >-
+        Scan the tote, scan the location (ADR 0054): the bin becomes the
+        tote's logical location. In one transaction the destination is
+        occupied by the contents' eaches, the source bin released, every
+        stock unit of the tote moved, `LocationRecorded` raised per unit,
+        `BinStockLevelChanged` for both bins and `ToteStowed` published. The
+        first stow of a new tote only places it. Into the bin it is already
+        in, nothing changes. A tote holding reserved stock is 409
+        `tote-reserved`: each allocation names its pick bin (ADR 0025). An
+        `AutomatedStorage` bin accepts a tote: it holds container stock only.
+
+
+        Behind the Idempotency-Key middleware like every other POST (ADR
+        0018).
+      tags: [Totes]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: lpn
+          in: path
+          required: true
+          description: "The tote's license plate: its permanent label, registered once (ADR 0054). One namespace with sealed cases."
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+            pattern: '^[A-Za-z0-9._-]+$'
+            example: TOTE-000123
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bin]
+              properties:
+                bin:
+                  type: string
+                  minLength: 1
+                  description: The bin to stow the tote into.
+                  example: WH1-AUTO-ASRS-ASRS1-00-00-S
+            example:
+              bin: WH1-AUTO-ASRS-ASRS1-00-00-S
+      responses:
+        "200":
+          description: The stowed tote and its contents.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tote"
+              example:
+                lpn: TOTE-000123
+                siteId: WH1
+                binId: WH1-AUTO-ASRS-ASRS1-00-00-S
+                contents:
+                  - stockUnitId: su-9a1e0f3c-2b4d-4c6e-8f00-112233445566
+                    sku: SKU-1
+                    ownerRef: seller-a
+                    quantity: 6
+                    reserved: 0
+          headers:
+            Idempotency-Replayed:
+              $ref: "#/components/headers/IdempotencyReplayed"
+        "400":
+          description: Malformed body, an empty bin, or the Idempotency-Key header absent.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                emptyBinId:
+                  summary: "Bin ID must not be empty"
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/empty-bin-id
+                    title: Bin ID must not be empty
+                    status: 400
+                    detail: bin id must not be empty
+                    instance: /totes/TOTE-000123/stowages
+                idempotencyKeyRequired:
+                  summary: Idempotency-Key header missing or invalid (REST guideline 2.2)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-required
+                    title: Idempotency-Key header is required
+                    status: 400
+                    detail: This endpoint changes state and requires a caller-supplied Idempotency-Key header so a retried request is never applied twice.
+                    instance: /totes/TOTE-000123/stowages
+        "404":
+          description: The tote or the bin is unknown.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                toteNotFound:
+                  summary: No tote has this LPN
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/tote-not-found
+                    title: Tote not found
+                    status: 404
+                    detail: tote not found
+                    instance: /totes/NOPE/stowages
+                binNotFound:
+                  summary: The bin is not registered
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/bin-not-found
+                    title: Bin not found
+                    status: 404
+                    detail: bin not found
+                    instance: /totes/TOTE-000123/stowages
+        "409":
+          description: >-
+            The bin is in another site than the tote (container-not-at-site),
+            the tote holds reserved stock (tote-reserved), the bin has no room
+            (bin-full), a SKU in the tote fails the destination bin's
+            placement rules (hazmat-zone-required, temperature-class-mismatch,
+            hazmat-class-incompatible), the facility-layout lookup is
+            unavailable for a Hazmat or TemperatureSensitive SKU
+            (location-classification-unavailable), a unit in the tote is held
+            or unlocated (unit-held, unit-unlocated), or a concurrent writer
+            changed a bin, a unit or the tote (concurrent-modification).
+            The same Idempotency-Key reused with a different method, path or body is also a 409 (idempotency-key-reused).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                containerNotAtSite:
+                  summary: The bin is in another site
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/container-not-at-site
+                    title: Container and bin are not at the same site
+                    status: 409
+                    detail: container and bin are not at the same site
+                    instance: /totes/TOTE-000123/stowages
+                toteReserved:
+                  summary: The tote holds reserved stock
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/tote-reserved
+                    title: Tote holds reserved stock and cannot be stowed elsewhere
+                    status: 409
+                    detail: tote holds reserved stock
+                    instance: /totes/TOTE-000123/stowages
+                binFull:
+                  summary: Bin capacity exceeded
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/bin-full
+                    title: "Bin is full: capacity exceeded"
+                    status: 409
+                    detail: "bin is full: capacity exceeded"
+                    instance: /totes/TOTE-000123/stowages
+                hazmatZoneRequired:
+                  summary: Hazmat SKU in the tote into a non-hazmat-rated zone
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/hazmat-zone-required
+                    title: Hazmat SKU requires a hazmat-rated zone
+                    status: 409
+                    detail: hazmat sku requires a hazmat-rated zone
+                    instance: /totes/TOTE-000123/stowages
+                temperatureClassMismatch:
+                  summary: TemperatureSensitive SKU in the tote into a mismatched zone
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/temperature-class-mismatch
+                    title: Bin temperature class does not match the SKU's required temperature class
+                    status: 409
+                    detail: bin temperature class does not match the sku's required temperature class
+                    instance: /totes/TOTE-000123/stowages
+                hazmatClassIncompatible:
+                  summary: DOT hazard class incompatible with another SKU already in the bin
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/hazmat-class-incompatible
+                    title: DOT hazard class incompatible with another SKU already stowed in this bin
+                    status: 409
+                    detail: dot hazard class incompatible with another sku already stowed in this bin
+                    instance: /totes/TOTE-000123/stowages
+                locationClassificationUnavailable:
+                  summary: facility-layout lookup unavailable for a classified SKU
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/location-classification-unavailable
+                    title: Location classification lookup unavailable
+                    status: 409
+                    detail: location classification lookup unavailable
+                    instance: /totes/TOTE-000123/stowages
+                unitHeld:
+                  summary: A unit in the tote is held
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/unit-held
+                    title: Stock unit is held and cannot be used until a disposition releases it
+                    status: 409
+                    detail: stock unit is held
+                    instance: /totes/TOTE-000123/stowages
+                unitUnlocated:
+                  summary: A unit in the tote is unlocated
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/unit-unlocated
+                    title: Stock unit is unlocated
+                    status: 409
+                    detail: stock unit is unlocated
+                    instance: /totes/TOTE-000123/stowages
+                concurrentModification:
+                  summary: A bin, a unit or the tote was modified by another request (ADR 0019)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/concurrent-modification
+                    title: The resource was modified by another request; re-fetch the latest version and retry
+                    status: 409
+                    detail: the resource was modified by another request; re-fetch the latest version and retry
+                    instance: /totes/TOTE-000123/stowages
+                idempotencyKeyReused:
+                  summary: Idempotency-Key reused with a different method, path or body (REST guideline 2.3)
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/idempotency-key-reused
+                    title: Idempotency-Key was already used with a different request
+                    status: 409
+                    detail: The Idempotency-Key header on this request was already used with a different method, path or body. Use a new Idempotency-Key for a genuinely different request.
+                    instance: /totes/TOTE-000123/stowages
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /bins/{binId}/totes:
+    get:
+      operationId: listBinTotes
+      summary: List the totes stowed in a bin
+      description: >-
+        The totes whose logical location is the bin (ADR 0054), ordered by
+        LPN (which is unique, so it is both the sort key and the id of the
+        keyset cursor). Keyset-paginated (REST guideline section 3): one page
+        of `{items, nextCursor}`, `limit` (1-500, default 100) and the opaque
+        `cursor` from the previous page's `nextCursor`; `nextCursor` is
+        absent on the last page. Any other query parameter is 400
+        `unknown-query-parameter`. Side-effect-free.
+      tags: [Totes]
+      parameters:
+        - name: binId
+          in: path
+          required: true
+          description: The bin to inspect.
+          schema:
+            type: string
+            example: WH1-AUTO-ASRS-ASRS1-00-00-S
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of the totes in the bin (possibly none), ordered by LPN.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TotePage"
+              example:
+                items:
+                  - lpn: TOTE-000123
+                    siteId: WH1
+                    binId: WH1-AUTO-ASRS-ASRS1-00-00-S
+        "400":
+          description: >-
+            `limit` is not an integer between 1 and 500 (invalid-limit), or
+            `cursor` is not a page token this API issued (invalid-cursor), or
+            any query parameter other than `limit` and `cursor` was sent
+            (unknown-query-parameter).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              examples:
+                invalidLimit:
+                  summary: limit is not an integer between 1 and 500
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/invalid-limit
+                    title: "limit must be an integer between 1 and 500"
+                    status: 400
+                    detail: "limit must be an integer between 1 and 500"
+                    instance: /bins/WH1-AUTO-ASRS-ASRS1-00-00-S/totes
+                invalidCursor:
+                  summary: cursor was not issued by this API
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/invalid-cursor
+                    title: "cursor is not a valid page token"
+                    status: 400
+                    detail: "cursor is not a valid page token"
+                    instance: /bins/WH1-AUTO-ASRS-ASRS1-00-00-S/totes
+                unknownQueryParameter:
+                  summary: a query parameter the collection does not declare
+                  value:
+                    type: https://errors.inventory-storage.warehouse-systems.dev/unknown-query-parameter
+                    title: the collection does not declare this query parameter
+                    status: 400
+                    detail: "unknown query parameter: after"
+                    instance: /bins/WH1-AUTO-ASRS-ASRS1-00-00-S/totes
+        "404":
+          description: The bin is not registered.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+              example:
+                type: https://errors.inventory-storage.warehouse-systems.dev/bin-not-found
+                title: Bin not found
+                status: 404
+                detail: bin not found
+                instance: /bins/NOPE/totes
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -2924,6 +3617,112 @@ components:
             Opaque cursor of the next page, to be passed back unchanged as
             `cursor`. Absent on the last page.
 
+    Tote:
+      type: object
+      required: [lpn, contents]
+      description: >
+        A reusable license-plated tote (ADR 0054) and its contents. Its
+        logical location is the bin it is stowed in.
+      properties:
+        lpn:
+          type: string
+          description: The tote's license plate.
+          example: TOTE-000123
+        siteId:
+          type: string
+          description: The site of the tote's bin. Absent until its first stow.
+          example: WH1
+        binId:
+          type: string
+          description: The bin the tote is stowed in (its logical location). Absent until its first stow.
+          example: WH1-AUTO-ASRS-ASRS1-00-00-S
+        contents:
+          type: array
+          description: One entry per stock unit in the tote, ordered by SKU then stock unit id; empty, never null.
+          items:
+            $ref: "#/components/schemas/ToteContent"
+
+    ToteContent:
+      type: object
+      required: [stockUnitId, sku, quantity, reserved]
+      description: One stock unit in a tote, in eaches.
+      properties:
+        stockUnitId:
+          type: string
+          example: su-9a1e0f3c-2b4d-4c6e-8f00-112233445566
+        sku:
+          type: string
+          example: SKU-1
+        ownerRef:
+          type: string
+          description: Whose stock it is; omitted for fleet-owned stock (ADR 0045).
+          example: seller-a
+        quantity:
+          type: integer
+          format: int32
+          example: 6
+        reserved:
+          type: integer
+          format: int32
+          example: 0
+
+    ToteSummary:
+      type: object
+      required: [lpn]
+      description: A tote in a bin listing (no contents).
+      properties:
+        lpn:
+          type: string
+          example: TOTE-000123
+        siteId:
+          type: string
+          example: WH1
+        binId:
+          type: string
+          example: WH1-AUTO-ASRS-ASRS1-00-00-S
+
+    TotePage:
+      type: object
+      required: [items]
+      description: >
+        One keyset page of totes (REST guideline section 3.3), ordered by
+        LPN.
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ToteSummary"
+        nextCursor:
+          type: string
+          description: >
+            Opaque cursor of the next page, to be passed back unchanged as
+            `cursor`. Absent on the last page.
+
+    FillToteRequest:
+      type: object
+      required: [sku, quantity]
+      properties:
+        sku:
+          type: string
+          minLength: 1
+          description: Stock-keeping unit identifier (item-scan).
+          example: SKU-1
+        quantity:
+          type: integer
+          format: int32
+          minimum: 1
+          description: Eaches put into the tote. Must be a positive integer.
+          example: 6
+        ownerRef:
+          type: string
+          nullable: true
+          maxLength: 64
+          pattern: '^[A-Za-z0-9._-]*$'
+          description: >-
+            Whose stock it is (ADR 0045). Omitted means fleet-owned stock. A
+            malformed value is 400 `invalid-owner-ref`.
+          example: seller-a
+
     HeldUnitPage:
       type: object
       required: [items]
@@ -3357,6 +4156,14 @@ components:
           type: integer
           format: int32
           example: 6
+        containerId:
+          type: string
+          description: >-
+            License plate of the container the allocated stock is in: a tote
+            in automated storage, or the sealed case of a full-case
+            allocation (ADR 0054). The WES requests this container's
+            transport. Omitted for stock in no container.
+          example: TOTE-000123
 
     Reservation:
       type: object
