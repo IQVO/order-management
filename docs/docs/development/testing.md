@@ -17,7 +17,7 @@ flowchart TB
   M["Mutation (gremlins)<br/>internal/domain/order on every push<br/>internal/domain weekly"]
   C["Contract (Schemathesis)<br/>apis/openapi.yaml vs a live in-memory cmd/order"]
   E["MCP evals E1-E3<br/>13 Gherkin scenarios + conformance + governance"]
-  B["BDD (godog)<br/>20 feature files, 164 scenario definitions, 194 executed"]
+  B["BDD (godog)<br/>23 feature files, 181 scenario definitions, 212 executed"]
   I["Integration (Testcontainers)<br/>28 files, 63 tests, 12 packages"]
   A["Architecture fitness<br/>internal/architecture"]
   U["Unit + httptest<br/>99 files, 502 tests"]
@@ -158,11 +158,11 @@ well as a `Released` one (`internal/domain/order/order.go`, ADR 0004 addendum
 | `planned_capacity_extended.feature` | 5 |
 | `required_ship_by.feature` | 2 |
 | `ship_complete.feature` | 2 |
-| **20 files** | **164** |
+| **23 files** | **181** |
 
 The counts are `Scenario` and `Scenario Outline` definitions
 (`git grep -c -E "^[[:space:]]*Scenario" -- features`). With outline rows
-expanded the runner executes **195 scenarios**, none skipped by the default
+expanded the runner executes **212 scenarios**, none skipped by the default
 filter.
 
 ## Contract tests (Schemathesis)
