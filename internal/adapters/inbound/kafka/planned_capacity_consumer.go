@@ -359,6 +359,6 @@ func (c *PlannedCapacityConsumer) startConsumeSpan(ctx context.Context, topic st
 
 func (c *PlannedCapacityConsumer) log(ctx context.Context, msg string, args ...any) {
 	if c.logger != nil {
-		c.logger.WarnContext(ctx, msg, args...)
+		c.logger.WarnContext(ctx, msg, sanitizeArgs(args)...)
 	}
 }

@@ -88,6 +88,6 @@ func (uc *ApplyProductClassification) Execute(ctx context.Context, req ApplyProd
 
 func (uc *ApplyProductClassification) log(msg string, args ...any) {
 	if uc.Logger != nil {
-		uc.Logger.Warn(msg, args...)
+		uc.Logger.Warn(msg, sanitizeArgs(args)...)
 	}
 }

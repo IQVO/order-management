@@ -333,6 +333,6 @@ func (c *OutboundShippingConsumer) startConsumeSpan(ctx context.Context, topic s
 
 func (c *OutboundShippingConsumer) log(_ context.Context, msg string, args ...any) {
 	if c.logger != nil {
-		c.logger.Warn(msg, args...)
+		c.logger.Warn(msg, sanitizeArgs(args)...)
 	}
 }

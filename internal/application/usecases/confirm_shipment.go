@@ -192,6 +192,6 @@ func (uc *ConfirmShipment) publishOrderLevel(ctx context.Context, o *order.Order
 
 func (uc *ConfirmShipment) log(_ context.Context, msg string, args ...any) {
 	if uc.Logger != nil {
-		uc.Logger.Warn(msg, args...)
+		uc.Logger.Warn(msg, sanitizeArgs(args)...)
 	}
 }

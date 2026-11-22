@@ -80,7 +80,7 @@ func (s *PostgresStore) GetClassification(ctx context.Context, sku string) (port
 		return ports.ProductClassification{SKU: sku, Known: false}, nil
 	case err != nil:
 		if s.logger != nil {
-			s.logger.WarnContext(ctx, "product classification copy unreadable; treating the SKU as unclassified", "sku", logsanitize.Sanitize(sku), "error", err)
+			s.logger.WarnContext(ctx, "product classification copy unreadable; treating the SKU as unclassified", "sku", logsanitize.Sanitize(sku), "error", sanitizeErr(err))
 		}
 		return ports.ProductClassification{SKU: sku, Known: false}, nil
 	}
