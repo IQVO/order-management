@@ -38,12 +38,12 @@ func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 
 			route := chiRoutePattern(r)
 			logger.InfoContext(r.Context(), "http request",
-				"method", r.Method,
+				"method", sanitizeForLog(r.Method),
 				"route", route,
 				"status", ww.Status(),
 				"bytes", ww.BytesWritten(),
 				"duration_ms", time.Since(start).Milliseconds(),
-				"request_id", middleware.GetReqID(r.Context()),
+				"request_id", sanitizeForLog(middleware.GetReqID(r.Context())),
 			)
 		})
 	}

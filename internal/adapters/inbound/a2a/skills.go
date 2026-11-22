@@ -206,7 +206,7 @@ func problemFromUseCase(err error) *problem {
 	case errors.Is(err, shared.ErrEmptyOrderID):
 		return &problem{Type: problemTypeBase + "empty-order-id", Title: "Order id must not be empty", Detail: "orderId is required", Status: 400}
 	default:
-		slog.Error("a2a skill failed", "error", err)
+		slog.Error("a2a skill failed", "error", logReplacer.Replace(err.Error()))
 		return &problem{Type: problemTypeBase + "internal-error", Title: "An unexpected internal error occurred", Detail: "the skill failed; see server logs (trace id in the response metadata)", Status: 500}
 	}
 }
