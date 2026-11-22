@@ -156,8 +156,8 @@ func (uc *ConfirmRelease) logLate(ctx context.Context, c releaseconfirmation.Con
 		flagged = at.UTC().Format(time.RFC3339)
 	}
 	logger.WarnContext(ctx, "release confirmed late: the line flagged unconfirmed was admitted after all",
-		"order_id", c.OrderID().String(), "line_no", c.LineNo(), "work_unit_id", c.WorkUnitID(),
-		"released_at", c.ReleasedAt().UTC().Format(time.RFC3339), "unconfirmed_at", flagged)
+		"order_id", sanitizeLog(c.OrderID().String()), "line_no", c.LineNo(), "work_unit_id", sanitizeLog(c.WorkUnitID()),
+		"released_at", sanitizeLog(c.ReleasedAt().UTC().Format(time.RFC3339)), "unconfirmed_at", sanitizeLog(flagged))
 }
 
 // FlagUnconfirmedReleases is the timeout sweep of ADR 0043: PENDING lines
@@ -261,7 +261,7 @@ func (uc *FlagUnconfirmedReleases) report(ctx context.Context, c releaseconfirma
 		logger = slog.Default()
 	}
 	logger.ErrorContext(ctx, "release unconfirmed",
-		"order_id", c.OrderID().String(), "line_no", c.LineNo(), "path_id", c.PathID().String(),
-		"work_unit_id", c.WorkUnitID(), "released_at", c.ReleasedAt().UTC().Format(time.RFC3339),
-		"timeout", uc.Timeout.String())
+		"order_id", sanitizeLog(c.OrderID().String()), "line_no", c.LineNo(), "path_id", sanitizeLog(c.PathID().String()),
+		"work_unit_id", sanitizeLog(c.WorkUnitID()), "released_at", sanitizeLog(c.ReleasedAt().UTC().Format(time.RFC3339)),
+		"timeout", sanitizeLog(uc.Timeout.String()))
 }

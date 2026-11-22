@@ -304,10 +304,10 @@ func (c *Consumer) Run(ctx context.Context) error {
 				// Not a CloudEvents 1.0 event (e.g. the retired flat
 				// envelope): skip past it, never parse another shape.
 				c.Logger.WarnContext(ctx, "skipping non-CloudEvents message",
-					"topic", msg.Topic, "offset", msg.Offset, "partition", msg.Partition, "error", err)
+					"topic", msg.Topic, "offset", msg.Offset, "partition", msg.Partition, "error", sanitizeErr(err))
 			} else {
 				c.Logger.ErrorContext(ctx, "process-path catalogue message handling failed",
-					"topic", msg.Topic, "offset", msg.Offset, "partition", msg.Partition, "error", err)
+					"topic", msg.Topic, "offset", msg.Offset, "partition", msg.Partition, "error", sanitizeErr(err))
 			}
 		}
 		c.checkReady(msg)
@@ -385,7 +385,7 @@ func parseCycleTime(raw, pathID string, logger *slog.Logger) (time.Duration, boo
 	if err != nil {
 		if logger != nil {
 			logger.Warn("kafkacatalog: could not parse cycle_time_p95; treating as unknown",
-				"path_id", pathID, "cycle_time_p95", raw, "error", err)
+				"path_id", sanitizeLog(pathID), "cycle_time_p95", sanitizeLog(raw), "error", sanitizeErr(err))
 		}
 		return 0, false
 	}

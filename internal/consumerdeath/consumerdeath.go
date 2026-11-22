@@ -48,7 +48,7 @@ func (d *Deaths) Watch(ctx context.Context, name string, logger *slog.Logger, ru
 	if err == nil {
 		return
 	}
-	logger.Error(name+" stopped", "error", err)
+	logger.Error(name+" stopped", "error", sanitizeErr(err))
 	if d == nil {
 		return
 	}

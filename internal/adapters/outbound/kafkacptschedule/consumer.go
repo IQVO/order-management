@@ -282,10 +282,10 @@ func (c *Consumer) Run(ctx context.Context) error {
 				// Not a CloudEvents 1.0 event (e.g. the retired flat
 				// envelope): skip past it, never parse another shape.
 				c.Logger.WarnContext(ctx, "skipping non-CloudEvents message",
-					"topic", msg.Topic, "offset", msg.Offset, "partition", msg.Partition, "error", err)
+					"topic", msg.Topic, "offset", msg.Offset, "partition", msg.Partition, "error", sanitizeErr(err))
 			} else {
 				c.Logger.ErrorContext(ctx, "CPT schedule message handling failed",
-					"topic", msg.Topic, "offset", msg.Offset, "partition", msg.Partition, "error", err)
+					"topic", msg.Topic, "offset", msg.Offset, "partition", msg.Partition, "error", sanitizeErr(err))
 			}
 		}
 		c.checkReady(msg)
@@ -359,7 +359,7 @@ func (c *Consumer) NextCutoffs(siteId string, from time.Time, n int) ([]order.CP
 	windows, err := computeNextCutoffs(sched, from, n)
 	if err != nil {
 		if c.Logger != nil {
-			c.Logger.Error("failed computing next CPT cutoffs", "site_id", logsanitize.Sanitize(siteId), "error", err)
+			c.Logger.Error("failed computing next CPT cutoffs", "site_id", logsanitize.Sanitize(siteId), "error", sanitizeErr(err))
 		}
 		return nil, false
 	}

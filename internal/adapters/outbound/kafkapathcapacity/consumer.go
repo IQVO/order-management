@@ -330,10 +330,10 @@ func (c *Consumer) Run(ctx context.Context) error {
 				// Not a CloudEvents 1.0 event (e.g. the retired flat
 				// envelope): skip past it, never parse another shape.
 				c.Logger.WarnContext(ctx, "skipping non-CloudEvents message",
-					"topic", msg.Topic, "offset", msg.Offset, "partition", msg.Partition, "error", err)
+					"topic", msg.Topic, "offset", msg.Offset, "partition", msg.Partition, "error", sanitizeErr(err))
 			} else {
 				c.Logger.ErrorContext(ctx, "path capacity message handling failed",
-					"topic", msg.Topic, "offset", msg.Offset, "partition", msg.Partition, "error", err)
+					"topic", msg.Topic, "offset", msg.Offset, "partition", msg.Partition, "error", sanitizeErr(err))
 			}
 		}
 		c.checkReady(msg)

@@ -72,7 +72,7 @@ func (uc *ApplyPlannedCapacity) Execute(ctx context.Context, req ApplyPlannedCap
 
 func (uc *ApplyPlannedCapacity) log(msg string, args ...any) {
 	if uc.Logger != nil {
-		uc.Logger.Warn(msg, args...)
+		uc.Logger.Warn(msg, sanitizeArgs(args)...)
 	}
 }
 

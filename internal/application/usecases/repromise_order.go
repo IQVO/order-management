@@ -233,6 +233,6 @@ func promiseMoved(current, fresh order.Promise) bool {
 
 func (uc *RepromiseOrder) log(msg string, args ...any) {
 	if uc.Logger != nil {
-		uc.Logger.Warn(msg, args...)
+		uc.Logger.Warn(msg, sanitizeArgs(args)...)
 	}
 }
