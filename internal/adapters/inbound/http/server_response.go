@@ -21,7 +21,7 @@ func (s *Server) orderResponse(ctx context.Context, o *order.Order) orderRespons
 	windows, err := s.CapacityConstraints.For(ctx, o)
 	if err != nil {
 		slog.WarnContext(ctx, "capacity constraint lookup failed; omitting annotation",
-			"order_id", logsanitize.Sanitize(o.ID().String()), "error", err)
+			"order_id", logsanitize.Sanitize(o.ID().String()), "error", logsanitize.Sanitize(err.Error()))
 		return resp
 	}
 	if len(windows) == 0 {
