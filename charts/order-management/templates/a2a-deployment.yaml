@@ -68,7 +68,7 @@ spec:
               value: {{ .Values.a2a.httpAddr | quote }}
             # The Agent Card must advertise a URL agent clients can dial
             # (ADR-0046): default to this release's in-cluster Service DNS;
-            # a2a.agentUrl overrides it (e.g. with the Kong path).
+            # a2a.agentUrl overrides it (e.g. with the Agent Router path).
             - name: A2A_AGENT_URL
               value: {{ .Values.a2a.agentUrl | default (printf "http://%s.%s.svc.cluster.local:%d/" (include "order-management.a2aFullname" .) .Release.Namespace (int .Values.a2a.service.port)) | quote }}
             # cmd/a2a runs the same GetOrder read use case over the same OLTP
